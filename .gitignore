@@ -1,0 +1,24 @@
+# Rust build artifacts
+target/
+backend/target/
+backend/target-test/
+backend/target-bench/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+
+# Runtime data
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store

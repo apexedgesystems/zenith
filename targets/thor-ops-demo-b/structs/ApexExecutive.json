@@ -1,0 +1,531 @@
+{
+  "component": "ApexExecutive",
+  "structs": {
+    "ExecutiveHealthPacket": {
+      "category": "TELEMETRY",
+      "opcode": "0x0100",
+      "size": 48,
+      "fields": [
+        {
+          "name": "clockCycles",
+          "type": "uint",
+          "offset": 0,
+          "size": 8,
+          "value": 0
+        },
+        {
+          "name": "taskExecutionCycles",
+          "type": "uint",
+          "offset": 8,
+          "size": 8,
+          "value": 0
+        },
+        {
+          "name": "frameOverrunCount",
+          "type": "uint",
+          "offset": 16,
+          "size": 8,
+          "value": 0
+        },
+        {
+          "name": "watchdogWarningCount",
+          "type": "uint",
+          "offset": 24,
+          "size": 8,
+          "value": 0
+        },
+        {
+          "name": "clockFrequencyHz",
+          "type": "uint",
+          "offset": 32,
+          "size": 2,
+          "value": 0
+        },
+        {
+          "name": "rtMode",
+          "type": "uint",
+          "offset": 34,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "flags",
+          "type": "uint",
+          "offset": 35,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "commandsProcessed",
+          "type": "uint",
+          "offset": 36,
+          "size": 8,
+          "value": 0
+        },
+        {
+          "name": "reserved",
+          "type": "uint",
+          "offset": 44,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "constexpr",
+          "type": "static",
+          "offset": 48,
+          "size": 0,
+          "value": null
+        },
+        {
+          "name": "constexpr",
+          "type": "static",
+          "offset": 48,
+          "size": 0,
+          "value": null
+        },
+        {
+          "name": "constexpr",
+          "type": "static",
+          "offset": 48,
+          "size": 0,
+          "value": null
+        },
+        {
+          "name": "constexpr",
+          "type": "static",
+          "offset": 48,
+          "size": 0,
+          "value": null
+        },
+        {
+          "name": "constexpr",
+          "type": "static",
+          "offset": 48,
+          "size": 0,
+          "value": null
+        },
+        {
+          "name": "constexpr",
+          "type": "static",
+          "offset": 48,
+          "size": 0,
+          "value": null
+        },
+        {
+          "name": "setFlag(std::uint8_t",
+          "type": "void",
+          "offset": 48,
+          "size": 0,
+          "value": null
+        },
+        {
+          "name": "clearFlag(std::uint8_t",
+          "type": "void",
+          "offset": 48,
+          "size": 0,
+          "value": null
+        },
+        {
+          "name": "bool",
+          "type": "[[nodiscard]]",
+          "offset": 48,
+          "size": 0,
+          "value": null
+        }
+      ]
+    },
+    "ExecutiveThreadConfigTprm": {
+      "category": "TUNABLE_PARAM",
+      "size": 66,
+      "fields": [
+        {
+          "name": "startup",
+          "type": "struct",
+          "offset": 0,
+          "size": 11,
+          "fields": [
+            {
+              "policy": {
+                "type": "int",
+                "size": 1,
+                "value": null
+              }
+            },
+            {
+              "priority": {
+                "type": "int",
+                "size": 1,
+                "value": null
+              }
+            },
+            {
+              "affinityCount": {
+                "type": "uint",
+                "size": 1,
+                "value": null
+              }
+            },
+            {
+              "affinity": {
+                "type": "array",
+                "element_type": "uint",
+                "dims": [8],
+                "size": 8,
+                "value": []
+              }
+            }
+          ]
+        },
+        {
+          "name": "shutdown",
+          "type": "struct",
+          "offset": 11,
+          "size": 11,
+          "fields": [
+            {
+              "policy": {
+                "type": "int",
+                "size": 1,
+                "value": null
+              }
+            },
+            {
+              "priority": {
+                "type": "int",
+                "size": 1,
+                "value": null
+              }
+            },
+            {
+              "affinityCount": {
+                "type": "uint",
+                "size": 1,
+                "value": null
+              }
+            },
+            {
+              "affinity": {
+                "type": "array",
+                "element_type": "uint",
+                "dims": [8],
+                "size": 8,
+                "value": []
+              }
+            }
+          ]
+        },
+        {
+          "name": "clock",
+          "type": "struct",
+          "offset": 22,
+          "size": 11,
+          "fields": [
+            {
+              "policy": {
+                "type": "int",
+                "size": 1,
+                "value": null
+              }
+            },
+            {
+              "priority": {
+                "type": "int",
+                "size": 1,
+                "value": null
+              }
+            },
+            {
+              "affinityCount": {
+                "type": "uint",
+                "size": 1,
+                "value": null
+              }
+            },
+            {
+              "affinity": {
+                "type": "array",
+                "element_type": "uint",
+                "dims": [8],
+                "size": 8,
+                "value": []
+              }
+            }
+          ]
+        },
+        {
+          "name": "taskExecution",
+          "type": "struct",
+          "offset": 33,
+          "size": 11,
+          "fields": [
+            {
+              "policy": {
+                "type": "int",
+                "size": 1,
+                "value": null
+              }
+            },
+            {
+              "priority": {
+                "type": "int",
+                "size": 1,
+                "value": null
+              }
+            },
+            {
+              "affinityCount": {
+                "type": "uint",
+                "size": 1,
+                "value": null
+              }
+            },
+            {
+              "affinity": {
+                "type": "array",
+                "element_type": "uint",
+                "dims": [8],
+                "size": 8,
+                "value": []
+              }
+            }
+          ]
+        },
+        {
+          "name": "externalIO",
+          "type": "struct",
+          "offset": 44,
+          "size": 11,
+          "fields": [
+            {
+              "policy": {
+                "type": "int",
+                "size": 1,
+                "value": null
+              }
+            },
+            {
+              "priority": {
+                "type": "int",
+                "size": 1,
+                "value": null
+              }
+            },
+            {
+              "affinityCount": {
+                "type": "uint",
+                "size": 1,
+                "value": null
+              }
+            },
+            {
+              "affinity": {
+                "type": "array",
+                "element_type": "uint",
+                "dims": [8],
+                "size": 8,
+                "value": []
+              }
+            }
+          ]
+        },
+        {
+          "name": "watchdog",
+          "type": "struct",
+          "offset": 55,
+          "size": 11,
+          "fields": [
+            {
+              "policy": {
+                "type": "int",
+                "size": 1,
+                "value": null
+              }
+            },
+            {
+              "priority": {
+                "type": "int",
+                "size": 1,
+                "value": null
+              }
+            },
+            {
+              "affinityCount": {
+                "type": "uint",
+                "size": 1,
+                "value": null
+              }
+            },
+            {
+              "affinity": {
+                "type": "array",
+                "element_type": "uint",
+                "dims": [8],
+                "size": 8,
+                "value": []
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "ExecutiveTunableParams": {
+      "category": "TUNABLE_PARAM",
+      "size": 48,
+      "fields": [
+        {
+          "name": "clockFrequencyHz",
+          "type": "uint",
+          "offset": 0,
+          "size": 2,
+          "value": 100
+        },
+        {
+          "name": "reserved0",
+          "type": "uint",
+          "offset": 2,
+          "size": 2,
+          "value": 0
+        },
+        {
+          "name": "rtMode",
+          "type": "uint",
+          "offset": 4,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "reserved1",
+          "type": "uint",
+          "offset": 5,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "reserved2",
+          "type": "uint",
+          "offset": 6,
+          "size": 2,
+          "value": 0
+        },
+        {
+          "name": "rtMaxLagTicks",
+          "type": "uint",
+          "offset": 8,
+          "size": 4,
+          "value": 10
+        },
+        {
+          "name": "startupMode",
+          "type": "uint",
+          "offset": 12,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "reserved3",
+          "type": "uint",
+          "offset": 13,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "reserved4",
+          "type": "uint",
+          "offset": 14,
+          "size": 2,
+          "value": 0
+        },
+        {
+          "name": "startupDelaySeconds",
+          "type": "uint",
+          "offset": 16,
+          "size": 4,
+          "value": 1
+        },
+        {
+          "name": "shutdownMode",
+          "type": "uint",
+          "offset": 20,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "skipCleanup",
+          "type": "uint",
+          "offset": 21,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "reserved5",
+          "type": "uint",
+          "offset": 22,
+          "size": 2,
+          "value": 0
+        },
+        {
+          "name": "shutdownAfterSeconds",
+          "type": "uint",
+          "offset": 24,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "reserved6",
+          "type": "uint",
+          "offset": 28,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "shutdownAtCycle",
+          "type": "uint",
+          "offset": 32,
+          "size": 8,
+          "value": 0
+        },
+        {
+          "name": "watchdogIntervalMs",
+          "type": "uint",
+          "offset": 40,
+          "size": 4,
+          "value": 1000
+        },
+        {
+          "name": "profilingSampleEveryN",
+          "type": "uint",
+          "offset": 44,
+          "size": 4,
+          "value": 0
+        }
+      ]
+    }
+  },
+  "enums": {
+    "Opcode": {
+      "underlying_type": "uint16_t",
+      "values": {
+        "CMD_FAST_FORWARD": 275,
+        "CMD_LOCK_COMPONENT": 276,
+        "CMD_PAUSE": 272,
+        "CMD_RESUME": 273,
+        "CMD_SHUTDOWN": 274,
+        "CMD_SLEEP": 278,
+        "CMD_UNLOCK_COMPONENT": 277,
+        "CMD_WAKE": 279,
+        "EXEC_NOOP": 257,
+        "GET_CLOCK_CYCLES": 260,
+        "GET_CLOCK_FREQ": 258,
+        "GET_DATA_CATALOG": 321,
+        "GET_HEALTH": 256,
+        "GET_REGISTRY": 320,
+        "GET_RT_MODE": 259,
+        "INSPECT": 304,
+        "RELOAD_EXECUTIVE": 295,
+        "RELOAD_LIBRARY": 294,
+        "RELOAD_TPRM": 293,
+        "SET_VERBOSITY": 289
+      }
+    }
+  }
+}

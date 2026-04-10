@@ -1,0 +1,30 @@
+services:
+  # Production runtime
+  zenith:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - zenith-data:/var/lib/zenith
+      - ./config.toml:/etc/zenith/config.toml:ro
+      - ./targets:/data/targets:ro
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO /dev/null http://localhost:8080/ || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  # Development (build, test, lint, bench)
+  dev:
+    build:
+      context: .
+      dockerfile: docker/dev.Dockerfile
+    volumes:
+      - .:/build
+    working_dir: /build
+    command: bash
+
+volumes:
+  zenith-data:

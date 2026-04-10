@@ -1,0 +1,43 @@
+# Zenith Configuration
+
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[auth]
+enabled = false
+secret = "change-me-in-production"
+
+[storage]
+path = "./data/zenith.db"
+retention_hours = 24
+# Path to struct dictionaries (JSON files from apex_data_gen)
+# structs_dir = "/path/to/apex_data_db"
+
+# Target: Raspberry Pi
+[[targets]]
+name = "Pi - Ops Demo"
+host = "raspberrypi.local"
+port = 9000
+auto_connect = false
+
+# Target: NVIDIA AGX Thor - Instance A
+# [[targets]]
+# name = "Thor - Instance A"
+# host = "192.168.1.40"
+# port = 9000
+# auto_connect = false
+
+# Target: NVIDIA AGX Thor - Instance B
+# [[targets]]
+# name = "Thor - Instance B"
+# host = "192.168.1.40"
+# port = 9001
+# auto_connect = false
+
+# Target: Local SIL instance
+# [[targets]]
+# name = "Local SIL"
+# host = "localhost"
+# port = 9000
+# auto_connect = false

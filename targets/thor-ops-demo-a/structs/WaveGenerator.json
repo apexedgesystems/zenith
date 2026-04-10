@@ -1,0 +1,249 @@
+{
+  "component": "WaveGenerator",
+  "structs": {
+    "WaveGenHealthTlm": {
+      "category": "TELEMETRY",
+      "opcode": "0x0100",
+      "size": 32,
+      "fields": [
+        {
+          "name": "waveType",
+          "type": "uint",
+          "offset": 0,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "reserved",
+          "type": "array",
+          "offset": 1,
+          "size": 3,
+          "value": [],
+          "element_type": "uint",
+          "dims": [3]
+        },
+        {
+          "name": "frequency",
+          "type": "float",
+          "offset": 4,
+          "size": 4,
+          "value": "0.0F"
+        },
+        {
+          "name": "amplitude",
+          "type": "float",
+          "offset": 8,
+          "size": 4,
+          "value": "0.0F"
+        },
+        {
+          "name": "output",
+          "type": "float",
+          "offset": 12,
+          "size": 4,
+          "value": "0.0F"
+        },
+        {
+          "name": "peakPos",
+          "type": "float",
+          "offset": 16,
+          "size": 4,
+          "value": "0.0F"
+        },
+        {
+          "name": "peakNeg",
+          "type": "float",
+          "offset": 20,
+          "size": 4,
+          "value": "0.0F"
+        },
+        {
+          "name": "rms",
+          "type": "float",
+          "offset": 24,
+          "size": 4,
+          "value": "0.0F"
+        },
+        {
+          "name": "sampleCount",
+          "type": "uint",
+          "offset": 28,
+          "size": 4,
+          "value": 0
+        }
+      ]
+    },
+    "WaveGenOutput": {
+      "category": "OUTPUT",
+      "size": 8,
+      "fields": [
+        {
+          "name": "output",
+          "type": "float",
+          "offset": 0,
+          "size": 4,
+          "value": "0.0F"
+        },
+        {
+          "name": "phase",
+          "type": "float",
+          "offset": 4,
+          "size": 4,
+          "value": "0.0F"
+        }
+      ]
+    },
+    "WaveGenState": {
+      "category": "STATE",
+      "size": 48,
+      "fields": [
+        {
+          "name": "phase",
+          "type": "float",
+          "offset": 0,
+          "size": 8,
+          "value": 0.0
+        },
+        {
+          "name": "rmsAccum",
+          "type": "float",
+          "offset": 8,
+          "size": 8,
+          "value": 0.0
+        },
+        {
+          "name": "output",
+          "type": "float",
+          "offset": 16,
+          "size": 4,
+          "value": "0.0F"
+        },
+        {
+          "name": "peakPos",
+          "type": "float",
+          "offset": 20,
+          "size": 4,
+          "value": "0.0F"
+        },
+        {
+          "name": "peakNeg",
+          "type": "float",
+          "offset": 24,
+          "size": 4,
+          "value": "0.0F"
+        },
+        {
+          "name": "noiseSeed",
+          "type": "uint",
+          "offset": 28,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "sampleCount",
+          "type": "uint",
+          "offset": 32,
+          "size": 8,
+          "value": 0
+        },
+        {
+          "name": "stepCount",
+          "type": "uint",
+          "offset": 40,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "tlmCount",
+          "type": "uint",
+          "offset": 44,
+          "size": 4,
+          "value": 0
+        }
+      ]
+    },
+    "WaveGenTunableParams": {
+      "category": "TUNABLE_PARAM",
+      "size": 32,
+      "fields": [
+        {
+          "name": "frequency",
+          "type": "float",
+          "offset": 0,
+          "size": 4,
+          "value": "1.0F"
+        },
+        {
+          "name": "amplitude",
+          "type": "float",
+          "offset": 4,
+          "size": 4,
+          "value": "1.0F"
+        },
+        {
+          "name": "dcOffset",
+          "type": "float",
+          "offset": 8,
+          "size": 4,
+          "value": "0.0F"
+        },
+        {
+          "name": "phaseOffset",
+          "type": "float",
+          "offset": 12,
+          "size": 4,
+          "value": "0.0F"
+        },
+        {
+          "name": "noiseAmplitude",
+          "type": "float",
+          "offset": 16,
+          "size": 4,
+          "value": "0.0F"
+        },
+        {
+          "name": "dutyCycle",
+          "type": "float",
+          "offset": 20,
+          "size": 4,
+          "value": "0.5F"
+        },
+        {
+          "name": "waveType",
+          "type": "uint",
+          "offset": 24,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "reserved",
+          "type": "array",
+          "offset": 25,
+          "size": 3,
+          "value": [],
+          "element_type": "uint",
+          "dims": [3]
+        },
+        {
+          "name": "reserved2",
+          "type": "float",
+          "offset": 28,
+          "size": 4,
+          "value": "0.0F"
+        }
+      ]
+    }
+  },
+  "enums": {
+    "WaveType": {
+      "underlying_type": "uint8_t",
+      "values": {
+        "COMPOSITE": 4,
+        "SAWTOOTH": 3,
+        "SINE": 0,
+        "SQUARE": 1,
+        "TRIANGLE": 2
+      }
+    }
+  }
+}

@@ -1,0 +1,49 @@
+# ==============================================================================
+# CI -- Build, test, and lint on push/PR to main
+#
+# Runs all checks inside the dev Docker Compose service (Rust + Node).
+# The production image is built as a final step to verify the multi-stage
+# Dockerfile stays valid.
+# ==============================================================================
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test, Lint, Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build dev image
+        run: docker compose build dev
+
+      - name: Backend tests
+        run: docker compose run --rm -T dev bash -c 'cd backend && cargo test --lib'
+
+      - name: Frontend tests
+        run: docker compose run --rm -T dev bash -c 'cd frontend && npm ci --silent && npm run test'
+
+      - name: Clippy
+        run: docker compose run --rm -T dev bash -c 'cd backend && cargo clippy --lib --bins -- -D warnings'
+
+      - name: Cargo fmt check
+        run: docker compose run --rm -T dev bash -c 'cd backend && cargo fmt -- --check'
+
+      - name: Build production image
+        run: docker compose build zenith

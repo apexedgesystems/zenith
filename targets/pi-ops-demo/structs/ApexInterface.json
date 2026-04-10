@@ -1,0 +1,216 @@
+{
+  "component": "ApexInterface",
+  "structs": {
+    "ApexInterfaceTunables": {
+      "category": "TUNABLE_PARAM",
+      "size": 80,
+      "fields": [
+        {
+          "name": "host",
+          "type": "array",
+          "offset": 0,
+          "size": 64,
+          "value": "APEX_DEFAULT_HOST_ARR",
+          "element_type": "char",
+          "dims": [64]
+        },
+        {
+          "name": "port",
+          "type": "uint",
+          "offset": 64,
+          "size": 2,
+          "value": "APEX_DEFAULT_PORT"
+        },
+        {
+          "name": "framing",
+          "type": "uint",
+          "offset": 66,
+          "size": 1,
+          "value": "FramingType::SLIP"
+        },
+        {
+          "name": "crcEnabled",
+          "type": "uint",
+          "offset": 67,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "cmdQueueCapacity",
+          "type": "uint",
+          "offset": 68,
+          "size": 2,
+          "value": 32
+        },
+        {
+          "name": "tlmQueueCapacity",
+          "type": "uint",
+          "offset": 70,
+          "size": 2,
+          "value": 64
+        },
+        {
+          "name": "maxPayloadBytes",
+          "type": "uint",
+          "offset": 72,
+          "size": 2,
+          "value": 4096
+        },
+        {
+          "name": "pollTimeoutMs",
+          "type": "uint",
+          "offset": 74,
+          "size": 4,
+          "value": 10
+        },
+        {
+          "name": "droppedFrameReportThreshold{",
+          "type": "uint",
+          "offset": 78,
+          "size": 2,
+          "value": null
+        }
+      ]
+    },
+    "InterfaceHealthTlm": {
+      "category": "TELEMETRY",
+      "opcode": "0x0100",
+      "size": 56,
+      "fields": [
+        {
+          "name": "packetsReceived",
+          "type": "uint",
+          "offset": 0,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "packetsInvalid",
+          "type": "uint",
+          "offset": 4,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "systemCommands",
+          "type": "uint",
+          "offset": 8,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "routedCommands",
+          "type": "uint",
+          "offset": 12,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "responsesQueued",
+          "type": "uint",
+          "offset": 16,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "telemetryFrames",
+          "type": "uint",
+          "offset": 20,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "framingErrors",
+          "type": "uint",
+          "offset": 24,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "internalCommandsSent",
+          "type": "uint",
+          "offset": 28,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "internalTelemetrySent",
+          "type": "uint",
+          "offset": 32,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "internalCommandsFailed",
+          "type": "uint",
+          "offset": 36,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "multicastCommandsSent",
+          "type": "uint",
+          "offset": 40,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "broadcastCommandsSent",
+          "type": "uint",
+          "offset": 44,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "cmdQueueOverflows",
+          "type": "uint",
+          "offset": 48,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "tlmQueueOverflows",
+          "type": "uint",
+          "offset": 52,
+          "size": 4,
+          "value": 0
+        }
+      ]
+    }
+  },
+  "enums": {
+    "FramingType": {
+      "underlying_type": "uint8_t",
+      "values": {
+        "COBS": 1,
+        "SLIP": 0
+      }
+    },
+    "InterfaceTlmOpcode": {
+      "underlying_type": "uint16_t",
+      "values": {
+        "GET_STATS": 256
+      }
+    },
+    "Status": {
+      "underlying_type": "uint8_t",
+      "values": {
+        "EOE_INTERFACE": 14,
+        "ERROR_ALREADY_INITIALIZED": 2,
+        "ERROR_BIND_OR_LISTEN": 5,
+        "ERROR_CHANNEL_CLOSED": 6,
+        "ERROR_COMPONENT_NOT_FOUND": 12,
+        "ERROR_CONFIG": 3,
+        "ERROR_CREATE_SERVER": 4,
+        "ERROR_INVALID_PACKET": 9,
+        "ERROR_NOT_INITIALIZED": 1,
+        "ERROR_QUEUE_FULL": 11,
+        "ERROR_RECV_FAILED": 8,
+        "ERROR_ROUTE_FAILED": 10,
+        "ERROR_SEND_FAILED": 7,
+        "SUCCESS": 0,
+        "WARN_QUEUE_OVERFLOW": 13
+      }
+    }
+  }
+}

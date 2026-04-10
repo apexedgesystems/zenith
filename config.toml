@@ -1,0 +1,46 @@
+# Zenith Configuration
+
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[auth]
+enabled = false
+secret = "change-me-in-production"
+
+[storage]
+path = "./data/zenith.db"
+retention_hours = 24
+
+# Target: Ops Demo on Raspberry Pi (1 Hz sine + 5 Hz square)
+[[targets]]
+name = "Pi - Ops Demo"
+host = "192.168.1.119"
+port = 9000
+auto_connect = false
+manifest = "/data/targets/pi-ops-demo/app_manifest.json"
+structs_dir = "/data/targets/pi-ops-demo/structs"
+telemetry_config = "/data/targets/pi-ops-demo/telemetry.json"
+commands_config = "/data/targets/pi-ops-demo/commands.json"
+
+# Target: Thor Instance A (1 Hz sine + 5 Hz square, cores 0-3)
+[[targets]]
+name = "Thor - Instance A"
+host = "192.168.1.40"
+port = 9000
+auto_connect = false
+manifest = "/data/targets/thor-ops-demo-a/app_manifest.json"
+structs_dir = "/data/targets/thor-ops-demo-a/structs"
+telemetry_config = "/data/targets/thor-ops-demo-a/telemetry.json"
+commands_config = "/data/targets/thor-ops-demo-a/commands.json"
+
+# Target: Thor Instance B (3 Hz triangle + 7 Hz sawtooth, cores 4-7)
+[[targets]]
+name = "Thor - Instance B"
+host = "192.168.1.40"
+port = 9001
+auto_connect = false
+manifest = "/data/targets/thor-ops-demo-b/app_manifest.json"
+structs_dir = "/data/targets/thor-ops-demo-b/structs"
+telemetry_config = "/data/targets/thor-ops-demo-b/telemetry.json"
+commands_config = "/data/targets/thor-ops-demo-b/commands.json"

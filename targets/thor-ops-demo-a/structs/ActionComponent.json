@@ -1,0 +1,272 @@
+{
+  "component": "ActionComponent",
+  "structs": {
+    "ActionEngineTprm": {
+      "category": "TUNABLE_PARAM",
+      "size": 0,
+      "fields": [
+        {
+          "name": "watchpoints",
+          "type": "array",
+          "offset": 0,
+          "size": 0,
+          "value": [],
+          "element_type": "WatchpointTprm",
+          "dims": [8]
+        },
+        {
+          "name": "groups",
+          "type": "array",
+          "offset": 0,
+          "size": 0,
+          "value": [],
+          "element_type": "GroupTprm",
+          "dims": [4]
+        },
+        {
+          "name": "sequences",
+          "type": "array",
+          "offset": 0,
+          "size": 0,
+          "value": [],
+          "element_type": "SequenceTprm",
+          "dims": [4]
+        },
+        {
+          "name": "notifications",
+          "type": "array",
+          "offset": 0,
+          "size": 0,
+          "value": [],
+          "element_type": "NotificationTprm",
+          "dims": [8]
+        },
+        {
+          "name": "actions",
+          "type": "array",
+          "offset": 0,
+          "size": 0,
+          "value": [],
+          "element_type": "TimedActionTprm",
+          "dims": [16]
+        }
+      ]
+    },
+    "ActionHealthTlm": {
+      "category": "TELEMETRY",
+      "opcode": "0x0100",
+      "size": 56,
+      "fields": [
+        {
+          "name": "totalCycles",
+          "type": "uint",
+          "offset": 0,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "watchpointsFired",
+          "type": "uint",
+          "offset": 4,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "groupsFired",
+          "type": "uint",
+          "offset": 8,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "actionsApplied",
+          "type": "uint",
+          "offset": 12,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "commandsRouted",
+          "type": "uint",
+          "offset": 16,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "armControlsApplied",
+          "type": "uint",
+          "offset": 20,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "sequenceSteps",
+          "type": "uint",
+          "offset": 24,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "sequenceTimeouts",
+          "type": "uint",
+          "offset": 28,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "sequenceRetries",
+          "type": "uint",
+          "offset": 32,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "sequenceAborts",
+          "type": "uint",
+          "offset": 36,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "notificationsInvoked",
+          "type": "uint",
+          "offset": 40,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "resolveFailures",
+          "type": "uint",
+          "offset": 44,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "rtsLoaded",
+          "type": "uint",
+          "offset": 48,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "atsLoaded",
+          "type": "uint",
+          "offset": 52,
+          "size": 4,
+          "value": 0
+        }
+      ]
+    },
+    "EngineStats": {
+      "category": "STATE",
+      "size": 0,
+      "fields": [],
+      "_warning": "Struct 'EngineStats' not found in headers"
+    },
+    "WatchpointTprm": {
+      "category": "TUNABLE_PARAM",
+      "size": 26,
+      "fields": [
+        {
+          "name": "targetFullUid",
+          "type": "uint",
+          "offset": 0,
+          "size": 4,
+          "value": null
+        },
+        {
+          "name": "targetCategory",
+          "type": "uint",
+          "offset": 4,
+          "size": 1,
+          "value": null
+        },
+        {
+          "name": "targetByteOffset",
+          "type": "uint",
+          "offset": 5,
+          "size": 2,
+          "value": null
+        },
+        {
+          "name": "targetByteLen",
+          "type": "uint",
+          "offset": 7,
+          "size": 1,
+          "value": null
+        },
+        {
+          "name": "predicate",
+          "type": "uint",
+          "offset": 8,
+          "size": 1,
+          "value": null
+        },
+        {
+          "name": "dataType",
+          "type": "uint",
+          "offset": 9,
+          "size": 1,
+          "value": null
+        },
+        {
+          "name": "threshold",
+          "type": "array",
+          "offset": 10,
+          "size": 8,
+          "value": [],
+          "element_type": "uint",
+          "dims": [8]
+        },
+        {
+          "name": "eventId",
+          "type": "uint",
+          "offset": 18,
+          "size": 2,
+          "value": null
+        },
+        {
+          "name": "minFireCount",
+          "type": "uint",
+          "offset": 20,
+          "size": 2,
+          "value": null
+        },
+        {
+          "name": "armed",
+          "type": "uint",
+          "offset": 22,
+          "size": 1,
+          "value": null
+        },
+        {
+          "name": "reserved",
+          "type": "array",
+          "offset": 23,
+          "size": 3,
+          "value": [],
+          "element_type": "uint",
+          "dims": [3]
+        }
+      ]
+    }
+  },
+  "enums": {
+    "ActionTlmOpcode": {
+      "underlying_type": "uint16_t",
+      "values": {
+        "GET_STATS": 256
+      }
+    },
+    "Status": {
+      "underlying_type": "uint8_t",
+      "values": {
+        "EOE_ACTION": 4,
+        "ERROR_NO_RESOLVER": 1,
+        "ERROR_QUEUE_FULL": 2,
+        "SUCCESS": 0,
+        "WARN_RESOLVE_FAILURES": 3
+      }
+    }
+  }
+}

@@ -1,0 +1,300 @@
+{
+  "component": "SystemMonitor",
+  "structs": {
+    "SysMonHealthTlm": {
+      "category": "TELEMETRY",
+      "opcode": "0x0100",
+      "size": 88,
+      "fields": [
+        {
+          "name": "sampleCount",
+          "type": "uint",
+          "offset": 0,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "warnCount",
+          "type": "uint",
+          "offset": 4,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "critCount",
+          "type": "uint",
+          "offset": 8,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "monitoredCoreCount",
+          "type": "uint",
+          "offset": 12,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "pad0",
+          "type": "uint",
+          "offset": 13,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "cpuTempC",
+          "type": "int",
+          "offset": 14,
+          "size": 2,
+          "value": -1
+        },
+        {
+          "name": "coreLoad",
+          "type": "array",
+          "offset": 16,
+          "size": 64,
+          "value": [],
+          "element_type": "float",
+          "dims": [16]
+        },
+        {
+          "name": "ramUsedPercent",
+          "type": "float",
+          "offset": 80,
+          "size": 4,
+          "value": "0.0F"
+        },
+        {
+          "name": "fdCount",
+          "type": "uint",
+          "offset": 84,
+          "size": 4,
+          "value": 0
+        }
+      ]
+    },
+    "SystemMonitorTunableParams": {
+      "category": "TUNABLE_PARAM",
+      "size": 122,
+      "fields": [
+        {
+          "name": "sampleRateHz",
+          "type": "float",
+          "offset": 0,
+          "size": 4,
+          "value": "1.0F"
+        },
+        {
+          "name": "cpuEnabled",
+          "type": "uint",
+          "offset": 4,
+          "size": 1,
+          "value": 1
+        },
+        {
+          "name": "monitoredCoreCount",
+          "type": "uint",
+          "offset": 5,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "monitoredCores",
+          "type": "array",
+          "offset": 6,
+          "size": 32,
+          "value": [],
+          "element_type": "uint",
+          "dims": [16]
+        },
+        {
+          "name": "cpuLoadWarnPercent",
+          "type": "float",
+          "offset": 38,
+          "size": 4,
+          "value": "80.0F"
+        },
+        {
+          "name": "cpuLoadCritPercent",
+          "type": "float",
+          "offset": 42,
+          "size": 4,
+          "value": "95.0F"
+        },
+        {
+          "name": "cpuTempWarnC",
+          "type": "int",
+          "offset": 46,
+          "size": 2,
+          "value": 75
+        },
+        {
+          "name": "cpuTempCritC",
+          "type": "int",
+          "offset": 48,
+          "size": 2,
+          "value": 85
+        },
+        {
+          "name": "cpuRtThrottleWarn",
+          "type": "uint",
+          "offset": 50,
+          "size": 4,
+          "value": 1
+        },
+        {
+          "name": "cpuRtThrottleCrit",
+          "type": "uint",
+          "offset": 54,
+          "size": 4,
+          "value": 10
+        },
+        {
+          "name": "memEnabled",
+          "type": "uint",
+          "offset": 58,
+          "size": 1,
+          "value": 1
+        },
+        {
+          "name": "memPad",
+          "type": "array",
+          "offset": 59,
+          "size": 3,
+          "value": [],
+          "element_type": "uint",
+          "dims": [3]
+        },
+        {
+          "name": "memRamWarnPercent",
+          "type": "float",
+          "offset": 62,
+          "size": 4,
+          "value": "80.0F"
+        },
+        {
+          "name": "memRamCritPercent",
+          "type": "float",
+          "offset": 66,
+          "size": 4,
+          "value": "95.0F"
+        },
+        {
+          "name": "memSwapWarnBytes",
+          "type": "uint",
+          "offset": 70,
+          "size": 8,
+          "value": 1
+        },
+        {
+          "name": "memSwapCritBytes",
+          "type": "uint",
+          "offset": 78,
+          "size": 8,
+          "value": 1
+        },
+        {
+          "name": "memFdWarnPercent",
+          "type": "float",
+          "offset": 86,
+          "size": 4,
+          "value": "70.0F"
+        },
+        {
+          "name": "memFdCritPercent",
+          "type": "float",
+          "offset": 90,
+          "size": 4,
+          "value": "90.0F"
+        },
+        {
+          "name": "gpuEnabled",
+          "type": "uint",
+          "offset": 94,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "gpuDeviceIndex",
+          "type": "int",
+          "offset": 95,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "gpuTempWarnC",
+          "type": "int",
+          "offset": 96,
+          "size": 2,
+          "value": 75
+        },
+        {
+          "name": "gpuTempCritC",
+          "type": "int",
+          "offset": 98,
+          "size": 2,
+          "value": 85
+        },
+        {
+          "name": "gpuPad",
+          "type": "uint",
+          "offset": 100,
+          "size": 2,
+          "value": 0
+        },
+        {
+          "name": "gpuUtilWarnPercent",
+          "type": "float",
+          "offset": 102,
+          "size": 4,
+          "value": "90.0F"
+        },
+        {
+          "name": "gpuUtilCritPercent",
+          "type": "float",
+          "offset": 106,
+          "size": 4,
+          "value": "98.0F"
+        },
+        {
+          "name": "gpuMemWarnPercent",
+          "type": "float",
+          "offset": 110,
+          "size": 4,
+          "value": "80.0F"
+        },
+        {
+          "name": "gpuMemCritPercent",
+          "type": "float",
+          "offset": 114,
+          "size": 4,
+          "value": "95.0F"
+        },
+        {
+          "name": "gpuThrottleWarnOnAny",
+          "type": "uint",
+          "offset": 118,
+          "size": 1,
+          "value": 1
+        },
+        {
+          "name": "gpuPad2",
+          "type": "array",
+          "offset": 119,
+          "size": 3,
+          "value": [],
+          "element_type": "uint",
+          "dims": [3]
+        }
+      ]
+    }
+  },
+  "enums": {
+    "SysMonTlmOpcode": {
+      "underlying_type": "uint16_t",
+      "values": {
+        "HEALTH_SAMPLE": 256
+      }
+    }
+  }
+}

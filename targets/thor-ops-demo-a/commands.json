@@ -1,0 +1,475 @@
+{
+  "quickCommands": [
+    {
+      "label": "NOOP",
+      "fullUid": "0x000000",
+      "opcode": "0x0000",
+      "desc": "Connectivity check"
+    },
+    {
+      "label": "Ping",
+      "fullUid": "0x000000",
+      "opcode": "0x0001",
+      "desc": "Echo test"
+    },
+    {
+      "label": "Pause",
+      "fullUid": "0x000000",
+      "opcode": "0x0110",
+      "desc": "Pause execution"
+    },
+    {
+      "label": "Resume",
+      "fullUid": "0x000000",
+      "opcode": "0x0111",
+      "desc": "Resume execution"
+    },
+    {
+      "label": "Sleep",
+      "fullUid": "0x000000",
+      "opcode": "0x0116",
+      "desc": "Enter sleep mode"
+    },
+    {
+      "label": "Wake",
+      "fullUid": "0x000000",
+      "opcode": "0x0117",
+      "desc": "Exit sleep mode"
+    }
+  ],
+  "components": {
+    "Executive": {
+      "fullUid": "0x000000",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "PING",
+          "opcode": "0x0001",
+          "desc": "Echo payload",
+          "fields": []
+        },
+        {
+          "name": "GET_HEALTH",
+          "opcode": "0x0100",
+          "desc": "Executive health (48B response)",
+          "fields": []
+        },
+        {
+          "name": "EXEC_NOOP",
+          "opcode": "0x0101",
+          "desc": "Executive connectivity check",
+          "fields": []
+        },
+        {
+          "name": "GET_CLOCK_FREQ",
+          "opcode": "0x0102",
+          "desc": "Clock frequency (2B response)",
+          "fields": []
+        },
+        {
+          "name": "GET_RT_MODE",
+          "opcode": "0x0103",
+          "desc": "RT mode (1B response)",
+          "fields": []
+        },
+        {
+          "name": "GET_CLOCK_CYCLES",
+          "opcode": "0x0104",
+          "desc": "Cycle count (8B response)",
+          "fields": []
+        },
+        {
+          "name": "CMD_PAUSE",
+          "opcode": "0x0110",
+          "desc": "Pause execution",
+          "fields": []
+        },
+        {
+          "name": "CMD_RESUME",
+          "opcode": "0x0111",
+          "desc": "Resume execution",
+          "fields": []
+        },
+        {
+          "name": "CMD_SHUTDOWN",
+          "opcode": "0x0112",
+          "desc": "Graceful shutdown",
+          "fields": []
+        },
+        {
+          "name": "CMD_FAST_FORWARD",
+          "opcode": "0x0113",
+          "desc": "Enter fast-forward mode (non-RT)",
+          "fields": []
+        },
+        {
+          "name": "CMD_LOCK_COMPONENT",
+          "opcode": "0x0114",
+          "desc": "Lock component",
+          "fields": [
+            {
+              "name": "fullUid",
+              "type": "uint32",
+              "desc": "Component to lock"
+            }
+          ]
+        },
+        {
+          "name": "CMD_UNLOCK_COMPONENT",
+          "opcode": "0x0115",
+          "desc": "Unlock component",
+          "fields": [
+            {
+              "name": "fullUid",
+              "type": "uint32",
+              "desc": "Component to unlock"
+            }
+          ]
+        },
+        {
+          "name": "CMD_SLEEP",
+          "opcode": "0x0116",
+          "desc": "Enter sleep mode",
+          "fields": []
+        },
+        {
+          "name": "CMD_WAKE",
+          "opcode": "0x0117",
+          "desc": "Exit sleep mode",
+          "fields": []
+        },
+        {
+          "name": "SET_VERBOSITY",
+          "opcode": "0x0121",
+          "desc": "Set log verbosity level",
+          "fields": [
+            {
+              "name": "level",
+              "type": "uint8",
+              "desc": "0=OFF 1=ERROR 2=WARN 3=INFO 4=DEBUG",
+              "default": 3
+            }
+          ]
+        },
+        {
+          "name": "RELOAD_TPRM",
+          "opcode": "0x0125",
+          "desc": "Reload component parameters",
+          "fields": [
+            {
+              "name": "fullUid",
+              "type": "uint32",
+              "desc": "Target component UID"
+            }
+          ]
+        },
+        {
+          "name": "RELOAD_LIBRARY",
+          "opcode": "0x0126",
+          "desc": "Hot-swap shared library",
+          "fields": [
+            {
+              "name": "fullUid",
+              "type": "uint32",
+              "desc": "Target component UID"
+            }
+          ]
+        },
+        {
+          "name": "RELOAD_EXECUTIVE",
+          "opcode": "0x0127",
+          "desc": "Restart via execve (destructive)",
+          "fields": []
+        },
+        {
+          "name": "INSPECT",
+          "opcode": "0x0130",
+          "desc": "Read registered data block",
+          "fields": [
+            {
+              "name": "fullUid",
+              "type": "uint32",
+              "desc": "Component UID"
+            },
+            {
+              "name": "category",
+              "type": "uint8",
+              "desc": "0=STATIC 1=TUNABLE 2=STATE 3=INPUT 4=OUTPUT"
+            },
+            {
+              "name": "offset",
+              "type": "uint16",
+              "desc": "Byte offset",
+              "default": 0
+            },
+            {
+              "name": "length",
+              "type": "uint16",
+              "desc": "Byte count (0=all)",
+              "default": 0
+            }
+          ]
+        },
+        {
+          "name": "GET_REGISTRY",
+          "opcode": "0x0140",
+          "desc": "Dump component registry (44B/entry)",
+          "fields": []
+        },
+        {
+          "name": "GET_DATA_CATALOG",
+          "opcode": "0x0141",
+          "desc": "Dump data entry catalog (44B/entry)",
+          "fields": []
+        }
+      ]
+    },
+    "Scheduler": {
+      "fullUid": "0x000100",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "GET_HEALTH",
+          "opcode": "0x0100",
+          "desc": "Executive health (48B response)",
+          "fields": []
+        }
+      ]
+    },
+    "FileSystem": {
+      "fullUid": "0x000200",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "GET_HEALTH",
+          "opcode": "0x0100",
+          "desc": "Component health telemetry",
+          "fields": []
+        }
+      ]
+    },
+    "Registry": {
+      "fullUid": "0x000300",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "GET_HEALTH",
+          "opcode": "0x0100",
+          "desc": "Component health telemetry",
+          "fields": []
+        }
+      ]
+    },
+    "Interface": {
+      "fullUid": "0x000400",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "GET_HEALTH",
+          "opcode": "0x0100",
+          "desc": "Component health telemetry",
+          "fields": []
+        }
+      ]
+    },
+    "Action": {
+      "fullUid": "0x000500",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "GET_HEALTH",
+          "opcode": "0x0100",
+          "desc": "Component health telemetry",
+          "fields": []
+        }
+      ]
+    },
+    "WaveGenerator #0": {
+      "fullUid": "0x00D000",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "SINE",
+          "opcode": "0x0000",
+          "desc": "Sine",
+          "fields": []
+        },
+        {
+          "name": "SQUARE",
+          "opcode": "0x0001",
+          "desc": "Square",
+          "fields": []
+        },
+        {
+          "name": "TRIANGLE",
+          "opcode": "0x0002",
+          "desc": "Triangle",
+          "fields": []
+        },
+        {
+          "name": "SAWTOOTH",
+          "opcode": "0x0003",
+          "desc": "Sawtooth",
+          "fields": []
+        },
+        {
+          "name": "COMPOSITE",
+          "opcode": "0x0004",
+          "desc": "Composite",
+          "fields": []
+        }
+      ]
+    },
+    "WaveGenerator #1": {
+      "fullUid": "0x00D001",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "SINE",
+          "opcode": "0x0000",
+          "desc": "Sine",
+          "fields": []
+        },
+        {
+          "name": "SQUARE",
+          "opcode": "0x0001",
+          "desc": "Square",
+          "fields": []
+        },
+        {
+          "name": "TRIANGLE",
+          "opcode": "0x0002",
+          "desc": "Triangle",
+          "fields": []
+        },
+        {
+          "name": "SAWTOOTH",
+          "opcode": "0x0003",
+          "desc": "Sawtooth",
+          "fields": []
+        },
+        {
+          "name": "COMPOSITE",
+          "opcode": "0x0004",
+          "desc": "Composite",
+          "fields": []
+        }
+      ]
+    },
+    "TelemetryManager": {
+      "fullUid": "0x00C900",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "GET_STATS",
+          "opcode": "0x0100",
+          "desc": "Get Stats",
+          "fields": []
+        },
+        {
+          "name": "ADD_SUBSCRIPTION",
+          "opcode": "0x0200",
+          "desc": "Add Subscription",
+          "fields": []
+        },
+        {
+          "name": "REMOVE_SUBSCRIPTION",
+          "opcode": "0x0201",
+          "desc": "Remove Subscription",
+          "fields": []
+        },
+        {
+          "name": "LIST_SUBSCRIPTIONS",
+          "opcode": "0x0202",
+          "desc": "List Subscriptions",
+          "fields": []
+        },
+        {
+          "name": "CLEAR_ALL",
+          "opcode": "0x0203",
+          "desc": "Clear All",
+          "fields": []
+        }
+      ]
+    },
+    "SystemMonitor": {
+      "fullUid": "0x00C800",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "HEALTH_SAMPLE",
+          "opcode": "0x0100",
+          "desc": "Health Sample",
+          "fields": []
+        }
+      ]
+    },
+    "TestPlugin": {
+      "fullUid": "0x00FA00",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "GET_HEALTH",
+          "opcode": "0x0100",
+          "desc": "Component health telemetry",
+          "fields": []
+        }
+      ]
+    }
+  }
+}
