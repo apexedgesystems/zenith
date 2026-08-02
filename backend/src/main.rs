@@ -1609,8 +1609,18 @@ async fn add_target(
     let mut st = state.write().await;
     let db_for_audit = st.db.clone();
 
-    // Generate ID
-    let id = format!("target-{}", st.targets.len());
+    // ID scheme: config-file targets are positional (target-0,
+    // target-1, ...) and stable across restarts so their DB history
+    // stays addressable. Dynamically added targets get a random
+    // suffix: any length-derived id can collide with an id already
+    // carried by another target's telemetry rows, layouts, and audit
+    // history after a remove-then-add sequence.
+    let id = loop {
+        let candidate = format!("target-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+        if !st.targets.contains_key(&candidate) {
+            break candidate;
+        }
+    };
 
     let target_dicts = loaded_dicts.unwrap_or_else(|| st.struct_dicts.clone());
 
