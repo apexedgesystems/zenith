@@ -9,13 +9,17 @@ enabled = false
 secret = "change-me-in-production"
 
 [storage]
-path = "./data/zenith.db"
+# Absolute path inside the persistent volume (zenith-data mounts at
+# /var/lib/zenith in docker-compose.yml). A relative path here resolves
+# against the container's working directory and lands outside the
+# volume, so history would not survive container recreation.
+path = "/var/lib/zenith/zenith.db"
 retention_hours = 24
 
 # Target: Ops Demo on Raspberry Pi (1 Hz sine + 5 Hz square)
 [[targets]]
 name = "Pi - Ops Demo"
-host = "192.168.1.119"
+host = "192.168.1.120"
 port = 9000
 auto_connect = false
 manifest = "/data/targets/pi-ops-demo/app_manifest.json"

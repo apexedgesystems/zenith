@@ -93,7 +93,7 @@ impl TelemetryDecoder {
             }
 
             // Sort by priority descending (OUTPUT=4, STATE=3, TELEMETRY=2, etc.)
-            candidates.sort_by(|a, b| b.0.cmp(&a.0));
+            candidates.sort_by_key(|c| std::cmp::Reverse(c.0));
 
             let claimed = claimed_fields.entry(uid).or_default();
 

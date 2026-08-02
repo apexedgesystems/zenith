@@ -9,7 +9,9 @@ enabled = false
 secret = "change-me-in-production"
 
 [storage]
-path = "./data/zenith.db"
+# Use an absolute path inside the persistent volume when running under
+# docker compose (zenith-data mounts at /var/lib/zenith).
+path = "/var/lib/zenith/zenith.db"
 retention_hours = 24
 # Path to struct dictionaries (JSON files from apex_data_gen)
 # structs_dir = "/path/to/apex_data_db"

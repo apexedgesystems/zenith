@@ -6,7 +6,7 @@
 //! Performance tuning:
 //!   - WAL mode for non-blocking reads during writes
 //!   - Prepared statement caching for hot paths
-//!   - Covering index on (target_id, channel, timestamp_ms, value)
+//!   - Lookup index on (target_id, channel, timestamp_ms DESC)
 //!   - Separate latest-value table for O(1) latest queries
 //!   - Batch inserts within a single transaction
 //!   - page_size=4096, mmap_size=256MB for large dataset performance
@@ -80,7 +80,7 @@ impl TelemetryDb {
         // Main telemetry table
         writer.execute_batch(
             "CREATE TABLE IF NOT EXISTS telemetry (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id INTEGER PRIMARY KEY,
                 target_id TEXT NOT NULL,
                 timestamp_ms INTEGER NOT NULL,
                 channel TEXT NOT NULL,
@@ -163,9 +163,14 @@ impl TelemetryDb {
     }
 
     /// Apply the standard pragmas to a connection (writer or reader).
+    /// busy_timeout is load-bearing: with one writer, up to 8 readers,
+    /// checkpoints, and incremental_vacuum sharing the file, a locked
+    /// database must retry briefly instead of surfacing SQLITE_BUSY to
+    /// the ingest path.
     fn tune(conn: &Connection) -> Result<(), DbError> {
         conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
+            "PRAGMA busy_timeout=5000;
+             PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
              PRAGMA page_size=4096;
              PRAGMA mmap_size=268435456;
@@ -218,13 +223,17 @@ impl TelemetryDb {
             return Ok(());
         }
 
-        let conn = self.writer.lock().map_err(|_| DbError::Lock)?;
+        let mut conn = self.writer.lock().map_err(|_| DbError::Lock)?;
 
-        conn.execute("BEGIN", [])?;
+        // The transaction must be RAII (rolls back on drop). A raw BEGIN
+        // with `?` early-returns leaves the transaction open on the pooled
+        // writer connection, and every later insert_batch then fails with
+        // "cannot start a transaction within a transaction" until restart.
+        let tx = conn.transaction()?;
 
         // Insert into main table
         {
-            let mut stmt = conn.prepare_cached(
+            let mut stmt = tx.prepare_cached(
                 "INSERT INTO telemetry (target_id, timestamp_ms, channel, value) \
                  VALUES (?1, ?2, ?3, ?4)",
             )?;
@@ -240,7 +249,7 @@ impl TelemetryDb {
 
         // Update latest values table (UPSERT)
         {
-            let mut stmt = conn.prepare_cached(
+            let mut stmt = tx.prepare_cached(
                 "INSERT INTO telemetry_latest (target_id, channel, timestamp_ms, value) \
                  VALUES (?1, ?2, ?3, ?4) \
                  ON CONFLICT(target_id, channel) DO UPDATE SET \
@@ -258,7 +267,7 @@ impl TelemetryDb {
             }
         }
 
-        conn.execute("COMMIT", [])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -380,22 +389,26 @@ impl TelemetryDb {
             params![cutoff as i64],
         )?;
 
-        // Clean up old user-created layouts (keep last 100 per target, config layouts always kept)
-        conn.execute_batch(
-            "DELETE FROM telemetry_plots WHERE layout_id IN (
-                SELECT id FROM telemetry_layouts
-                WHERE source = 'user'
-                AND id NOT IN (
-                    SELECT id FROM telemetry_layouts WHERE source = 'user'
-                    ORDER BY created_at DESC LIMIT 100
-                )
-            );
-            DELETE FROM telemetry_layouts
-            WHERE source = 'user'
-            AND id NOT IN (
-                SELECT id FROM telemetry_layouts WHERE source = 'user'
-                ORDER BY created_at DESC LIMIT 100
-            );",
+        // Clean up old user-created layouts (keep last 100 per target,
+        // config layouts always kept). The ranking must partition by
+        // target_id: a global newest-100 would let one target's saves
+        // evict another target's layouts. Plots are deleted explicitly
+        // because the FK cascade only fires with PRAGMA foreign_keys on.
+        const RETAIN_PER_TARGET: i64 = 100;
+        let stale_layouts = "SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (
+                    PARTITION BY target_id
+                    ORDER BY created_at DESC, id DESC
+                ) AS rn
+                FROM telemetry_layouts WHERE source = 'user'
+            ) WHERE rn > ?1";
+        conn.execute(
+            &format!("DELETE FROM telemetry_plots WHERE layout_id IN ({stale_layouts})"),
+            params![RETAIN_PER_TARGET],
+        )?;
+        conn.execute(
+            &format!("DELETE FROM telemetry_layouts WHERE id IN ({stale_layouts})"),
+            params![RETAIN_PER_TARGET],
         )?;
 
         // Periodic DB maintenance (WAL checkpoint + optimize)
@@ -427,10 +440,15 @@ impl TelemetryDb {
     /// gone now. WAL checkpointing happens on its own schedule from the
     /// maintenance loop and after large deletions.
     pub fn global_stats(&self) -> Result<GlobalStats, DbError> {
+        // Must be a real row count, not MAX(ROWID): rowids keep climbing
+        // after FIFO deletions, and the maintenance loop divides db bytes
+        // by this value to size evictions -- a high-water mark makes the
+        // eviction volume systematically wrong. COUNT(*) is an index-only
+        // scan and this runs once per maintenance tick, not per request.
         let total_samples: i64 = self
             .with_reader(|conn| {
                 Ok(conn
-                    .query_row("SELECT MAX(ROWID) FROM telemetry", [], |row| row.get(0))
+                    .query_row("SELECT COUNT(*) FROM telemetry", [], |row| row.get(0))
                     .unwrap_or(0))
             })
             .unwrap_or(0);
@@ -460,9 +478,18 @@ impl TelemetryDb {
             params![count as i64],
         )?;
 
-        // Also clean up telemetry_latest for deleted channels
+        // Drop latest-value rows only for channels with no remaining
+        // history. Correlated NOT EXISTS probes the lookup index once per
+        // telemetry_latest row (one row per channel) -- the NOT IN form
+        // materialized a DISTINCT over the entire telemetry index on every
+        // FIFO pass, under the writer lock.
         conn.execute(
-            "DELETE FROM telemetry_latest WHERE (target_id, channel) NOT IN (SELECT DISTINCT target_id, channel FROM telemetry)",
+            "DELETE FROM telemetry_latest
+             WHERE NOT EXISTS (
+               SELECT 1 FROM telemetry
+               WHERE telemetry.target_id = telemetry_latest.target_id
+                 AND telemetry.channel = telemetry_latest.channel
+             )",
             [],
         )?;
 
@@ -496,12 +523,16 @@ impl TelemetryDb {
             params![target_id, count as i64],
         )?;
 
-        // Clean up stale telemetry_latest rows for this target only
+        // Clean up stale telemetry_latest rows for this target only.
+        // Same correlated-probe shape as delete_oldest: index seek per
+        // latest row instead of a DISTINCT scan of the target's history.
         conn.execute(
             "DELETE FROM telemetry_latest
              WHERE target_id = ?1
-               AND channel NOT IN (
-                 SELECT DISTINCT channel FROM telemetry WHERE target_id = ?1
+               AND NOT EXISTS (
+                 SELECT 1 FROM telemetry
+                 WHERE telemetry.target_id = telemetry_latest.target_id
+                   AND telemetry.channel = telemetry_latest.channel
                )",
             params![target_id],
         )?;
@@ -578,7 +609,7 @@ impl TelemetryDb {
     /// Example: downsample(3600000, 60000) keeps last hour at full resolution,
     /// then averages into 1-minute buckets for everything older.
     pub fn downsample(&self, age_ms: u64, bucket_ms: u64) -> Result<DownsampleResult, DbError> {
-        let conn = self.writer.lock().map_err(|_| DbError::Lock)?;
+        let mut conn = self.writer.lock().map_err(|_| DbError::Lock)?;
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -603,17 +634,21 @@ impl TelemetryDb {
             });
         }
 
-        conn.execute("BEGIN", [])?;
+        // RAII transaction for the same reason as insert_batch: an error
+        // between DELETE and re-INSERT must roll back atomically, never
+        // leave an open transaction on the writer connection (or worse,
+        // history deleted without the averaged replacement).
+        let tx = conn.transaction()?;
 
         // Create averaged samples in a temp table
-        conn.execute_batch(
+        tx.execute_batch(
             "CREATE TEMP TABLE IF NOT EXISTS ds_temp ( \
                  target_id TEXT, timestamp_ms INTEGER, channel TEXT, value REAL \
              )",
         )?;
-        conn.execute("DELETE FROM ds_temp", [])?;
+        tx.execute("DELETE FROM ds_temp", [])?;
 
-        conn.execute(
+        tx.execute(
             "INSERT INTO ds_temp (target_id, timestamp_ms, channel, value) \
              SELECT target_id, \
                     (timestamp_ms / ?1) * ?1 + (?1 / 2), \
@@ -625,24 +660,24 @@ impl TelemetryDb {
             params![bucket, cutoff],
         )?;
 
-        let after_count: i64 = conn
+        let after_count: i64 = tx
             .query_row("SELECT COUNT(*) FROM ds_temp", [], |row| row.get(0))
             .unwrap_or(0);
 
         // Replace old detailed data with averaged data
-        conn.execute(
+        tx.execute(
             "DELETE FROM telemetry WHERE timestamp_ms < ?1",
             params![cutoff],
         )?;
 
-        conn.execute(
+        tx.execute(
             "INSERT INTO telemetry (target_id, timestamp_ms, channel, value) \
              SELECT target_id, timestamp_ms, channel, value FROM ds_temp",
             [],
         )?;
 
-        conn.execute("DROP TABLE IF EXISTS ds_temp", [])?;
-        conn.execute("COMMIT", [])?;
+        tx.execute("DROP TABLE IF EXISTS ds_temp", [])?;
+        tx.commit()?;
 
         Ok(DownsampleResult {
             samples_before: before_count as u64,
@@ -1562,5 +1597,128 @@ mod tests {
         // Should refuse and return false
         assert!(!db.delete_layout(config_id).unwrap());
         assert_eq!(db.get_layouts("t1").unwrap().len(), 1);
+    }
+
+    /// @test prune retains the newest 100 user layouts per target, not
+    /// globally: a target with few layouts is untouched by another
+    /// target's overflow.
+    #[test]
+    fn prune_layout_retention_is_per_target() {
+        let (_dir, db) = open_temp_db();
+        for i in 0..105 {
+            db.save_layout("t1", &format!("L{i}"), "1x1", 30, &[])
+                .unwrap();
+        }
+        for i in 0..5 {
+            db.save_layout("t2", &format!("M{i}"), "1x1", 30, &[])
+                .unwrap();
+        }
+
+        // Retention window large enough that no samples are pruned; only
+        // the layout-retention pass acts.
+        db.prune(u64::MAX).unwrap();
+
+        assert_eq!(db.get_layouts("t1").unwrap().len(), 100);
+        assert_eq!(db.get_layouts("t2").unwrap().len(), 5);
+    }
+
+    /// @test delete_oldest removes telemetry_latest rows only for channels
+    /// whose history is entirely gone; channels with remaining rows keep
+    /// their latest value.
+    #[test]
+    fn delete_oldest_cleans_latest_only_for_emptied_channels() {
+        let (_dir, db) = open_temp_db();
+        let t: Arc<str> = Arc::from("t1");
+        let a: Arc<str> = Arc::from("A.old");
+        let b: Arc<str> = Arc::from("B.live");
+        db.insert_batch(&[
+            sample(&t, &a, 100, 1.0),
+            sample(&t, &a, 200, 2.0),
+            sample(&t, &b, 300, 3.0),
+            sample(&t, &b, 400, 4.0),
+        ])
+        .unwrap();
+        assert_eq!(db.query_latest("t1").unwrap().len(), 2);
+
+        // Deleting the two oldest wipes channel A's history entirely.
+        db.delete_oldest(2).unwrap();
+        let latest = db.query_latest("t1").unwrap();
+        assert_eq!(latest.len(), 1);
+        assert_eq!(&*latest[0].channel, "B.live");
+    }
+
+    /// @test global_stats total_samples reflects live rows, not the rowid
+    /// high-water mark: after a FIFO deletion the count drops by the number
+    /// of deleted rows. Guards the maintenance loop's eviction sizing,
+    /// which divides db bytes by this value.
+    #[test]
+    fn global_stats_counts_live_rows_after_deletion() {
+        let (_dir, db) = open_temp_db();
+        let t: Arc<str> = Arc::from("t1");
+        let ch: Arc<str> = Arc::from("X.f");
+        let samples: Vec<_> = (0..100u64).map(|i| sample(&t, &ch, i, i as f64)).collect();
+        db.insert_batch(&samples).unwrap();
+        assert_eq!(db.global_stats().unwrap().total_samples, 100);
+
+        db.delete_oldest(60).unwrap();
+        assert_eq!(db.global_stats().unwrap().total_samples, 40);
+    }
+
+    /// @test A failed insert_batch rolls back completely (no partial rows
+    /// from the main-table inserts) and leaves the writer connection
+    /// usable: the next insert_batch succeeds. Guards against the raw
+    /// BEGIN leaking an open transaction, which wedged every subsequent
+    /// insert with "cannot start a transaction within a transaction".
+    #[test]
+    fn insert_batch_failure_rolls_back_and_recovers() {
+        let (_dir, db) = open_temp_db();
+        let t: Arc<str> = Arc::from("t1");
+        let ch: Arc<str> = Arc::from("X.field");
+        let samples = vec![sample(&t, &ch, 100, 1.0), sample(&t, &ch, 200, 2.0)];
+
+        // Sabotage the second statement in the transaction: renaming
+        // telemetry_latest makes the UPSERT fail after the main-table
+        // inserts have already executed.
+        {
+            let conn = db.writer.lock().unwrap();
+            conn.execute_batch("ALTER TABLE telemetry_latest RENAME TO tl_sabotaged")
+                .unwrap();
+        }
+        assert!(db.insert_batch(&samples).is_err());
+        {
+            let conn = db.writer.lock().unwrap();
+            conn.execute_batch("ALTER TABLE tl_sabotaged RENAME TO telemetry_latest")
+                .unwrap();
+        }
+
+        // Rollback must have removed the partial main-table inserts.
+        assert_eq!(db.count().unwrap(), 0);
+
+        // The connection must be reusable: no open transaction left behind.
+        db.insert_batch(&samples).unwrap();
+        assert_eq!(db.count().unwrap(), 2);
+        let latest = db.query_latest("t1").unwrap();
+        assert_eq!(latest.len(), 1);
+    }
+
+    /// @test The standard pragmas set a nonzero busy_timeout on both the
+    /// writer connection and pooled reader connections, so transient
+    /// SQLITE_BUSY during checkpoints/vacuum retries instead of failing
+    /// the ingest path.
+    #[test]
+    fn busy_timeout_applied_to_writer_and_readers() {
+        let (_dir, db) = open_temp_db();
+
+        let writer_timeout: i64 = {
+            let conn = db.writer.lock().unwrap();
+            conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+                .unwrap()
+        };
+        assert!(writer_timeout >= 1000, "writer busy_timeout too low");
+
+        let reader_timeout: i64 = db
+            .with_reader(|conn| Ok(conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?))
+            .unwrap();
+        assert!(reader_timeout >= 1000, "reader busy_timeout too low");
     }
 }

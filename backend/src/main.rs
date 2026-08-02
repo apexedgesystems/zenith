@@ -1587,29 +1587,7 @@ async fn add_target(
     };
 
     // Spawn DB writer for new target
-    let db_clone = st.db.clone();
-    let mut rx = sample_tx.subscribe();
-    tokio::spawn(async move {
-        let mut batch = Vec::with_capacity(64);
-        loop {
-            match rx.recv().await {
-                Ok(sample) => {
-                    batch.push(sample);
-                    if batch.len() >= 50 || rx.is_empty() {
-                        let _ = db_clone.insert_batch(&batch);
-                        batch.clear();
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => {}
-                Err(broadcast::error::RecvError::Closed) => {
-                    if !batch.is_empty() {
-                        let _ = db_clone.insert_batch(&batch);
-                    }
-                    break;
-                }
-            }
-        }
-    });
+    spawn_sample_writer(id.clone(), st.db.clone(), sample_tx.subscribe());
 
     st.targets.insert(
         id.clone(),
@@ -2307,6 +2285,103 @@ fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Per-target sample writer: subscribes to the target's decoded-sample
+/// broadcast and batches rows into insert_batch. A failed batch is
+/// dropped, but never silently: failures log at error level
+/// (rate-limited) and recovery logs how many batches were lost.
+fn spawn_sample_writer(
+    target_id: String,
+    db: Arc<TelemetryDb>,
+    mut rx: broadcast::Receiver<TelemetrySample>,
+) {
+    fn flush(
+        db: &TelemetryDb,
+        target_id: &str,
+        batch: &mut Vec<TelemetrySample>,
+        failed_batches: &mut u64,
+        last_err_log: &mut Option<std::time::Instant>,
+    ) {
+        // One error line per interval, not one per failed batch: at
+        // ingest rates a wedged DB would otherwise flood the log.
+        const ERR_LOG_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
+        if batch.is_empty() {
+            return;
+        }
+        match db.insert_batch(batch) {
+            Ok(()) => {
+                if *failed_batches > 0 {
+                    tracing::warn!(
+                        "[{}] telemetry writes recovered; {} batches dropped during the outage",
+                        target_id,
+                        failed_batches
+                    );
+                    *failed_batches = 0;
+                    *last_err_log = None;
+                }
+            }
+            Err(e) => {
+                *failed_batches += 1;
+                if last_err_log.is_none_or(|t| t.elapsed() >= ERR_LOG_EVERY) {
+                    tracing::error!(
+                        "[{}] telemetry batch insert failed ({} failed batches so far): {}",
+                        target_id,
+                        failed_batches,
+                        e
+                    );
+                    *last_err_log = Some(std::time::Instant::now());
+                }
+            }
+        }
+        batch.clear();
+    }
+
+    tokio::spawn(async move {
+        let mut batch: Vec<TelemetrySample> = Vec::with_capacity(64);
+        let mut failed_batches: u64 = 0;
+        let mut last_err_log: Option<std::time::Instant> = None;
+        loop {
+            match rx.recv().await {
+                Ok(sample) => {
+                    batch.push(sample);
+                    // Flush in batches of 50 or when channel is empty
+                    if batch.len() >= 50 {
+                        flush(
+                            &db,
+                            &target_id,
+                            &mut batch,
+                            &mut failed_batches,
+                            &mut last_err_log,
+                        );
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+
+            // Also flush if no more pending and batch has data
+            if !batch.is_empty() && rx.is_empty() {
+                flush(
+                    &db,
+                    &target_id,
+                    &mut batch,
+                    &mut failed_batches,
+                    &mut last_err_log,
+                );
+            }
+        }
+
+        // Flush any remaining samples on channel close
+        flush(
+            &db,
+            &target_id,
+            &mut batch,
+            &mut failed_batches,
+            &mut last_err_log,
+        );
+    });
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -2466,7 +2541,12 @@ async fn main() {
     }
 
     // Open telemetry database
-    let db_path = std::path::PathBuf::from(&config.storage.path);
+    // Resolve to an absolute path before opening so the startup log
+    // states unambiguously where the DB lives -- a relative config path
+    // resolves against the process working directory, which in the
+    // container is not the persistent volume.
+    let db_path = std::path::absolute(std::path::PathBuf::from(&config.storage.path))
+        .unwrap_or_else(|_| std::path::PathBuf::from(&config.storage.path));
     let db = match TelemetryDb::open(&db_path) {
         Ok(db) => Arc::new(db),
         Err(e) => {
@@ -2481,37 +2561,8 @@ async fn main() {
 
     // Spawn background writer: subscribes to each target's sample_tx and writes to DB.
     // Each writer flushes remaining samples when the broadcast channel closes (shutdown).
-    for target in targets.values() {
-        let db_clone = db.clone();
-        let mut rx = target.sample_tx.subscribe();
-        tokio::spawn(async move {
-            let mut batch = Vec::with_capacity(64);
-            loop {
-                match rx.recv().await {
-                    Ok(sample) => {
-                        batch.push(sample);
-                        // Flush in batches of 50 or when channel is empty
-                        if batch.len() >= 50 {
-                            let _ = db_clone.insert_batch(&batch);
-                            batch.clear();
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => {}
-                    Err(broadcast::error::RecvError::Closed) => break,
-                }
-
-                // Also flush if no more pending and batch has data
-                if !batch.is_empty() && rx.is_empty() {
-                    let _ = db_clone.insert_batch(&batch);
-                    batch.clear();
-                }
-            }
-
-            // Flush any remaining samples on channel close
-            if !batch.is_empty() {
-                let _ = db_clone.insert_batch(&batch);
-            }
-        });
+    for (id, target) in targets.iter() {
+        spawn_sample_writer(id.clone(), db.clone(), target.sample_tx.subscribe());
     }
 
     // Spawn periodic maintenance (every 5 minutes)
