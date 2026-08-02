@@ -348,4 +348,34 @@ mod tests {
         assert_eq!(header.payload_length as usize, payload.len());
         assert_eq!(packet.len(), HEADER_SIZE + payload.len());
     }
+
+    /// @test parse_header, parse_packet, and parse_ack never panic on
+    /// arbitrary buffers, including valid-magic headers whose
+    /// payload_length lies about the buffer size. These parse untrusted
+    /// network input (deterministic seed: reproducible in CI).
+    #[test]
+    fn parsers_survive_arbitrary_buffers() {
+        let mut seed: u64 = 0x243F_6A88_85A3_08D3;
+        let mut next_byte = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as u8
+        };
+
+        for len in 0..300usize {
+            let mut buf: Vec<u8> = (0..len).map(|_| next_byte()).collect();
+            let _ = parse_header(&buf);
+            let _ = parse_packet(&buf);
+            let _ = parse_ack(&buf);
+
+            // Same buffer with a valid magic and a lying payload_length.
+            if buf.len() >= HEADER_SIZE {
+                buf[0..2].copy_from_slice(&MAGIC.to_le_bytes());
+                buf[12..14].copy_from_slice(&0xFFFFu16.to_le_bytes());
+                let _ = parse_header(&buf);
+                let _ = parse_packet(&buf);
+            }
+        }
+    }
 }
