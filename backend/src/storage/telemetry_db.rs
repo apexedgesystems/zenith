@@ -6,7 +6,7 @@
 //! Performance tuning:
 //!   - WAL mode for non-blocking reads during writes
 //!   - Prepared statement caching for hot paths
-//!   - Covering index on (target_id, channel, timestamp_ms, value)
+//!   - Lookup index on (target_id, channel, timestamp_ms DESC)
 //!   - Separate latest-value table for O(1) latest queries
 //!   - Batch inserts within a single transaction
 //!   - page_size=4096, mmap_size=256MB for large dataset performance
@@ -80,7 +80,7 @@ impl TelemetryDb {
         // Main telemetry table
         writer.execute_batch(
             "CREATE TABLE IF NOT EXISTS telemetry (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id INTEGER PRIMARY KEY,
                 target_id TEXT NOT NULL,
                 timestamp_ms INTEGER NOT NULL,
                 channel TEXT NOT NULL,
@@ -436,10 +436,15 @@ impl TelemetryDb {
     /// gone now. WAL checkpointing happens on its own schedule from the
     /// maintenance loop and after large deletions.
     pub fn global_stats(&self) -> Result<GlobalStats, DbError> {
+        // Must be a real row count, not MAX(ROWID): rowids keep climbing
+        // after FIFO deletions, and the maintenance loop divides db bytes
+        // by this value to size evictions -- a high-water mark makes the
+        // eviction volume systematically wrong. COUNT(*) is an index-only
+        // scan and this runs once per maintenance tick, not per request.
         let total_samples: i64 = self
             .with_reader(|conn| {
                 Ok(conn
-                    .query_row("SELECT MAX(ROWID) FROM telemetry", [], |row| row.get(0))
+                    .query_row("SELECT COUNT(*) FROM telemetry", [], |row| row.get(0))
                     .unwrap_or(0))
             })
             .unwrap_or(0);
@@ -1575,6 +1580,23 @@ mod tests {
         // Should refuse and return false
         assert!(!db.delete_layout(config_id).unwrap());
         assert_eq!(db.get_layouts("t1").unwrap().len(), 1);
+    }
+
+    /// @test global_stats total_samples reflects live rows, not the rowid
+    /// high-water mark: after a FIFO deletion the count drops by the number
+    /// of deleted rows. Guards the maintenance loop's eviction sizing,
+    /// which divides db bytes by this value.
+    #[test]
+    fn global_stats_counts_live_rows_after_deletion() {
+        let (_dir, db) = open_temp_db();
+        let t: Arc<str> = Arc::from("t1");
+        let ch: Arc<str> = Arc::from("X.f");
+        let samples: Vec<_> = (0..100u64).map(|i| sample(&t, &ch, i, i as f64)).collect();
+        db.insert_batch(&samples).unwrap();
+        assert_eq!(db.global_stats().unwrap().total_samples, 100);
+
+        db.delete_oldest(60).unwrap();
+        assert_eq!(db.global_stats().unwrap().total_samples, 40);
     }
 
     /// @test A failed insert_batch rolls back completely (no partial rows
