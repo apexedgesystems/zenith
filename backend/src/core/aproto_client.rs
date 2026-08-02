@@ -270,6 +270,15 @@ impl AprotoClient {
         self.connected.load(Ordering::Acquire)
     }
 
+    /// Lock-free handle to the connection flag. Status reads (target
+    /// lists, health) must not wait on the client mutex -- a file
+    /// transfer holds that mutex for the whole upload -- so they read
+    /// this flag instead. The Arc is stable across reconnects (the
+    /// generation counter guards stale writers).
+    pub fn connected_handle(&self) -> Arc<AtomicBool> {
+        self.connected.clone()
+    }
+
     pub async fn send_command(
         &mut self,
         full_uid: u32,
