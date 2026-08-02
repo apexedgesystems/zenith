@@ -474,13 +474,12 @@ fn default_inactive_bank() -> String {
 
 /// Restart the executive on a target via RELOAD_EXECUTIVE (0x0127).
 ///
-/// Apex closes the connection before sending an ACK because the
-/// executive calls execv() inside the command handler. The
-/// `AprotoClient::restart_executive()` helper catches the expected
-/// connection-closed error and returns a synthetic SUCCESS, so the
-/// audit log gets a clean "ok" entry instead of the misleading
-/// "err: connection closed by remote" the generic /command path
-/// produced before this dedicated endpoint existed.
+/// Apex defers the execv() until the ACK is on the wire, so a healthy
+/// restart returns a normal SUCCESS response here; the client helper
+/// then disconnects because the process image is about to be replaced
+/// and the socket will drop. An error from this path is therefore a
+/// real failure (the ACK never arrived), not the expected close --
+/// callers reconnect after a few seconds.
 async fn restart_target(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -954,18 +953,15 @@ async fn update_params(
         )
     })?;
 
-    // Decode the original binary from the frontend (from the initial page load).
-    // No hidden INSPECT -- the user sees what they're modifying.
-    let original_binary: Vec<u8> = body
-        .raw_hex
-        .as_ref()
-        .map(|hex| {
-            hex.as_bytes()
-                .chunks(2)
-                .filter_map(|c| u8::from_str_radix(std::str::from_utf8(c).unwrap_or("00"), 16).ok())
-                .collect()
-        })
-        .unwrap_or_default();
+    // Decode the original binary from the frontend (from the initial page
+    // load). No hidden INSPECT -- the user sees what they're modifying.
+    // Strict decode: this buffer becomes bytes written to the target, so
+    // malformed hex must be a 400, never silently patched with zeros.
+    let original_binary: Vec<u8> = match body.raw_hex.as_deref() {
+        Some(h) => hex::decode(h)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid raw_hex: {}", e)))?,
+        None => Vec::new(),
+    };
 
     let mut struct_size = 0usize;
     let mut struct_fields = Vec::new();
