@@ -389,22 +389,26 @@ impl TelemetryDb {
             params![cutoff as i64],
         )?;
 
-        // Clean up old user-created layouts (keep last 100 per target, config layouts always kept)
-        conn.execute_batch(
-            "DELETE FROM telemetry_plots WHERE layout_id IN (
-                SELECT id FROM telemetry_layouts
-                WHERE source = 'user'
-                AND id NOT IN (
-                    SELECT id FROM telemetry_layouts WHERE source = 'user'
-                    ORDER BY created_at DESC LIMIT 100
-                )
-            );
-            DELETE FROM telemetry_layouts
-            WHERE source = 'user'
-            AND id NOT IN (
-                SELECT id FROM telemetry_layouts WHERE source = 'user'
-                ORDER BY created_at DESC LIMIT 100
-            );",
+        // Clean up old user-created layouts (keep last 100 per target,
+        // config layouts always kept). The ranking must partition by
+        // target_id: a global newest-100 would let one target's saves
+        // evict another target's layouts. Plots are deleted explicitly
+        // because the FK cascade only fires with PRAGMA foreign_keys on.
+        const RETAIN_PER_TARGET: i64 = 100;
+        let stale_layouts = "SELECT id FROM (
+                SELECT id, ROW_NUMBER() OVER (
+                    PARTITION BY target_id
+                    ORDER BY created_at DESC, id DESC
+                ) AS rn
+                FROM telemetry_layouts WHERE source = 'user'
+            ) WHERE rn > ?1";
+        conn.execute(
+            &format!("DELETE FROM telemetry_plots WHERE layout_id IN ({stale_layouts})"),
+            params![RETAIN_PER_TARGET],
+        )?;
+        conn.execute(
+            &format!("DELETE FROM telemetry_layouts WHERE id IN ({stale_layouts})"),
+            params![RETAIN_PER_TARGET],
         )?;
 
         // Periodic DB maintenance (WAL checkpoint + optimize)
@@ -1593,6 +1597,29 @@ mod tests {
         // Should refuse and return false
         assert!(!db.delete_layout(config_id).unwrap());
         assert_eq!(db.get_layouts("t1").unwrap().len(), 1);
+    }
+
+    /// @test prune retains the newest 100 user layouts per target, not
+    /// globally: a target with few layouts is untouched by another
+    /// target's overflow.
+    #[test]
+    fn prune_layout_retention_is_per_target() {
+        let (_dir, db) = open_temp_db();
+        for i in 0..105 {
+            db.save_layout("t1", &format!("L{i}"), "1x1", 30, &[])
+                .unwrap();
+        }
+        for i in 0..5 {
+            db.save_layout("t2", &format!("M{i}"), "1x1", 30, &[])
+                .unwrap();
+        }
+
+        // Retention window large enough that no samples are pruned; only
+        // the layout-retention pass acts.
+        db.prune(u64::MAX).unwrap();
+
+        assert_eq!(db.get_layouts("t1").unwrap().len(), 100);
+        assert_eq!(db.get_layouts("t2").unwrap().len(), 5);
     }
 
     /// @test delete_oldest removes telemetry_latest rows only for channels
