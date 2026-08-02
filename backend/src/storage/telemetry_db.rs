@@ -474,9 +474,18 @@ impl TelemetryDb {
             params![count as i64],
         )?;
 
-        // Also clean up telemetry_latest for deleted channels
+        // Drop latest-value rows only for channels with no remaining
+        // history. Correlated NOT EXISTS probes the lookup index once per
+        // telemetry_latest row (one row per channel) -- the NOT IN form
+        // materialized a DISTINCT over the entire telemetry index on every
+        // FIFO pass, under the writer lock.
         conn.execute(
-            "DELETE FROM telemetry_latest WHERE (target_id, channel) NOT IN (SELECT DISTINCT target_id, channel FROM telemetry)",
+            "DELETE FROM telemetry_latest
+             WHERE NOT EXISTS (
+               SELECT 1 FROM telemetry
+               WHERE telemetry.target_id = telemetry_latest.target_id
+                 AND telemetry.channel = telemetry_latest.channel
+             )",
             [],
         )?;
 
@@ -510,12 +519,16 @@ impl TelemetryDb {
             params![target_id, count as i64],
         )?;
 
-        // Clean up stale telemetry_latest rows for this target only
+        // Clean up stale telemetry_latest rows for this target only.
+        // Same correlated-probe shape as delete_oldest: index seek per
+        // latest row instead of a DISTINCT scan of the target's history.
         conn.execute(
             "DELETE FROM telemetry_latest
              WHERE target_id = ?1
-               AND channel NOT IN (
-                 SELECT DISTINCT channel FROM telemetry WHERE target_id = ?1
+               AND NOT EXISTS (
+                 SELECT 1 FROM telemetry
+                 WHERE telemetry.target_id = telemetry_latest.target_id
+                   AND telemetry.channel = telemetry_latest.channel
                )",
             params![target_id],
         )?;
@@ -1580,6 +1593,31 @@ mod tests {
         // Should refuse and return false
         assert!(!db.delete_layout(config_id).unwrap());
         assert_eq!(db.get_layouts("t1").unwrap().len(), 1);
+    }
+
+    /// @test delete_oldest removes telemetry_latest rows only for channels
+    /// whose history is entirely gone; channels with remaining rows keep
+    /// their latest value.
+    #[test]
+    fn delete_oldest_cleans_latest_only_for_emptied_channels() {
+        let (_dir, db) = open_temp_db();
+        let t: Arc<str> = Arc::from("t1");
+        let a: Arc<str> = Arc::from("A.old");
+        let b: Arc<str> = Arc::from("B.live");
+        db.insert_batch(&[
+            sample(&t, &a, 100, 1.0),
+            sample(&t, &a, 200, 2.0),
+            sample(&t, &b, 300, 3.0),
+            sample(&t, &b, 400, 4.0),
+        ])
+        .unwrap();
+        assert_eq!(db.query_latest("t1").unwrap().len(), 2);
+
+        // Deleting the two oldest wipes channel A's history entirely.
+        db.delete_oldest(2).unwrap();
+        let latest = db.query_latest("t1").unwrap();
+        assert_eq!(latest.len(), 1);
+        assert_eq!(&*latest[0].channel, "B.live");
     }
 
     /// @test global_stats total_samples reflects live rows, not the rowid
