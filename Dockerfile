@@ -5,9 +5,8 @@
 # Stage 2: Build React frontend
 # Stage 3: Slim runtime image (backend binary + static frontend assets)
 #
-# Usage:
-#   docker build -t zenith .
-#   docker run -p 8080:8080 -v ./config.toml:/etc/zenith/config.toml zenith
+# Usage: make run (docker compose build) -- see Makefile. Building with
+# a raw docker build -t zenith produces a tag compose ignores.
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
@@ -46,6 +45,10 @@ COPY --from=backend /build/target/release/zenith /usr/local/bin/zenith
 COPY --from=frontend /build/dist/ /usr/local/share/zenith/static/
 
 RUN mkdir -p /var/lib/zenith /etc/zenith
+
+# Working directory sits inside the persistent volume so even a
+# relative storage path in config.toml resolves somewhere durable.
+WORKDIR /var/lib/zenith
 
 EXPOSE 8080
 

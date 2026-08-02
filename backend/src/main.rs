@@ -2541,7 +2541,12 @@ async fn main() {
     }
 
     // Open telemetry database
-    let db_path = std::path::PathBuf::from(&config.storage.path);
+    // Resolve to an absolute path before opening so the startup log
+    // states unambiguously where the DB lives -- a relative config path
+    // resolves against the process working directory, which in the
+    // container is not the persistent volume.
+    let db_path = std::path::absolute(std::path::PathBuf::from(&config.storage.path))
+        .unwrap_or_else(|_| std::path::PathBuf::from(&config.storage.path));
     let db = match TelemetryDb::open(&db_path) {
         Ok(db) => Arc::new(db),
         Err(e) => {
