@@ -91,12 +91,6 @@ type AppState = Arc<RwLock<SharedState>>;
 /* ----------------------------- Response Types ----------------------------- */
 
 #[derive(Serialize)]
-struct HealthResponse {
-    status: &'static str,
-    version: &'static str,
-}
-
-#[derive(Serialize)]
 struct TargetInfo {
     id: String,
     name: String,
@@ -154,11 +148,46 @@ fn to_cmd_response(resp: crate::protocol::aproto::AckResponse) -> CommandRespons
 
 /* ----------------------------- Handlers ----------------------------- */
 
-async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse {
-        status: "ok",
-        version: env!("CARGO_PKG_VERSION"),
-    })
+/// Liveness + readiness in one place: DB writability and per-target
+/// connection state with last-sample age. status is "degraded" only
+/// when the DB probe fails -- a disconnected target is operator data,
+/// not instance sickness (targets are legitimately offline in normal
+/// operation). Always 200 so the compose healthcheck validates the
+/// server is serving; the body carries the verdict.
+async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let st = state.read().await;
+    let db_writable = st.db.probe_writable().is_ok();
+
+    let mut targets = serde_json::Map::new();
+    for (id, t) in &st.targets {
+        let last = t
+            .metrics
+            .last_sample_ms
+            .load(std::sync::atomic::Ordering::Relaxed);
+        targets.insert(
+            id.clone(),
+            serde_json::json!({
+                "connected": t.connected.load(std::sync::atomic::Ordering::Acquire),
+                "last_sample_age_ms":
+                    if last > 0 { Some(now_ms.saturating_sub(last)) } else { None },
+                "db_write_failures": t
+                    .metrics
+                    .db_write_failures
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            }),
+        );
+    }
+
+    Json(serde_json::json!({
+        "status": if db_writable { "ok" } else { "degraded" },
+        "version": env!("CARGO_PKG_VERSION"),
+        "db_writable": db_writable,
+        "targets": targets,
+    }))
 }
 
 async fn server_version() -> Json<serde_json::Value> {
@@ -2391,7 +2420,14 @@ fn build_router(state: AppState) -> Router {
             tower_http::services::ServeFile::new(format!("{}/index.html", static_dir)),
         ))
         .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http())
+        // Span carries method + path only: query strings are excluded
+        // deliberately (WebSocket auth falls back to a ?token= query
+        // parameter, which must never reach the request logs).
+        .layer(TraceLayer::new_for_http().make_span_with(
+            |req: &axum::http::Request<axum::body::Body>| {
+                tracing::info_span!("http", method = %req.method(), path = %req.uri().path())
+            },
+        ))
         .with_state(state)
 }
 

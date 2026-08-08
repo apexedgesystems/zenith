@@ -422,6 +422,22 @@ impl TelemetryDb {
         Ok(deleted)
     }
 
+    /// Cheap writability probe for health reporting. BEGIN IMMEDIATE
+    /// acquires SQLite's RESERVED lock -- it fails on a read-only file
+    /// or filesystem -- then rolls back without touching data. A busy
+    /// writer mutex short-circuits to Ok: an active writer is itself
+    /// proof that writes are flowing.
+    pub fn probe_writable(&self) -> Result<(), DbError> {
+        match self.writer.try_lock() {
+            Ok(conn) => {
+                conn.execute_batch("BEGIN IMMEDIATE; ROLLBACK;")?;
+                Ok(())
+            }
+            Err(std::sync::TryLockError::WouldBlock) => Ok(()),
+            Err(std::sync::TryLockError::Poisoned(_)) => Err(DbError::Lock),
+        }
+    }
+
     /// Get total sample count.
     pub fn count(&self) -> Result<u64, DbError> {
         self.with_reader(|conn| {
@@ -1597,6 +1613,21 @@ mod tests {
         // Should refuse and return false
         assert!(!db.delete_layout(config_id).unwrap());
         assert_eq!(db.get_layouts("t1").unwrap().len(), 1);
+    }
+
+    /// @test probe_writable succeeds on a healthy database and does not
+    /// disturb data or leave a transaction open (a follow-up write on
+    /// the same connection works).
+    #[test]
+    fn probe_writable_on_healthy_db() {
+        let (_dir, db) = open_temp_db();
+        db.probe_writable().unwrap();
+
+        let t: Arc<str> = Arc::from("t1");
+        let ch: Arc<str> = Arc::from("X.f");
+        db.insert_batch(&[sample(&t, &ch, 100, 1.0)]).unwrap();
+        assert_eq!(db.count().unwrap(), 1);
+        db.probe_writable().unwrap();
     }
 
     /// @test prune retains the newest 100 user layouts per target, not
