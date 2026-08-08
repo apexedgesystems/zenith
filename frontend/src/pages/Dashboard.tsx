@@ -37,6 +37,25 @@ interface HealthCard {
   metrics: { label: string; value: string; bad?: boolean }[];
 }
 
+/** Per-target pipeline counters from GET /api/metrics. */
+interface PipelineMetrics {
+  decoded_samples: number;
+  dedup_drops: number;
+  router_lag_drops: number;
+  db_writer_lag_drops: number;
+  db_written_samples: number;
+  db_write_failures: number;
+  db_failed_samples: number;
+  ws_lag_drops: number;
+  ws_clients: number;
+  commands_sent: number;
+  command_errors: number;
+  command_timeouts: number;
+  command_latency_avg_us: number;
+  last_sample_age_ms: number | null;
+  connected: boolean;
+}
+
 /* ----------------------------- Generic Binary Decoder ----------------------------- */
 
 function decodeField(view: DataView, field: FieldDef): number | null {
@@ -292,6 +311,100 @@ const ExecutiveSummary = memo(function ExecutiveSummary({
   );
 });
 
+/** Pipeline summary -- the "are we losing data" banner. */
+const PipelineSummary = memo(function PipelineSummary({
+  m,
+}: {
+  m: PipelineMetrics;
+}) {
+  const compact = (n: number) => {
+    if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
+    if (n >= 1_000) return (n / 1_000).toFixed(1) + "K";
+    return String(n);
+  };
+  const lagDrops = m.router_lag_drops + m.db_writer_lag_drops + m.ws_lag_drops;
+  const tiles: { label: string; value: string; bad?: boolean }[] = [
+    { label: "samples stored", value: compact(m.db_written_samples) },
+    { label: "dedup drops", value: compact(m.dedup_drops) },
+    { label: "lag drops", value: compact(lagDrops), bad: lagDrops > 0 },
+    {
+      label: "write failures",
+      value: compact(m.db_write_failures),
+      bad: m.db_write_failures > 0,
+    },
+    {
+      label: "cmd latency",
+      value:
+        m.command_latency_avg_us >= 1000
+          ? (m.command_latency_avg_us / 1000).toFixed(1) + "ms"
+          : m.command_latency_avg_us + "us",
+    },
+    {
+      label: "cmd timeouts",
+      value: compact(m.command_timeouts),
+      bad: m.command_timeouts > 0,
+    },
+    { label: "ws clients", value: String(m.ws_clients) },
+    {
+      label: "last sample",
+      value:
+        m.last_sample_age_ms === null
+          ? "never"
+          : (m.last_sample_age_ms / 1000).toFixed(1) + "s ago",
+      bad: m.connected && (m.last_sample_age_ms ?? 0) > 10_000,
+    },
+  ];
+
+  return (
+    <div
+      className="rounded-lg p-4 mb-4"
+      style={{
+        backgroundColor: "var(--color-surface)",
+        border: "1px solid var(--color-border)",
+      }}
+    >
+      <div className="flex items-center gap-2 mb-3">
+        <div
+          className="w-2 h-2 rounded-full"
+          style={{ backgroundColor: "var(--color-accent)" }}
+        />
+        <span
+          className="text-xs uppercase tracking-widest font-bold"
+          style={{ color: "var(--color-accent)" }}
+        >
+          Pipeline
+        </span>
+      </div>
+      <div className="grid grid-cols-4 gap-3">
+        {tiles.map((t) => (
+          <div
+            key={t.label}
+            className="rounded-md p-2"
+            style={{ backgroundColor: "var(--color-elevated)" }}
+          >
+            <div
+              className="text-[10px] uppercase tracking-wider mb-0.5"
+              style={{ color: "var(--color-text-muted)" }}
+            >
+              {t.label}
+            </div>
+            <div
+              className="mono text-sm font-bold"
+              style={{
+                color: t.bad
+                  ? "var(--color-crit)"
+                  : "var(--color-text-primary)",
+              }}
+            >
+              {t.value}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+});
+
 export default function DashboardPage({
   selectedTarget,
   targets,
@@ -302,6 +415,28 @@ export default function DashboardPage({
   const [execSummary, setExecSummary] = useState<HealthCard["metrics"] | null>(
     null,
   );
+  const [pipeline, setPipeline] = useState<PipelineMetrics | null>(null);
+
+  // Pipeline counters: cheap atomic-snapshot endpoint, no device I/O,
+  // so a 2s poll is safe regardless of target state.
+  useEffect(() => {
+    setPipeline(null);
+    let cancelled = false;
+    const load = () => {
+      fetch("/api/metrics")
+        .then((r) => r.json())
+        .then((data: { targets: Record<string, PipelineMetrics> }) => {
+          if (!cancelled) setPipeline(data.targets[selectedTarget] ?? null);
+        })
+        .catch(() => {});
+    };
+    load();
+    const t = setInterval(load, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [selectedTarget]);
   const [healthCards, setHealthCards] = useState<HealthCard[]>([]);
   const [registry, setRegistry] = useState<RegistryComponent[]>([]);
   const [tlmStructs, setTlmStructs] = useState<Map<string, TelemetryStruct>>(
@@ -619,6 +754,9 @@ export default function DashboardPage({
 
       {/* Executive Summary (always present when connected) */}
       {isConnected && execSummary && <ExecutiveSummary metrics={execSummary} />}
+
+      {/* Pipeline counters (present whenever the backend knows the target) */}
+      {pipeline && <PipelineSummary m={pipeline} />}
 
       {/* Component Health Cards */}
       {isConnected && healthCards.length > 0 ? (
