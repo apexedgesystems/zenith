@@ -33,6 +33,7 @@ use tracing_subscriber::EnvFilter;
 use crate::config::ServerConfig;
 use crate::core::aproto_client::{AprotoClient, PushTelemetryPacket};
 use crate::core::config_manager::StructDictionary;
+use crate::core::metrics::TargetMetrics;
 use crate::core::telemetry::{self, TelemetrySample};
 use crate::storage::telemetry_db::TelemetryDb;
 
@@ -56,6 +57,9 @@ struct TargetState {
     /// read this instead of locking `client`, which a file transfer can
     /// hold for the duration of an upload.
     connected: Arc<std::sync::atomic::AtomicBool>,
+    /// Pipeline counters shared by the router, DB writer, WebSocket
+    /// subscribers, and the client's command accounting.
+    metrics: Arc<TargetMetrics>,
     /// Push telemetry raw packets from APROTO reader
     push_tlm_tx: broadcast::Sender<PushTelemetryPacket>,
     /// Decoded telemetry samples for WebSocket subscribers
@@ -225,6 +229,7 @@ async fn do_connect_target(state: &AppState, id: &str) -> Result<bool, (StatusCo
             target.sample_tx.clone(),
             target.struct_dicts.clone(),
             target.manifest.clone(),
+            target.metrics.clone(),
         );
         if let Some(old) = target._router_handle.replace(handle) {
             old.abort();
@@ -1635,10 +1640,18 @@ async fn add_target(
         auto_connect: false,
     };
 
-    // Spawn DB writer for new target
-    spawn_sample_writer(id.clone(), st.db.clone(), sample_tx.subscribe());
+    let metrics = TargetMetrics::new();
 
-    let new_client = AprotoClient::new(push_tlm_tx.clone());
+    // Spawn DB writer for new target
+    spawn_sample_writer(
+        id.clone(),
+        st.db.clone(),
+        sample_tx.subscribe(),
+        metrics.clone(),
+    );
+
+    let mut new_client = AprotoClient::new(push_tlm_tx.clone());
+    new_client.set_metrics(metrics.clone());
     let connected = new_client.connected_handle();
     st.targets.insert(
         id.clone(),
@@ -1646,6 +1659,7 @@ async fn add_target(
             config: tc,
             client: Arc::new(Mutex::new(new_client)),
             connected,
+            metrics,
             push_tlm_tx,
             sample_tx,
             struct_dicts: target_dicts,
@@ -2037,17 +2051,24 @@ async fn telemetry_ws(
         .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
 
     let rx = target.sample_tx.subscribe();
+    let metrics = target.metrics.clone();
     let target_id = id.clone();
 
-    Ok(ws.on_upgrade(move |socket| handle_telemetry_ws(socket, rx, target_id)))
+    Ok(ws.on_upgrade(move |socket| handle_telemetry_ws(socket, rx, target_id, metrics)))
 }
 
 async fn handle_telemetry_ws(
     mut socket: WebSocket,
     mut rx: broadcast::Receiver<TelemetrySample>,
     target_id: String,
+    metrics: Arc<TargetMetrics>,
 ) {
+    use std::sync::atomic::Ordering;
+    const LAG_WARN_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
     tracing::info!("WebSocket client connected for target {}", target_id);
+    metrics.ws_clients.fetch_add(1, Ordering::Relaxed);
+    let mut last_lag_warn: Option<std::time::Instant> = None;
 
     loop {
         match rx.recv().await {
@@ -2058,7 +2079,16 @@ async fn handle_telemetry_ws(
                 }
             }
             Err(broadcast::error::RecvError::Lagged(n)) => {
-                tracing::debug!("WebSocket lagged by {} messages", n);
+                metrics.ws_lag_drops.fetch_add(n, Ordering::Relaxed);
+                if last_lag_warn.is_none_or(|t| t.elapsed() >= LAG_WARN_EVERY) {
+                    tracing::warn!(
+                        "[{}] WebSocket client lagged, {} samples dropped ({} total across clients)",
+                        target_id,
+                        n,
+                        metrics.ws_lag_drops.load(Ordering::Relaxed)
+                    );
+                    last_lag_warn = Some(std::time::Instant::now());
+                }
             }
             Err(broadcast::error::RecvError::Closed) => {
                 break;
@@ -2066,7 +2096,31 @@ async fn handle_telemetry_ws(
         }
     }
 
+    metrics.ws_clients.fetch_sub(1, Ordering::Relaxed);
     tracing::info!("WebSocket client disconnected for target {}", target_id);
+}
+
+/* ----------------------------- Metrics ----------------------------- */
+
+/// Per-target pipeline counters. The numbers answer "did we lose data,
+/// and at which stage": decoded vs dedup-dropped vs lag-dropped vs
+/// written vs failed, plus command round-trip accounting -- every
+/// quantity that previously vanished into an empty Lagged arm or a
+/// discarded Result.
+async fn get_metrics(State(state): State<AppState>) -> Json<serde_json::Value> {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let st = state.read().await;
+    let mut targets = serde_json::Map::new();
+    for (id, t) in &st.targets {
+        let mut snap = t.metrics.snapshot(now_ms);
+        snap["connected"] =
+            serde_json::json!(t.connected.load(std::sync::atomic::Ordering::Acquire));
+        targets.insert(id.clone(), snap);
+    }
+    Json(serde_json::json!({ "targets": targets }))
 }
 
 /* ----------------------------- Audit Log ----------------------------- */
@@ -2310,6 +2364,7 @@ fn build_router(state: AppState) -> Router {
             get(target_get_struct_detail),
         )
         .route("/audit", get(list_audit))
+        .route("/metrics", get(get_metrics))
         .route("/auth/login", post(login));
 
     let static_dir = if std::path::Path::new("/usr/local/share/zenith/static/index.html").exists() {
@@ -2348,11 +2403,15 @@ fn spawn_sample_writer(
     target_id: String,
     db: Arc<TelemetryDb>,
     mut rx: broadcast::Receiver<TelemetrySample>,
+    metrics: Arc<TargetMetrics>,
 ) {
+    use std::sync::atomic::Ordering;
+
     fn flush(
         db: &TelemetryDb,
         target_id: &str,
         batch: &mut Vec<TelemetrySample>,
+        metrics: &TargetMetrics,
         failed_batches: &mut u64,
         last_err_log: &mut Option<std::time::Instant>,
     ) {
@@ -2365,6 +2424,9 @@ fn spawn_sample_writer(
         }
         match db.insert_batch(batch) {
             Ok(()) => {
+                metrics
+                    .db_written_samples
+                    .fetch_add(batch.len() as u64, Ordering::Relaxed);
                 if *failed_batches > 0 {
                     tracing::warn!(
                         "[{}] telemetry writes recovered; {} batches dropped during the outage",
@@ -2377,6 +2439,10 @@ fn spawn_sample_writer(
             }
             Err(e) => {
                 *failed_batches += 1;
+                metrics.db_write_failures.fetch_add(1, Ordering::Relaxed);
+                metrics
+                    .db_failed_samples
+                    .fetch_add(batch.len() as u64, Ordering::Relaxed);
                 if last_err_log.is_none_or(|t| t.elapsed() >= ERR_LOG_EVERY) {
                     tracing::error!(
                         "[{}] telemetry batch insert failed ({} failed batches so far): {}",
@@ -2392,9 +2458,11 @@ fn spawn_sample_writer(
     }
 
     tokio::spawn(async move {
+        const LAG_WARN_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
         let mut batch: Vec<TelemetrySample> = Vec::with_capacity(64);
         let mut failed_batches: u64 = 0;
         let mut last_err_log: Option<std::time::Instant> = None;
+        let mut last_lag_warn: Option<std::time::Instant> = None;
         loop {
             match rx.recv().await {
                 Ok(sample) => {
@@ -2405,12 +2473,24 @@ fn spawn_sample_writer(
                             &db,
                             &target_id,
                             &mut batch,
+                            &metrics,
                             &mut failed_batches,
                             &mut last_err_log,
                         );
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => {}
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    metrics.db_writer_lag_drops.fetch_add(n, Ordering::Relaxed);
+                    if last_lag_warn.is_none_or(|t| t.elapsed() >= LAG_WARN_EVERY) {
+                        tracing::warn!(
+                            "[{}] DB writer lagged, {} samples dropped ({} total)",
+                            target_id,
+                            n,
+                            metrics.db_writer_lag_drops.load(Ordering::Relaxed)
+                        );
+                        last_lag_warn = Some(std::time::Instant::now());
+                    }
+                }
                 Err(broadcast::error::RecvError::Closed) => break,
             }
 
@@ -2420,6 +2500,7 @@ fn spawn_sample_writer(
                     &db,
                     &target_id,
                     &mut batch,
+                    &metrics,
                     &mut failed_batches,
                     &mut last_err_log,
                 );
@@ -2431,6 +2512,7 @@ fn spawn_sample_writer(
             &db,
             &target_id,
             &mut batch,
+            &metrics,
             &mut failed_batches,
             &mut last_err_log,
         );
@@ -2579,7 +2661,9 @@ async fn main() {
             }
         });
 
-        let new_client = AprotoClient::new(push_tlm_tx.clone());
+        let metrics = TargetMetrics::new();
+        let mut new_client = AprotoClient::new(push_tlm_tx.clone());
+        new_client.set_metrics(metrics.clone());
         let connected = new_client.connected_handle();
         targets.insert(
             id,
@@ -2587,6 +2671,7 @@ async fn main() {
                 config: tc.clone(),
                 client: Arc::new(Mutex::new(new_client)),
                 connected,
+                metrics,
                 push_tlm_tx,
                 sample_tx,
                 struct_dicts: target_dicts,
@@ -2620,7 +2705,12 @@ async fn main() {
     // Spawn background writer: subscribes to each target's sample_tx and writes to DB.
     // Each writer flushes remaining samples when the broadcast channel closes (shutdown).
     for (id, target) in targets.iter() {
-        spawn_sample_writer(id.clone(), db.clone(), target.sample_tx.subscribe());
+        spawn_sample_writer(
+            id.clone(),
+            db.clone(),
+            target.sample_tx.subscribe(),
+            target.metrics.clone(),
+        );
     }
 
     // Spawn periodic maintenance (every 5 minutes)

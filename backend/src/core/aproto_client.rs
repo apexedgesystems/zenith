@@ -91,6 +91,9 @@ pub struct AprotoClient {
     writer_handle: Option<tokio::task::JoinHandle<()>>,
     seq: u16,
     command_timeout: Duration,
+    /// Optional pipeline counters; when set, every command round trip
+    /// records send/error/timeout counts and successful-trip latency.
+    metrics: Option<Arc<crate::core::metrics::TargetMetrics>>,
     connected: Arc<AtomicBool>,
     /// Generation counter: increments on each connect. Reader tasks only
     /// clear `connected` if their generation matches (prevents stale tasks
@@ -110,9 +113,15 @@ impl AprotoClient {
             writer_handle: None,
             seq: 0,
             command_timeout: Duration::from_secs(5),
+            metrics: None,
             connected: Arc::new(AtomicBool::new(false)),
             generation: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Attach pipeline counters for command accounting.
+    pub fn set_metrics(&mut self, metrics: Arc<crate::core::metrics::TargetMetrics>) {
+        self.metrics = Some(metrics);
     }
 
     pub async fn connect(&mut self, host: &str, port: u16) -> Result<(), ClientError> {
@@ -280,6 +289,34 @@ impl AprotoClient {
     }
 
     pub async fn send_command(
+        &mut self,
+        full_uid: u32,
+        opcode: u16,
+        payload: &[u8],
+    ) -> Result<aproto::AckResponse, ClientError> {
+        let started = std::time::Instant::now();
+        let result = self.send_command_inner(full_uid, opcode, payload).await;
+        if let Some(m) = &self.metrics {
+            m.commands_sent.fetch_add(1, Ordering::Relaxed);
+            match &result {
+                // A NAK is still a completed round trip; only transport
+                // failures count as errors.
+                Ok(_) => {
+                    m.command_latency_us_total
+                        .fetch_add(started.elapsed().as_micros() as u64, Ordering::Relaxed);
+                }
+                Err(e) => {
+                    m.command_errors.fetch_add(1, Ordering::Relaxed);
+                    if matches!(e, ClientError::Timeout) {
+                        m.command_timeouts.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    async fn send_command_inner(
         &mut self,
         full_uid: u32,
         opcode: u16,
