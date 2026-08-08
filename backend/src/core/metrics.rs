@@ -70,7 +70,7 @@ impl TargetMetrics {
             "commands_sent": sent,
             "command_errors": errors,
             "command_timeouts": self.command_timeouts.load(Ordering::Relaxed),
-            "command_latency_avg_us": if ok > 0 { lat_total / ok } else { 0 },
+            "command_latency_avg_us": lat_total.checked_div(ok).unwrap_or(0),
             "last_sample_age_ms": if last > 0 { Some(now_ms.saturating_sub(last)) } else { None },
         })
     }
