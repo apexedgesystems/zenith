@@ -72,6 +72,9 @@ pub struct PushTelemetryPacket {
 
 struct CommandRequest {
     encoded_packet: Vec<u8>,
+    /// Sequence number stamped into the packet header; the writer task
+    /// only accepts an ACK whose cmd_sequence matches.
+    seq: u16,
     response_tx: oneshot::Sender<Result<aproto::AckResponse, ClientError>>,
 }
 
@@ -190,13 +193,15 @@ impl AprotoClient {
             }
         });
 
-        // Writer task: send commands, pair with ACK from reader.
-        //
-        // LIMITATION: ACK/NAK responses are matched to requests by order,
-        // not by sequence number. If the target reorders responses, the
-        // wrong response will be delivered to the wrong caller. A full fix
-        // would require matching by the sequence number in the ACK payload.
+        // Writer task: send commands, pair each with its ACK by sequence
+        // number. The wait is bounded: a target that never ACKs fails
+        // that one command with Timeout and the writer keeps serving --
+        // an unbounded recv here once wedged the client permanently
+        // (full cmd channel, is_connected still true) until an explicit
+        // disconnect. A late ACK for a timed-out command is discarded by
+        // the sequence match when it eventually arrives.
         let conn_flag_w = connected.clone();
+        let ack_timeout = self.command_timeout;
         let writer_handle = tokio::spawn(async move {
             let mut write_half = write_half;
             let mut cmd_rx = cmd_rx;
@@ -207,14 +212,28 @@ impl AprotoClient {
                     let _ = req.response_tx.send(Err(ClientError::SendFailed));
                     break;
                 }
-                match ack_rx.recv().await {
-                    Some(result) => {
-                        let _ = req.response_tx.send(result);
+                let deadline = tokio::time::Instant::now() + ack_timeout;
+                let result = loop {
+                    match tokio::time::timeout_at(deadline, ack_rx.recv()).await {
+                        Ok(Some(Ok(ack))) => {
+                            if ack.cmd_sequence == req.seq {
+                                break Ok(ack);
+                            }
+                            tracing::warn!(
+                                "Discarding stale ACK (seq {}, awaiting {})",
+                                ack.cmd_sequence,
+                                req.seq
+                            );
+                        }
+                        Ok(Some(Err(e))) => break Err(e),
+                        Ok(None) => break Err(ClientError::Closed),
+                        Err(_) => break Err(ClientError::Timeout),
                     }
-                    None => {
-                        let _ = req.response_tx.send(Err(ClientError::Closed));
-                        break;
-                    }
+                };
+                let closed = matches!(result, Err(ClientError::Closed));
+                let _ = req.response_tx.send(result);
+                if closed {
+                    break;
                 }
             }
 
@@ -251,6 +270,15 @@ impl AprotoClient {
         self.connected.load(Ordering::Acquire)
     }
 
+    /// Lock-free handle to the connection flag. Status reads (target
+    /// lists, health) must not wait on the client mutex -- a file
+    /// transfer holds that mutex for the whole upload -- so they read
+    /// this flag instead. The Arc is stable across reconnects (the
+    /// generation counter guards stale writers).
+    pub fn connected_handle(&self) -> Arc<AtomicBool> {
+        self.connected.clone()
+    }
+
     pub async fn send_command(
         &mut self,
         full_uid: u32,
@@ -267,16 +295,30 @@ impl AprotoClient {
         cmd_tx
             .send(CommandRequest {
                 encoded_packet: encoded,
+                seq,
                 response_tx,
             })
             .await
             .map_err(|_| ClientError::NotConnected)?;
 
-        match timeout(self.command_timeout, response_rx).await {
+        // The writer task owns the ACK timeout; this outer timeout is a
+        // backstop with margin so the writer's verdict (Timeout vs a
+        // late-but-matched ACK) normally wins the race.
+        match timeout(self.command_timeout + Duration::from_secs(2), response_rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err(ClientError::Closed),
             Err(_) => Err(ClientError::Timeout),
         }
+    }
+
+    /// Override the ACK/command timeout (applies to connections made
+    /// after the call; the writer task captures it at connect time).
+    /// The server binary uses the 5 s default; the fake-target tests
+    /// shorten it. allow(dead_code) because the bin target compiles
+    /// this module too and does not call it.
+    #[allow(dead_code)]
+    pub fn set_command_timeout(&mut self, timeout: Duration) {
+        self.command_timeout = timeout;
     }
 
     /* ----------------------------- Convenience ----------------------------- */
@@ -506,5 +548,260 @@ impl AprotoClient {
         let s = self.seq;
         self.seq = self.seq.wrapping_add(1);
         s
+    }
+}
+
+/* ----------------------------- Tests ----------------------------- */
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+    use tokio::net::TcpListener;
+
+    /// Build a SLIP-encoded ACK response packet as a target would send it.
+    fn ack_packet(cmd_opcode: u16, cmd_seq: u16, status: u8) -> Vec<u8> {
+        let mut ack_payload = Vec::with_capacity(8);
+        ack_payload.extend_from_slice(&cmd_opcode.to_le_bytes());
+        ack_payload.extend_from_slice(&cmd_seq.to_le_bytes());
+        ack_payload.push(status);
+        ack_payload.extend_from_slice(&[0u8; 3]);
+
+        let mut pkt = Vec::with_capacity(aproto::HEADER_SIZE + ack_payload.len());
+        pkt.extend_from_slice(&aproto::MAGIC.to_le_bytes());
+        pkt.push(aproto::VERSION);
+        pkt.push(aproto::FLAG_RESPONSE);
+        pkt.extend_from_slice(&0u32.to_le_bytes());
+        pkt.extend_from_slice(&aproto::SYS_ACK.to_le_bytes());
+        pkt.extend_from_slice(&0u16.to_le_bytes());
+        pkt.extend_from_slice(&(ack_payload.len() as u16).to_le_bytes());
+        pkt.extend_from_slice(&ack_payload);
+        slip::encode(&pkt)
+    }
+
+    /// Spawn a fake target that decides per received command what to
+    /// send back. The handler returns SLIP-encoded reply bytes (empty
+    /// vec = stay silent for that command).
+    async fn spawn_fake_target<F>(mut handler: F) -> std::net::SocketAddr
+    where
+        F: FnMut(&aproto::Packet) -> Vec<u8> + Send + 'static,
+    {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = match listener.accept().await {
+                Ok(a) => a,
+                Err(_) => return,
+            };
+            let mut decoder = slip::Decoder::new();
+            let mut buf = [0u8; 65536];
+            loop {
+                let n = match sock.read(&mut buf).await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                for frame in decoder.feed(&buf[..n]) {
+                    if let Some(pkt) = aproto::parse_packet(&frame) {
+                        let reply = handler(&pkt);
+                        if !reply.is_empty() && sock.write_all(&reply).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+        });
+        addr
+    }
+
+    async fn connected_client(
+        addr: std::net::SocketAddr,
+        timeout_ms: u64,
+    ) -> (AprotoClient, broadcast::Receiver<PushTelemetryPacket>) {
+        let (push_tx, push_rx) = broadcast::channel(64);
+        let mut client = AprotoClient::new(push_tx);
+        client.set_command_timeout(Duration::from_millis(timeout_ms));
+        client
+            .connect(&addr.ip().to_string(), addr.port())
+            .await
+            .unwrap();
+        (client, push_rx)
+    }
+
+    /// @test A command round-trips against a well-behaved target: the
+    /// ACK is matched by sequence and carries the status through.
+    #[tokio::test]
+    async fn command_round_trip_success() {
+        let addr =
+            spawn_fake_target(|pkt| ack_packet(pkt.header.opcode, pkt.header.sequence, 0)).await;
+        let (mut client, _rx) = connected_client(addr, 1000).await;
+
+        let resp = client.noop().await.unwrap();
+        assert_eq!(resp.status, 0);
+        assert_eq!(resp.cmd_sequence, 0);
+        assert!(client.is_connected());
+    }
+
+    /// @test A target that never ACKs fails that command with Timeout,
+    /// and the client remains connected and usable: the next command
+    /// (which the target does ACK) succeeds. Guards against the
+    /// unbounded ACK wait that permanently wedged the writer task.
+    #[tokio::test]
+    async fn missing_ack_times_out_and_client_recovers() {
+        let addr = spawn_fake_target(|pkt| {
+            if pkt.header.sequence == 0 {
+                Vec::new() // stay silent on the first command
+            } else {
+                ack_packet(pkt.header.opcode, pkt.header.sequence, 0)
+            }
+        })
+        .await;
+        let (mut client, _rx) = connected_client(addr, 200).await;
+
+        let first = client.noop().await;
+        assert!(matches!(first, Err(ClientError::Timeout)), "{first:?}");
+        assert!(
+            client.is_connected(),
+            "timeout must not tear down the connection"
+        );
+
+        let second = client.noop().await.unwrap();
+        assert_eq!(second.status, 0);
+        assert_eq!(second.cmd_sequence, 1);
+    }
+
+    /// @test An ACK that arrives after its command already timed out is
+    /// discarded by the sequence match instead of being delivered to
+    /// the next command.
+    #[tokio::test]
+    async fn late_ack_is_discarded_not_misdelivered() {
+        let addr = spawn_fake_target(|pkt| {
+            if pkt.header.sequence == 0 {
+                Vec::new() // silent: seq 0 will time out; ACK it later via seq-1 handler
+            } else {
+                // Deliver the stale seq-0 ACK first, then the real one.
+                let mut both = ack_packet(aproto::SYS_NOOP, 0, 0);
+                both.extend_from_slice(&ack_packet(pkt.header.opcode, pkt.header.sequence, 0));
+                both
+            }
+        })
+        .await;
+        let (mut client, _rx) = connected_client(addr, 200).await;
+
+        assert!(matches!(client.noop().await, Err(ClientError::Timeout)));
+        let resp = client.noop().await.unwrap();
+        assert_eq!(
+            resp.cmd_sequence, 1,
+            "second command must get its own ACK, not the stale seq-0 one"
+        );
+    }
+
+    /// @test An ACK whose sequence never matches the in-flight command
+    /// is not delivered; the command times out rather than receiving a
+    /// mismatched response.
+    #[tokio::test]
+    async fn mismatched_seq_ack_is_not_delivered() {
+        let addr = spawn_fake_target(|pkt| ack_packet(pkt.header.opcode, 999, 0)).await;
+        let (mut client, _rx) = connected_client(addr, 200).await;
+
+        assert!(matches!(client.noop().await, Err(ClientError::Timeout)));
+        assert!(client.is_connected());
+    }
+
+    /// @test A remote close while a command is in flight yields Closed
+    /// and drops is_connected.
+    #[tokio::test]
+    async fn remote_close_yields_closed_and_disconnects() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = sock.read(&mut buf).await; // receive the command
+            drop(sock); // close without ACKing
+        });
+        let (mut client, _rx) = connected_client(addr, 1000).await;
+
+        let resp = client.noop().await;
+        assert!(
+            matches!(resp, Err(ClientError::Closed) | Err(ClientError::Timeout)),
+            "{resp:?}"
+        );
+        // Reader observes the close and clears the flag.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!client.is_connected());
+    }
+
+    /// @test Sending without a connection returns NotConnected.
+    #[tokio::test]
+    async fn send_without_connection_is_not_connected() {
+        let (push_tx, _rx) = broadcast::channel(4);
+        let mut client = AprotoClient::new(push_tx);
+        assert!(matches!(
+            client.noop().await,
+            Err(ClientError::NotConnected)
+        ));
+    }
+
+    /// @test upload_file emits FILE_BEGIN with correct size/chunking/CRC
+    /// fields, the right number of FILE_CHUNKs in order, and FILE_END.
+    #[tokio::test]
+    async fn upload_file_chunks_and_crc_are_correct() {
+        let seen: Arc<Mutex<Vec<(u16, Vec<u8>)>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen_writer = seen.clone();
+        let addr = spawn_fake_target(move |pkt| {
+            seen_writer
+                .lock()
+                .unwrap()
+                .push((pkt.header.opcode, pkt.payload.clone()));
+            ack_packet(pkt.header.opcode, pkt.header.sequence, 0)
+        })
+        .await;
+        let (mut client, _rx) = connected_client(addr, 1000).await;
+
+        // 10000 bytes -> 3 chunks of 4096/4096/1808
+        let data: Vec<u8> = (0..10000u32).map(|i| (i % 251) as u8).collect();
+        let resp = client.upload_file("test/upload.bin", &data).await.unwrap();
+        assert_eq!(resp.status, 0);
+
+        let seen = seen.lock().unwrap();
+        let opcodes: Vec<u16> = seen.iter().map(|(o, _)| *o).collect();
+        assert_eq!(
+            opcodes,
+            vec![
+                aproto::FILE_BEGIN,
+                aproto::FILE_CHUNK,
+                aproto::FILE_CHUNK,
+                aproto::FILE_CHUNK,
+                aproto::FILE_END
+            ]
+        );
+
+        let begin = &seen[0].1;
+        assert_eq!(u32::from_le_bytes(begin[0..4].try_into().unwrap()), 10000);
+        assert_eq!(u16::from_le_bytes(begin[4..6].try_into().unwrap()), 4096);
+        assert_eq!(u16::from_le_bytes(begin[6..8].try_into().unwrap()), 3);
+        assert_eq!(
+            u32::from_le_bytes(begin[8..12].try_into().unwrap()),
+            crc32c(&data)
+        );
+        assert!(begin[12..].starts_with(b"test/upload.bin\0"));
+
+        // Chunk indices ascend from 0 and sizes partition the data.
+        let chunk_sizes: Vec<usize> = seen[1..4]
+            .iter()
+            .enumerate()
+            .map(|(i, (_, p))| {
+                assert_eq!(u16::from_le_bytes(p[0..2].try_into().unwrap()) as usize, i);
+                p.len() - 2
+            })
+            .collect();
+        assert_eq!(chunk_sizes, vec![4096, 4096, 1808]);
+    }
+
+    /// @test crc32c matches the CRC-32C (Castagnoli) check vectors.
+    #[test]
+    fn crc32c_known_vectors() {
+        assert_eq!(crc32c(b""), 0x0000_0000);
+        assert_eq!(crc32c(b"123456789"), 0xE306_9283);
     }
 }

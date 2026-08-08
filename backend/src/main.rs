@@ -52,6 +52,10 @@ struct Cli {
 struct TargetState {
     config: config::TargetSection,
     client: Arc<Mutex<AprotoClient>>,
+    /// Lock-free view of the client's connection flag. Status endpoints
+    /// read this instead of locking `client`, which a file transfer can
+    /// hold for the duration of an upload.
+    connected: Arc<std::sync::atomic::AtomicBool>,
     /// Push telemetry raw packets from APROTO reader
     push_tlm_tx: broadcast::Sender<PushTelemetryPacket>,
     /// Decoded telemetry samples for WebSocket subscribers
@@ -161,11 +165,81 @@ async fn server_version() -> Json<serde_json::Value> {
     }))
 }
 
+/// Snapshot a target's client handle and the audit DB under a short
+/// read guard. Callers do target I/O only AFTER this returns: tokio's
+/// RwLock is writer-preferring, so a guard held across an APROTO round
+/// trip (worst case a multi-thousand-RTT file upload) parks the next
+/// writer and stalls every request behind it.
+async fn target_client(
+    state: &AppState,
+    id: &str,
+) -> Result<(Arc<Mutex<AprotoClient>>, Arc<TelemetryDb>), (StatusCode, String)> {
+    let st = state.read().await;
+    let target = st
+        .targets
+        .get(id)
+        .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
+    Ok((target.client.clone(), st.db.clone()))
+}
+
+/// Connect a target's client and attach its telemetry router.
+/// Returns Ok(true) on a fresh connect, Ok(false) if already connected.
+///
+/// The connected check and the TCP connect run under the client mutex
+/// (not the state guard), which gives the same TOCTOU protection the
+/// old hold-the-write-lock version had: a concurrent connect serializes
+/// on the mutex and sees is_connected() == true.
+async fn do_connect_target(state: &AppState, id: &str) -> Result<bool, (StatusCode, String)> {
+    let (client, host, port) = {
+        let st = state.read().await;
+        let target = st
+            .targets
+            .get(id)
+            .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
+        (
+            target.client.clone(),
+            target.config.host.clone(),
+            target.config.port,
+        )
+    };
+
+    {
+        let mut cli = client.lock().await;
+        if cli.is_connected() {
+            return Ok(false);
+        }
+        cli.connect(&host, port)
+            .await
+            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Connect failed: {}", e)))?;
+    }
+
+    // Attach the telemetry router under a short write guard. Replacing
+    // the handle aborts any previous router so a reconnect can't leave
+    // two subscribers decoding the same push stream.
+    let mut st = state.write().await;
+    if let Some(target) = st.targets.get_mut(id) {
+        let push_rx = target.push_tlm_tx.subscribe();
+        let handle = telemetry::spawn_router(
+            id.to_string(),
+            push_rx,
+            target.sample_tx.clone(),
+            target.struct_dicts.clone(),
+            target.manifest.clone(),
+        );
+        if let Some(old) = target._router_handle.replace(handle) {
+            old.abort();
+        }
+    }
+    Ok(true)
+}
+
 async fn list_targets(State(state): State<AppState>) -> Json<serde_json::Value> {
     let st = state.read().await;
     let mut targets: Vec<TargetInfo> = Vec::new();
     for (id, t) in &st.targets {
-        let connected = t.client.lock().await.is_connected();
+        // Lock-free flag read: locking the client here would make the
+        // 3s frontend poll stall behind any in-flight file transfer.
+        let connected = t.connected.load(std::sync::atomic::Ordering::Acquire);
         targets.push(TargetInfo {
             id: id.clone(),
             name: t.config.name.clone(),
@@ -184,27 +258,39 @@ async fn connect_target(
     Path(id): Path<String>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    // Hold the write lock across the entire connect operation to prevent
-    // TOCTOU races between the is_connected check and the connect call.
-    let mut st = state.write().await;
-    let db_for_audit = st.db.clone();
-    let target = st
-        .targets
-        .get_mut(&id)
-        .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
-
-    let host = target.config.host.clone();
-    let port = target.config.port;
+    let (host, port, db_for_audit) = {
+        let st = state.read().await;
+        let target = st
+            .targets
+            .get(&id)
+            .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
+        (
+            target.config.host.clone(),
+            target.config.port,
+            st.db.clone(),
+        )
+    };
     let ip_str = addr.ip().to_string();
-    {
-        let mut cli = target.client.lock().await;
-        if cli.is_connected() {
-            return Ok(Json(
-                serde_json::json!({"status": "already_connected", "target": id}),
-            ));
+
+    match do_connect_target(&state, &id).await {
+        Ok(false) => Ok(Json(
+            serde_json::json!({"status": "already_connected", "target": id}),
+        )),
+        Ok(true) => {
+            record_audit(
+                &db_for_audit,
+                "operator",
+                "connect_target",
+                Some(&id),
+                Some(&format!("{}:{}", host, port)),
+                "ok",
+                Some(&ip_str),
+            );
+            Ok(Json(
+                serde_json::json!({"status": "connected", "target": id}),
+            ))
         }
-        if let Err(e) = cli.connect(&host, port).await {
-            let err_msg = format!("Connect failed: {}", e);
+        Err((code, err_msg)) => {
             record_audit(
                 &db_for_audit,
                 "operator",
@@ -214,34 +300,9 @@ async fn connect_target(
                 &format!("err: {}", err_msg),
                 Some(&ip_str),
             );
-            return Err((StatusCode::BAD_GATEWAY, err_msg));
+            Err((code, err_msg))
         }
     }
-
-    // Start telemetry router (push packets -> decoded samples)
-    let push_rx = target.push_tlm_tx.subscribe();
-    let handle = telemetry::spawn_router(
-        id.clone(),
-        push_rx,
-        target.sample_tx.clone(),
-        target.struct_dicts.clone(),
-        target.manifest.clone(),
-    );
-    target._router_handle = Some(handle);
-
-    record_audit(
-        &db_for_audit,
-        "operator",
-        "connect_target",
-        Some(&id),
-        Some(&format!("{}:{}", host, port)),
-        "ok",
-        Some(&ip_str),
-    );
-
-    Ok(Json(
-        serde_json::json!({"status": "connected", "target": id}),
-    ))
 }
 
 async fn disconnect_target(
@@ -249,19 +310,23 @@ async fn disconnect_target(
     Path(id): Path<String>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let mut st = state.write().await;
-    let db_for_audit = st.db.clone();
-    let target = st
-        .targets
-        .get_mut(&id)
-        .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
+    // Snapshot and drop the write guard before touching the client
+    // mutex: an in-flight upload holds that mutex, and waiting for it
+    // under the write guard would stall the whole API until it ends.
+    let (client, db_for_audit) = {
+        let mut st = state.write().await;
+        let db = st.db.clone();
+        let target = st
+            .targets
+            .get_mut(&id)
+            .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
+        if let Some(h) = target._router_handle.take() {
+            h.abort();
+        }
+        (target.client.clone(), db)
+    };
 
-    // Abort telemetry router
-    if let Some(h) = target._router_handle.take() {
-        h.abort();
-    }
-
-    let mut cli = target.client.lock().await;
+    let mut cli = client.lock().await;
     cli.disconnect();
     drop(cli);
     record_audit(
@@ -282,12 +347,8 @@ async fn target_noop(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<CommandResponse>, (StatusCode, String)> {
-    let st = state.read().await;
-    let target = st
-        .targets
-        .get(&id)
-        .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
-    let mut cli = target.client.lock().await;
+    let (client, _) = target_client(&state, &id).await?;
+    let mut cli = client.lock().await;
     let resp = cli
         .noop()
         .await
@@ -299,12 +360,8 @@ async fn target_health(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<CommandResponse>, (StatusCode, String)> {
-    let st = state.read().await;
-    let target = st
-        .targets
-        .get(&id)
-        .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
-    let mut cli = target.client.lock().await;
+    let (client, _) = target_client(&state, &id).await?;
+    let mut cli = client.lock().await;
     let resp = cli
         .get_health()
         .await
@@ -317,12 +374,6 @@ async fn target_inspect(
     Path((id, uid_str)): Path<(String, String)>,
     axum::extract::Query(query): axum::extract::Query<InspectQuery>,
 ) -> Result<Json<CommandResponse>, (StatusCode, String)> {
-    let st = state.read().await;
-    let target = st
-        .targets
-        .get(&id)
-        .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
-
     let uid_clean = uid_str.trim_start_matches("0x").trim_start_matches("0X");
     let full_uid = u32::from_str_radix(uid_clean, 16).map_err(|_| {
         (
@@ -331,7 +382,8 @@ async fn target_inspect(
         )
     })?;
 
-    let mut cli = target.client.lock().await;
+    let (client, _) = target_client(&state, &id).await?;
+    let mut cli = client.lock().await;
     let resp = cli
         .inspect(full_uid, query.category, query.offset, query.length)
         .await
@@ -346,12 +398,7 @@ async fn upload_file(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<FileUploadRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let st = state.read().await;
-    let target = st
-        .targets
-        .get(&id)
-        .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
-    let db_for_audit = st.db.clone();
+    let (client, db_for_audit) = target_client(&state, &id).await?;
 
     // Decode base64 file content
     use base64::Engine;
@@ -362,7 +409,7 @@ async fn upload_file(
     let detail = format!("path={} bytes={}", body.remote_path, data.len());
     let ip_str = addr.ip().to_string();
 
-    let mut cli = target.client.lock().await;
+    let mut cli = client.lock().await;
     let result = cli.upload_file(&body.remote_path, &data).await;
     drop(cli);
 
@@ -427,27 +474,21 @@ fn default_inactive_bank() -> String {
 
 /// Restart the executive on a target via RELOAD_EXECUTIVE (0x0127).
 ///
-/// Apex closes the connection before sending an ACK because the
-/// executive calls execv() inside the command handler. The
-/// `AprotoClient::restart_executive()` helper catches the expected
-/// connection-closed error and returns a synthetic SUCCESS, so the
-/// audit log gets a clean "ok" entry instead of the misleading
-/// "err: connection closed by remote" the generic /command path
-/// produced before this dedicated endpoint existed.
+/// Apex defers the execv() until the ACK is on the wire, so a healthy
+/// restart returns a normal SUCCESS response here; the client helper
+/// then disconnects because the process image is about to be replaced
+/// and the socket will drop. An error from this path is therefore a
+/// real failure (the ACK never arrived), not the expected close --
+/// callers reconnect after a few seconds.
 async fn restart_target(
     State(state): State<AppState>,
     Path(id): Path<String>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let st = state.read().await;
-    let target = st
-        .targets
-        .get(&id)
-        .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
-    let db_for_audit = st.db.clone();
+    let (client, db_for_audit) = target_client(&state, &id).await?;
     let ip_str = addr.ip().to_string();
 
-    let mut cli = target.client.lock().await;
+    let mut cli = client.lock().await;
     let result = cli.restart_executive().await;
     drop(cli);
 
@@ -491,12 +532,7 @@ async fn swap_library(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<SwapLibraryRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let st = state.read().await;
-    let target = st
-        .targets
-        .get(&id)
-        .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
-    let db_for_audit = st.db.clone();
+    let (client, db_for_audit) = target_client(&state, &id).await?;
 
     let uid_clean = uid_str.trim_start_matches("0x").trim_start_matches("0X");
     let full_uid = u32::from_str_radix(uid_clean, 16).map_err(|_| {
@@ -531,7 +567,7 @@ async fn swap_library(
     );
     let ip_str = addr.ip().to_string();
 
-    let mut cli = target.client.lock().await;
+    let mut cli = client.lock().await;
     let result = cli
         .swap_library(
             full_uid,
@@ -609,12 +645,7 @@ async fn send_command(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<SendCommandRequest>,
 ) -> Result<Json<CommandResponse>, (StatusCode, String)> {
-    let st = state.read().await;
-    let target = st
-        .targets
-        .get(&id)
-        .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
-    let db_for_audit = st.db.clone();
+    let (client, db_for_audit) = target_client(&state, &id).await?;
 
     // Parse fullUid
     let uid_clean = body
@@ -660,7 +691,7 @@ async fn send_command(
     );
     let ip_str = addr.ip().to_string();
 
-    let mut cli = target.client.lock().await;
+    let mut cli = client.lock().await;
     let result = cli.send_command(full_uid, opcode, &payload).await;
     drop(cli);
 
@@ -802,13 +833,18 @@ async fn get_params(
     State(state): State<AppState>,
     Path((id, uid_str)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let st = state.read().await;
-    let target = st
-        .targets
-        .get(&id)
-        .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
-    let dicts = target.struct_dicts.clone();
-    let manifest = target.manifest.clone();
+    let (client, dicts, manifest) = {
+        let st = state.read().await;
+        let target = st
+            .targets
+            .get(&id)
+            .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
+        (
+            target.client.clone(),
+            target.struct_dicts.clone(),
+            target.manifest.clone(),
+        )
+    };
 
     let uid_clean = uid_str.trim_start_matches("0x").trim_start_matches("0X");
     let full_uid = u32::from_str_radix(uid_clean, 16).map_err(|_| {
@@ -819,7 +855,7 @@ async fn get_params(
     })?;
 
     // INSPECT TUNABLE_PARAM (category=1)
-    let mut cli = target.client.lock().await;
+    let mut cli = client.lock().await;
     let resp = cli
         .inspect(full_uid, 1, 0, 0)
         .await
@@ -895,14 +931,19 @@ async fn update_params(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<UpdateParamsRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let st = state.read().await;
-    let target = st
-        .targets
-        .get(&id)
-        .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
-    let dicts = target.struct_dicts.clone();
-    let manifest = target.manifest.clone();
-    let db_for_audit = st.db.clone();
+    let (client, dicts, manifest, db_for_audit) = {
+        let st = state.read().await;
+        let target = st
+            .targets
+            .get(&id)
+            .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
+        (
+            target.client.clone(),
+            target.struct_dicts.clone(),
+            target.manifest.clone(),
+            st.db.clone(),
+        )
+    };
 
     let uid_clean = uid_str.trim_start_matches("0x").trim_start_matches("0X");
     let full_uid = u32::from_str_radix(uid_clean, 16).map_err(|_| {
@@ -912,18 +953,15 @@ async fn update_params(
         )
     })?;
 
-    // Decode the original binary from the frontend (from the initial page load).
-    // No hidden INSPECT -- the user sees what they're modifying.
-    let original_binary: Vec<u8> = body
-        .raw_hex
-        .as_ref()
-        .map(|hex| {
-            hex.as_bytes()
-                .chunks(2)
-                .filter_map(|c| u8::from_str_radix(std::str::from_utf8(c).unwrap_or("00"), 16).ok())
-                .collect()
-        })
-        .unwrap_or_default();
+    // Decode the original binary from the frontend (from the initial page
+    // load). No hidden INSPECT -- the user sees what they're modifying.
+    // Strict decode: this buffer becomes bytes written to the target, so
+    // malformed hex must be a 400, never silently patched with zeros.
+    let original_binary: Vec<u8> = match body.raw_hex.as_deref() {
+        Some(h) => hex::decode(h)
+            .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid raw_hex: {}", e)))?,
+        None => Vec::new(),
+    };
 
     let mut struct_size = 0usize;
     let mut struct_fields = Vec::new();
@@ -1041,7 +1079,7 @@ async fn update_params(
     );
     let ip_str = addr.ip().to_string();
 
-    let mut cli = target.client.lock().await;
+    let mut cli = client.lock().await;
     let result = cli.update_tprm(full_uid, &binary).await;
     drop(cli);
 
@@ -1556,24 +1594,35 @@ async fn add_target(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<AddTargetRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let mut st = state.write().await;
-    let db_for_audit = st.db.clone();
-
-    // Generate ID
-    let id = format!("target-{}", st.targets.len());
-
-    // Load struct dicts if specified
-    let target_dicts = if let Some(ref dir) = body.structs_dir {
-        match StructDictionary::load_dir(&std::path::PathBuf::from(dir)) {
-            Ok(dicts) => Arc::new(dicts),
-            Err(_) => st.struct_dicts.clone(),
-        }
-    } else {
-        st.struct_dicts.clone()
-    };
+    // Load struct dicts BEFORE taking the write guard -- load_dir hits
+    // the filesystem and must not stall every request behind a parked
+    // writer.
+    let loaded_dicts = body
+        .structs_dir
+        .as_ref()
+        .and_then(|dir| StructDictionary::load_dir(&std::path::PathBuf::from(dir)).ok())
+        .map(Arc::new);
 
     let (push_tlm_tx, _) = broadcast::channel::<PushTelemetryPacket>(4096);
     let (sample_tx, _) = broadcast::channel::<TelemetrySample>(4096);
+
+    let mut st = state.write().await;
+    let db_for_audit = st.db.clone();
+
+    // ID scheme: config-file targets are positional (target-0,
+    // target-1, ...) and stable across restarts so their DB history
+    // stays addressable. Dynamically added targets get a random
+    // suffix: any length-derived id can collide with an id already
+    // carried by another target's telemetry rows, layouts, and audit
+    // history after a remove-then-add sequence.
+    let id = loop {
+        let candidate = format!("target-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+        if !st.targets.contains_key(&candidate) {
+            break candidate;
+        }
+    };
+
+    let target_dicts = loaded_dicts.unwrap_or_else(|| st.struct_dicts.clone());
 
     let tc = config::TargetSection {
         name: body.name.clone(),
@@ -1589,11 +1638,14 @@ async fn add_target(
     // Spawn DB writer for new target
     spawn_sample_writer(id.clone(), st.db.clone(), sample_tx.subscribe());
 
+    let new_client = AprotoClient::new(push_tlm_tx.clone());
+    let connected = new_client.connected_handle();
     st.targets.insert(
         id.clone(),
         TargetState {
             config: tc,
-            client: Arc::new(Mutex::new(AprotoClient::new(push_tlm_tx.clone()))),
+            client: Arc::new(Mutex::new(new_client)),
+            connected,
             push_tlm_tx,
             sample_tx,
             struct_dicts: target_dicts,
@@ -1631,12 +1683,17 @@ async fn remove_target(
     Path(id): Path<String>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let mut st = state.write().await;
-    let db_for_audit = st.db.clone();
-    let target = st
-        .targets
-        .remove(&id)
-        .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
+    // Remove under the write guard, then drop it before waiting on the
+    // client mutex (an in-flight upload can hold that mutex for a while).
+    let (target, db_for_audit) = {
+        let mut st = state.write().await;
+        let db = st.db.clone();
+        let target = st
+            .targets
+            .remove(&id)
+            .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
+        (target, db)
+    };
 
     let target_name = target.config.name.clone();
 
@@ -1669,14 +1726,17 @@ async fn target_registry(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let st = state.read().await;
-    let target = st
-        .targets
-        .get(&id)
-        .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
+    let (client, manifest) = {
+        let st = state.read().await;
+        let target = st
+            .targets
+            .get(&id)
+            .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
+        (target.client.clone(), target.manifest.clone())
+    };
 
     // Use app manifest (build artifact) for component registry
-    let manifest_components = match &target.manifest {
+    let manifest_components = match manifest {
         Some(m) => m.components.clone(),
         None => {
             return Err((
@@ -1688,7 +1748,7 @@ async fn target_registry(
         }
     };
 
-    let mut cli = target.client.lock().await;
+    let mut cli = client.lock().await;
     let connected = cli.is_connected();
 
     let mut components = Vec::new();
@@ -1730,13 +1790,8 @@ async fn target_schedule(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let st = state.read().await;
-    let target = st
-        .targets
-        .get(&id)
-        .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
-
-    let mut cli = target.client.lock().await;
+    let (client, _) = target_client(&state, &id).await?;
+    let mut cli = client.lock().await;
     if !cli.is_connected() {
         return Err((StatusCode::BAD_GATEWAY, "Not connected".to_string()));
     }
@@ -2524,11 +2579,14 @@ async fn main() {
             }
         });
 
+        let new_client = AprotoClient::new(push_tlm_tx.clone());
+        let connected = new_client.connected_handle();
         targets.insert(
             id,
             TargetState {
                 config: tc.clone(),
-                client: Arc::new(Mutex::new(AprotoClient::new(push_tlm_tx.clone()))),
+                client: Arc::new(Mutex::new(new_client)),
+                connected,
                 push_tlm_tx,
                 sample_tx,
                 struct_dicts: target_dicts,
@@ -2658,39 +2716,14 @@ async fn main() {
         if !auto_ids.is_empty() {
             tokio::spawn(async move {
                 for id in auto_ids {
-                    let mut st = state_for_autoconnect.write().await;
-                    if let Some(target) = st.targets.get_mut(&id) {
-                        let host = target.config.host.clone();
-                        let port = target.config.port;
-                        let mut cli = target.client.lock().await;
-                        match cli.connect(&host, port).await {
-                            Ok(()) => {
-                                tracing::info!(
-                                    "auto_connect: {} connected to {}:{}",
-                                    id,
-                                    host,
-                                    port
-                                );
-                                drop(cli);
-                                let push_rx = target.push_tlm_tx.subscribe();
-                                let handle = telemetry::spawn_router(
-                                    id.clone(),
-                                    push_rx,
-                                    target.sample_tx.clone(),
-                                    target.struct_dicts.clone(),
-                                    target.manifest.clone(),
-                                );
-                                target._router_handle = Some(handle);
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "auto_connect: {} failed to connect to {}:{}: {}",
-                                    id,
-                                    host,
-                                    port,
-                                    e
-                                );
-                            }
+                    // Same snapshot-then-connect path as the HTTP handler:
+                    // a slow target must not hold the state write guard
+                    // (5 s TCP timeout each) while the API serves requests.
+                    match do_connect_target(&state_for_autoconnect, &id).await {
+                        Ok(true) => tracing::info!("auto_connect: {} connected", id),
+                        Ok(false) => {}
+                        Err((_, e)) => {
+                            tracing::warn!("auto_connect: {} failed: {}", id, e);
                         }
                     }
                 }
