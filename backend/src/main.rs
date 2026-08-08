@@ -2133,9 +2133,9 @@ async fn handle_telemetry_ws(
 
 /// Per-target pipeline counters. The numbers answer "did we lose data,
 /// and at which stage": decoded vs dedup-dropped vs lag-dropped vs
-/// written vs failed, plus command round-trip accounting -- every
-/// quantity that previously vanished into an empty Lagged arm or a
-/// discarded Result.
+/// written vs failed, plus command round-trip accounting. Every stage
+/// that can drop or fail reports here; nothing in the pipeline is
+/// allowed to lose data uncounted.
 async fn get_metrics(State(state): State<AppState>) -> Json<serde_json::Value> {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
