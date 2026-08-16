@@ -35,6 +35,7 @@ use crate::core::aproto_client::{AprotoClient, PushTelemetryPacket};
 use crate::core::config_manager::StructDictionary;
 use crate::core::metrics::TargetMetrics;
 use crate::core::telemetry::{self, TelemetrySample};
+use crate::core::tprm;
 use crate::storage::telemetry_db::TelemetryDb;
 
 /* ----------------------------- CLI ----------------------------- */
@@ -948,8 +949,12 @@ async fn get_params(
 struct UpdateParamsRequest {
     /// Field values as JSON object (field_name -> value) -- flat params
     fields: serde_json::Map<String, serde_json::Value>,
-    /// Entry array for variable-length TPRMs (header+entries)
+    /// Entry array for variable-length TPRMs (header+entries). Part of
+    /// the request contract the frontend still sends; the handler
+    /// currently answers 501 for variable-length until the v3 contract
+    /// pins that shape, so nothing reads it yet.
     #[serde(default)]
+    #[allow(dead_code)]
     entries: Option<Vec<serde_json::Map<String, serde_json::Value>>>,
     /// Flag for variable-length mode
     #[serde(default)]
@@ -1002,74 +1007,16 @@ async fn update_params(
 
     // Build binary TPRM from edited fields
     let binary = if body.variable_length {
-        // Variable-length: find header + entry struct pair
-        let comp_name = manifest.as_ref().and_then(|m| {
-            m.components.iter().find_map(|c| {
-                let uid_clean = c.full_uid.trim_start_matches("0x").trim_start_matches("0X");
-                let uid = u32::from_str_radix(uid_clean, 16).ok()?;
-                if uid == full_uid {
-                    Some(c.name.as_str())
-                } else {
-                    None
-                }
-            })
-        });
-
-        // Find the two TUNABLE_PARAM structs (header = smaller, entry = larger)
-        let mut tunable_structs: Vec<&crate::core::config_manager::StructDef> = Vec::new();
-        for dict in dicts.components.values() {
-            if let Some(hint) = comp_name {
-                let dn = dict.component.to_lowercase();
-                let hn = hint.to_lowercase();
-                if dn != hn && !dn.contains(&hn) && !hn.contains(&dn) {
-                    continue;
-                }
-            }
-            for sdef in dict.structs.values() {
-                if sdef.category == "TUNABLE_PARAM" && !sdef.fields.is_empty() && sdef.size > 0 {
-                    tunable_structs.push(sdef);
-                }
-            }
-        }
-        tunable_structs.sort_by_key(|s| s.size);
-
-        if tunable_structs.len() < 2 {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "Cannot find header+entry struct pair".to_string(),
-            ));
-        }
-
-        let hdr_struct = tunable_structs[0]; // smaller = header
-        let ent_struct = tunable_structs[1]; // larger = entry
-        let entries = body
-            .entries
-            .as_ref()
-            .ok_or((StatusCode::BAD_REQUEST, "Missing entries".to_string()))?;
-
-        let total_size = hdr_struct.size + entries.len() * ent_struct.size;
-        let mut buf = vec![0u8; total_size];
-
-        // Encode header
-        for field in &hdr_struct.fields {
-            if let Some(value) = body.fields.get(&field.name) {
-                encode_field(&mut buf, field, value);
-            }
-        }
-
-        // Encode each entry
-        for (i, entry_fields) in entries.iter().enumerate() {
-            let base = hdr_struct.size + i * ent_struct.size;
-            for field in &ent_struct.fields {
-                if let Some(value) = entry_fields.get(&field.name) {
-                    let mut adjusted_field = field.clone();
-                    adjusted_field.offset = base + field.offset;
-                    encode_field(&mut buf, &adjusted_field, value);
-                }
-            }
-        }
-
-        buf
+        // The v3 layout-hash recipe for variable-length (header +
+        // entries) payloads is not yet pinned by the conformance
+        // contract, and an unverifiable stamp on a device-write path
+        // is worse than an explicit refusal. Tracked with the apex
+        // side via the relay thread; flat-struct updates cover every
+        // ops-demo tunable meanwhile.
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            "variable-length TPRM updates await the v3 contract vectors for that shape".to_string(),
+        ));
     } else {
         // Flat: single struct
         if let Some((_comp, _sname, sdef)) =
@@ -1096,25 +1043,73 @@ async fn update_params(
         } else {
             vec![0u8; struct_size]
         };
+        let mut unencodable: Vec<&str> = Vec::new();
         for field in &struct_fields {
             if let Some(value) = body.fields.get(&field.name) {
-                encode_field(&mut buf, field, value);
+                if !encode_field(&mut buf, field, value) {
+                    unencodable.push(&field.name);
+                }
             }
+        }
+        if !unencodable.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "Cannot encode edited field(s): {} -- unsupported type/size or wrong value type",
+                    unencodable.join(", ")
+                ),
+            ));
         }
         buf
     };
 
+    // Stamp the v3 prelude: the vehicle verifies magic, version, size,
+    // target uid, layout hash, and body CRC before the payload reaches
+    // a component, and rejects unstamped uploads. The layout hash is
+    // computed from the same dict fields that encoded the body (dict
+    // declaration order is template emission order). The dicts are
+    // flattened, so a template using nested-struct containers would
+    // hash differently on the vehicle -- which rejects with a distinct
+    // layout-hash fault rather than misloading; exporting the hash
+    // from the dict generator is the standing fix (relay thread).
+    let leaves: Vec<tprm::LeafSpec> = struct_fields
+        .iter()
+        .map(|f| tprm::LeafSpec {
+            name: &f.name,
+            field_type: &f.field_type,
+            size: f.size,
+            array: if f.field_type == "array" {
+                let count = f
+                    .dims
+                    .as_ref()
+                    .map(|d| d.iter().product::<usize>())
+                    .unwrap_or(1)
+                    .max(1);
+                Some((
+                    f.element_type.as_deref().unwrap_or("uint"),
+                    f.size / count,
+                    count,
+                ))
+            } else {
+                None
+            },
+        })
+        .collect();
+    let stamped = tprm::stamp_v3(full_uid, tprm::layout_hash(leaves), &binary)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("TPRM stamp failed: {}", e)))?;
+
     // Upload and reload
     let detail = format!(
-        "uid=0x{:06X} bytes={} field_count={}",
+        "uid=0x{:06X} bytes={} stamped_bytes={} field_count={}",
         full_uid,
         binary.len(),
+        stamped.len(),
         body.fields.len()
     );
     let ip_str = addr.ip().to_string();
 
     let mut cli = client.lock().await;
-    let result = cli.update_tprm(full_uid, &binary).await;
+    let result = cli.update_tprm(full_uid, &stamped).await;
     drop(cli);
 
     match result {
@@ -1156,42 +1151,56 @@ async fn update_params(
     }
 }
 
+/// Encode one edited field into the payload buffer. Returns false when
+/// the (type, size) shape is not encodable or the value has the wrong
+/// JSON type -- callers must surface that as an error: a silent skip
+/// here uploads the OLD value under a SUCCESS response, which reads as
+/// "applied" while changing nothing (this bit u64 swap thresholds).
 fn encode_field(
     buf: &mut [u8],
     field: &crate::core::config_manager::FieldDef,
     value: &serde_json::Value,
-) {
+) -> bool {
     let off = field.offset;
     if off + field.size > buf.len() {
-        return;
+        return false;
     }
     match (field.field_type.as_str(), field.size) {
-        ("uint", 1) => {
-            if let Some(v) = value.as_u64() {
-                buf[off] = v as u8;
-            }
-        }
-        ("uint", 2) => {
-            if let Some(v) = value.as_u64() {
-                buf[off..off + 2].copy_from_slice(&(v as u16).to_le_bytes());
-            }
-        }
-        ("uint", 4) => {
-            if let Some(v) = value.as_u64() {
-                buf[off..off + 4].copy_from_slice(&(v as u32).to_le_bytes());
-            }
-        }
-        ("float", 4) => {
-            if let Some(v) = value.as_f64() {
-                buf[off..off + 4].copy_from_slice(&(v as f32).to_le_bytes());
-            }
-        }
-        ("float", 8) | ("double", 8) => {
-            if let Some(v) = value.as_f64() {
-                buf[off..off + 8].copy_from_slice(&v.to_le_bytes());
-            }
-        }
-        _ => {}
+        ("uint", 1) | ("bool", 1) => value.as_u64().map(|v| buf[off] = v as u8).is_some(),
+        ("uint", 2) => value
+            .as_u64()
+            .map(|v| buf[off..off + 2].copy_from_slice(&(v as u16).to_le_bytes()))
+            .is_some(),
+        ("uint", 4) => value
+            .as_u64()
+            .map(|v| buf[off..off + 4].copy_from_slice(&(v as u32).to_le_bytes()))
+            .is_some(),
+        ("uint", 8) => value
+            .as_u64()
+            .map(|v| buf[off..off + 8].copy_from_slice(&v.to_le_bytes()))
+            .is_some(),
+        ("int", 1) => value.as_i64().map(|v| buf[off] = v as u8).is_some(),
+        ("int", 2) => value
+            .as_i64()
+            .map(|v| buf[off..off + 2].copy_from_slice(&(v as i16).to_le_bytes()))
+            .is_some(),
+        ("int", 4) => value
+            .as_i64()
+            .map(|v| buf[off..off + 4].copy_from_slice(&(v as i32).to_le_bytes()))
+            .is_some(),
+        ("int", 8) => value
+            .as_i64()
+            .map(|v| buf[off..off + 8].copy_from_slice(&v.to_le_bytes()))
+            .is_some(),
+        ("float", 4) => value
+            .as_f64()
+            .map(|v| buf[off..off + 4].copy_from_slice(&(v as f32).to_le_bytes()))
+            .is_some(),
+        ("float", 8) | ("double", 8) => value
+            .as_f64()
+            .map(|v| buf[off..off + 8].copy_from_slice(&v.to_le_bytes()))
+            .is_some(),
+        _ => false,
     }
 }
 
