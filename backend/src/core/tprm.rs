@@ -346,6 +346,47 @@ mod tests {
         assert_eq!(parse_v3(&bad), Err(TprmError::BadCrc));
     }
 
+    /// @test Variable-length (header + entries) layout hashing follows
+    /// the producer-confirmed recipe: header leaves then each entry's
+    /// leaves in order, no container markers, hash entry-count-
+    /// dependent. Pins the worked evidence from the apex relay answer
+    /// of 2026-08-16 (3-task scheduler hash and the differing 2-task
+    /// hash) until a contract vector covers the shape.
+    #[test]
+    fn variable_length_recipe_matches_producer_evidence() {
+        let hdr = [
+            ("numPools", "uint", 1usize),
+            ("workersPerPool", "uint", 1),
+            ("numTasks", "uint", 1),
+        ];
+        let entry = [
+            ("fullUid", "uint", 4usize),
+            ("taskUid", "uint", 1),
+            ("poolIndex", "uint", 1),
+            ("freqN", "uint", 2),
+            ("freqD", "uint", 2),
+            ("offset", "uint", 2),
+            ("priority", "int", 1),
+            ("seqGroup", "uint", 1),
+            ("seqPhase", "uint", 1),
+        ];
+        let hash_for = |entry_count: usize| {
+            layout_hash(
+                hdr.iter()
+                    .chain((0..entry_count).flat_map(|_| entry.iter()))
+                    .map(|&(name, field_type, size)| LeafSpec {
+                        name,
+                        field_type,
+                        size,
+                        array: None,
+                    }),
+            )
+        };
+        assert_eq!(hash_for(3), 0xFEF9_BC60);
+        assert_eq!(hash_for(2), 0x4A80_07C5);
+        assert_ne!(hash_for(2), hash_for(3));
+    }
+
     /// @test stamp_v3 refuses a body larger than the u16 size field
     /// can describe instead of silently truncating the length.
     #[test]
