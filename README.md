@@ -228,7 +228,8 @@ for issues. Warnings are non-fatal.
 
 ```
 # System
-GET    /api/health
+GET    /api/health                               # DB writability + per-target state, "degraded" on DB failure
+GET    /api/metrics                              # Per-target pipeline counters (drops, failures, latency)
 GET    /api/version
 GET    /api/audit?limit=N&offset=N
 POST   /api/auth/login

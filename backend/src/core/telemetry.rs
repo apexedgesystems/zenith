@@ -319,9 +319,15 @@ pub fn spawn_router(
     sample_tx: broadcast::Sender<TelemetrySample>,
     dicts: Arc<StructDictionary>,
     manifest: Option<Arc<crate::core::config_manager::AppManifest>>,
+    metrics: Arc<crate::core::metrics::TargetMetrics>,
 ) -> tokio::task::JoinHandle<()> {
+    use std::sync::atomic::Ordering;
     tokio::spawn(async move {
         let target_arc: Arc<str> = Arc::from(target_id.as_str());
+        // Rate limit for lag warnings: one line per interval, not one
+        // per lag event, so a sustained overload can't flood the log.
+        const LAG_WARN_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+        let mut last_lag_warn: Option<std::time::Instant> = None;
         let uid_names: Vec<(u32, String)> = manifest
             .as_ref()
             .map(|m| m.component_uids())
@@ -347,6 +353,8 @@ pub fn spawn_router(
 
                     let samples = decoder.decode(&target_arc, now_ms, &pkt);
                     for sample in samples {
+                        metrics.decoded_samples.fetch_add(1, Ordering::Relaxed);
+                        metrics.last_sample_ms.store(now_ms, Ordering::Relaxed);
                         // Skip if this channel was written too recently.
                         // Use the Entry API: one hash lookup, single Arc clone
                         // only on first insert.
@@ -354,6 +362,7 @@ pub fn spawn_router(
                         match last_ts.entry(Arc::clone(&sample.channel)) {
                             Entry::Occupied(mut e) => {
                                 if sample.timestamp_ms.saturating_sub(*e.get()) < MIN_INTERVAL_MS {
+                                    metrics.dedup_drops.fetch_add(1, Ordering::Relaxed);
                                     continue;
                                 }
                                 *e.get_mut() = sample.timestamp_ms;
@@ -366,7 +375,16 @@ pub fn spawn_router(
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
-                    tracing::debug!("Telemetry router lagged by {} packets", n);
+                    metrics.router_lag_drops.fetch_add(n, Ordering::Relaxed);
+                    if last_lag_warn.is_none_or(|t| t.elapsed() >= LAG_WARN_EVERY) {
+                        tracing::warn!(
+                            "[{}] telemetry router lagged, {} push packets dropped ({} total)",
+                            target_arc,
+                            n,
+                            metrics.router_lag_drops.load(Ordering::Relaxed)
+                        );
+                        last_lag_warn = Some(std::time::Instant::now());
+                    }
                 }
                 Err(broadcast::error::RecvError::Closed) => {
                     break;
@@ -595,5 +613,63 @@ mod tests {
         assert!(category_priority("STATE") > category_priority("TELEMETRY"));
         assert!(category_priority("TELEMETRY") > category_priority("TUNABLE_PARAM"));
         assert_eq!(category_priority("UNKNOWN"), 0);
+    }
+
+    /// @test The router counts decoded samples and dedup drops: two
+    /// identical packets arriving inside the min-interval window both
+    /// decode, but the second packet's samples are dropped by the
+    /// per-channel dedup and counted instead of vanishing.
+    #[tokio::test]
+    async fn router_counts_decoded_and_dedup_drops() {
+        use crate::core::config_manager::ManifestComponent;
+
+        let dicts = Arc::new(make_wavegen_dict());
+        let manifest = crate::core::config_manager::AppManifest {
+            application: "test".into(),
+            description: String::new(),
+            components: vec![ManifestComponent {
+                name: "WaveGenerator".into(),
+                full_uid: "0x00D000".into(),
+                comp_type: "SW_MODEL".into(),
+                instance_index: None,
+                data_file: None,
+                notes: None,
+            }],
+            extra: HashMap::new(),
+        };
+
+        let (push_tx, push_rx) = broadcast::channel(16);
+        let (sample_tx, mut sample_rx) = broadcast::channel(16);
+        let metrics = crate::core::metrics::TargetMetrics::new();
+        let handle = spawn_router(
+            "t1".into(),
+            push_rx,
+            sample_tx,
+            dicts,
+            Some(Arc::new(manifest)),
+            metrics.clone(),
+        );
+
+        let pkt = crate::core::aproto_client::PushTelemetryPacket {
+            full_uid: 0x00D000,
+            payload: vec![0u8; 8],
+        };
+        push_tx.send(pkt.clone()).unwrap();
+        push_tx.send(pkt).unwrap();
+        drop(push_tx); // router exits on channel close
+
+        handle.await.unwrap();
+
+        use std::sync::atomic::Ordering;
+        // 2 packets x 2 OUTPUT fields decoded; the second packet's
+        // samples fall inside MIN_INTERVAL_MS and are deduped.
+        assert_eq!(metrics.decoded_samples.load(Ordering::Relaxed), 4);
+        assert_eq!(metrics.dedup_drops.load(Ordering::Relaxed), 2);
+        assert!(metrics.last_sample_ms.load(Ordering::Relaxed) > 0);
+
+        // Exactly the first packet's samples reached subscribers.
+        assert!(sample_rx.try_recv().is_ok());
+        assert!(sample_rx.try_recv().is_ok());
+        assert!(sample_rx.try_recv().is_err());
     }
 }
