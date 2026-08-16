@@ -55,7 +55,7 @@
     "ActionHealthTlm": {
       "category": "TELEMETRY",
       "opcode": "0x0100",
-      "size": 56,
+      "size": 64,
       "fields": [
         {
           "name": "totalCycles",
@@ -154,14 +154,140 @@
           "offset": 52,
           "size": 4,
           "value": 0
+        },
+        {
+          "name": "abortEventsDispatched",
+          "type": "uint",
+          "offset": 56,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "exclusionStops",
+          "type": "uint",
+          "offset": 60,
+          "size": 4,
+          "value": 0
         }
       ]
     },
     "EngineStats": {
       "category": "STATE",
-      "size": 0,
-      "fields": [],
-      "_warning": "Struct 'EngineStats' not found in headers"
+      "size": 64,
+      "fields": [
+        {
+          "name": "totalCycles",
+          "type": "uint",
+          "offset": 0,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "watchpointsFired",
+          "type": "uint",
+          "offset": 4,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "groupsFired",
+          "type": "uint",
+          "offset": 8,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "actionsApplied",
+          "type": "uint",
+          "offset": 12,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "commandsRouted",
+          "type": "uint",
+          "offset": 16,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "armControlsApplied",
+          "type": "uint",
+          "offset": 20,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "sequenceSteps",
+          "type": "uint",
+          "offset": 24,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "notificationsInvoked",
+          "type": "uint",
+          "offset": 28,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "resolveFailures",
+          "type": "uint",
+          "offset": 32,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "sequenceTimeouts",
+          "type": "uint",
+          "offset": 36,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "sequenceRetries",
+          "type": "uint",
+          "offset": 40,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "sequenceAborts",
+          "type": "uint",
+          "offset": 44,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "rtsLoaded",
+          "type": "uint",
+          "offset": 48,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "atsLoaded",
+          "type": "uint",
+          "offset": 52,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "abortEventsDispatched",
+          "type": "uint",
+          "offset": 56,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "exclusionStops",
+          "type": "uint",
+          "offset": 60,
+          "size": 4,
+          "value": 0
+        }
+      ]
     },
     "WatchpointTprm": {
       "category": "TUNABLE_PARAM",

@@ -16,6 +16,18 @@ secret = "change-me-in-production"
 path = "/var/lib/zenith/zenith.db"
 retention_hours = 24
 
+# Target: Local SIL ops demo (dev only; 172.21.0.1 is the compose
+# network gateway, i.e. this host as seen from the zenith container)
+[[targets]]
+name = "Local SIL - Ops Demo"
+host = "172.21.0.1"
+port = 9000
+auto_connect = false
+manifest = "/data/targets/sil-ops-demo/app_manifest.json"
+structs_dir = "/data/targets/sil-ops-demo/structs"
+telemetry_config = "/data/targets/sil-ops-demo/telemetry.json"
+commands_config = "/data/targets/sil-ops-demo/commands.json"
+
 # Target: Ops Demo on Raspberry Pi (1 Hz sine + 5 Hz square)
 [[targets]]
 name = "Pi - Ops Demo"

@@ -106,6 +106,14 @@ directory.
 | `commands.json`     | `make zenith-target`                  | Per-component command catalog with field types                      |
 | TPRM binaries       | `apex_tprm_compile`                   | Runtime configuration loaded by apex on startup                     |
 
+Uploaded tunable payloads carry the TPRM format A v3 prelude (magic,
+version, size, target uid, layout hash, body CRC), which the vehicle
+verifies before any payload reaches a component. The byte-level
+contract lives in `compat/tprm/` -- a deliberate copy of the
+producing repo's golden vectors; the backend conformance suite fails
+CI on any divergence, and the copy's README documents the refresh
+procedure.
+
 ## Quickstart
 
 ```bash
@@ -254,7 +262,7 @@ GET    /api/targets/{id}/commands
 # Parameters (TUNABLE_PARAM)
 GET    /api/targets/{id}/params
 GET    /api/targets/{id}/params/{uid}
-POST   /api/targets/{id}/params/{uid}/update     # TPRM upload + RELOAD_TPRM
+POST   /api/targets/{id}/params/{uid}/update     # v3-stamped TPRM upload + RELOAD_TPRM
 
 # Telemetry
 WS     /api/targets/{id}/telemetry/live

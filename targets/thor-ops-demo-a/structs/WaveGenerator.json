@@ -171,67 +171,91 @@
           "type": "float",
           "offset": 0,
           "size": 4,
-          "value": "1.0F"
+          "value": 1.0,
+          "doc": "Primary frequency [Hz], range 0..50.",
+          "constraints": {
+            "min": 0.0,
+            "max": 50.0
+          }
         },
         {
           "name": "amplitude",
           "type": "float",
           "offset": 4,
           "size": 4,
-          "value": "1.0F"
+          "value": 1.0,
+          "doc": "Peak amplitude, >= 0.",
+          "constraints": {
+            "min": 0.0
+          }
         },
         {
           "name": "dcOffset",
           "type": "float",
           "offset": 8,
           "size": 4,
-          "value": "0.0F"
+          "value": 0.0,
+          "doc": "DC bias added to output."
         },
         {
           "name": "phaseOffset",
           "type": "float",
           "offset": 12,
           "size": 4,
-          "value": "0.0F"
+          "value": 0.0,
+          "doc": "Phase offset [radians]."
         },
         {
           "name": "noiseAmplitude",
           "type": "float",
           "offset": 16,
           "size": 4,
-          "value": "0.0F"
+          "value": 0.0,
+          "doc": "Gaussian-like noise peak amplitude."
         },
         {
           "name": "dutyCycle",
           "type": "float",
           "offset": 20,
           "size": 4,
-          "value": "0.5F"
+          "value": 0.5,
+          "doc": "Duty cycle for SQUARE wave, range 0..1.",
+          "constraints": {
+            "min": 0.0,
+            "max": 1.0
+          }
         },
         {
           "name": "waveType",
           "type": "uint",
           "offset": 24,
           "size": 1,
-          "value": 0
+          "value": 0,
+          "doc": "WaveType enum value (0=SINE..4=COMPOSITE).",
+          "constraints": {
+            "allowed": [0.0, 1.0, 2.0, 3.0, 4.0]
+          }
         },
         {
           "name": "reserved",
           "type": "array",
+          "element_type": "uint",
+          "dims": [3],
           "offset": 25,
           "size": 3,
-          "value": [],
-          "element_type": "uint",
-          "dims": [3]
+          "value": [0, 0, 0],
+          "doc": "Alignment padding."
         },
         {
           "name": "reserved2",
           "type": "float",
           "offset": 28,
           "size": 4,
-          "value": "0.0F"
+          "value": 0.0,
+          "doc": "Reserved for future use."
         }
-      ]
+      ],
+      "spec_defined": true
     }
   },
   "enums": {

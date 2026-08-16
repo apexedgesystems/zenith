@@ -1,0 +1,139 @@
+{
+  "component": "SensorModel",
+  "structs": {
+    "SensorHealthTlm": {
+      "category": "TELEMETRY",
+      "opcode": "0x0100",
+      "size": 20,
+      "fields": [
+        {
+          "name": "temperature",
+          "type": "float",
+          "offset": 0,
+          "size": 4,
+          "value": "0.0F"
+        },
+        {
+          "name": "rampRate",
+          "type": "float",
+          "offset": 4,
+          "size": 4,
+          "value": "0.0F"
+        },
+        {
+          "name": "stepCount",
+          "type": "uint",
+          "offset": 8,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "wrapCount",
+          "type": "uint",
+          "offset": 12,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "overtemp",
+          "type": "uint",
+          "offset": 16,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "reserved",
+          "type": "array",
+          "offset": 17,
+          "size": 3,
+          "value": [],
+          "element_type": "uint",
+          "dims": [3]
+        }
+      ]
+    },
+    "SensorOutput": {
+      "category": "OUTPUT",
+      "size": 12,
+      "fields": [
+        {
+          "name": "temperature",
+          "type": "float",
+          "offset": 0,
+          "size": 4,
+          "value": "0.0F"
+        },
+        {
+          "name": "temperatureRate",
+          "type": "float",
+          "offset": 4,
+          "size": 4,
+          "value": "0.0F"
+        },
+        {
+          "name": "overtemp",
+          "type": "uint",
+          "offset": 8,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "reserved",
+          "type": "array",
+          "offset": 9,
+          "size": 3,
+          "value": [],
+          "element_type": "uint",
+          "dims": [3]
+        }
+      ]
+    },
+    "SensorState": {
+      "category": "STATE",
+      "size": 8,
+      "fields": [
+        {
+          "name": "stepCount",
+          "type": "uint",
+          "offset": 0,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "wrapCount",
+          "type": "uint",
+          "offset": 4,
+          "size": 4,
+          "value": 0
+        }
+      ]
+    },
+    "SensorTunableParams": {
+      "category": "TUNABLE_PARAM",
+      "size": 12,
+      "fields": [
+        {
+          "name": "rampRate",
+          "type": "float",
+          "offset": 0,
+          "size": 4,
+          "value": "0.5F"
+        },
+        {
+          "name": "initialTemp",
+          "type": "float",
+          "offset": 4,
+          "size": 4,
+          "value": "20.0F"
+        },
+        {
+          "name": "maxTemp",
+          "type": "float",
+          "offset": 8,
+          "size": 4,
+          "value": "120.0F"
+        }
+      ]
+    }
+  }
+}

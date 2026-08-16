@@ -35,6 +35,7 @@ use crate::core::aproto_client::{AprotoClient, PushTelemetryPacket};
 use crate::core::config_manager::StructDictionary;
 use crate::core::metrics::TargetMetrics;
 use crate::core::telemetry::{self, TelemetrySample};
+use crate::core::tprm;
 use crate::storage::telemetry_db::TelemetryDb;
 
 /* ----------------------------- CLI ----------------------------- */
@@ -1000,8 +1001,11 @@ async fn update_params(
     let mut struct_size = 0usize;
     let mut struct_fields = Vec::new();
 
-    // Build binary TPRM from edited fields
-    let binary = if body.variable_length {
+    // Build binary TPRM from edited fields, and the layout hash of
+    // whatever shape gets built (the hash describes the layout the
+    // vehicle will read, so the branch that lays the bytes out also
+    // computes it).
+    let (binary, payload_layout_hash) = if body.variable_length {
         // Variable-length: find header + entry struct pair
         let comp_name = manifest.as_ref().and_then(|m| {
             m.components.iter().find_map(|c| {
@@ -1049,11 +1053,14 @@ async fn update_params(
 
         let total_size = hdr_struct.size + entries.len() * ent_struct.size;
         let mut buf = vec![0u8; total_size];
+        let mut unencodable: Vec<String> = Vec::new();
 
         // Encode header
         for field in &hdr_struct.fields {
             if let Some(value) = body.fields.get(&field.name) {
-                encode_field(&mut buf, field, value);
+                if !encode_field(&mut buf, field, value) {
+                    unencodable.push(field.name.clone());
+                }
             }
         }
 
@@ -1064,12 +1071,33 @@ async fn update_params(
                 if let Some(value) = entry_fields.get(&field.name) {
                     let mut adjusted_field = field.clone();
                     adjusted_field.offset = base + field.offset;
-                    encode_field(&mut buf, &adjusted_field, value);
+                    if !encode_field(&mut buf, &adjusted_field, value) {
+                        unencodable.push(format!("entry[{}].{}", i, field.name));
+                    }
                 }
             }
         }
+        if !unencodable.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("Cannot encode edited field(s): {}", unencodable.join(", ")),
+            ));
+        }
 
-        buf
+        // Variable-length layout hash (recipe confirmed by the apex
+        // side, relay 2026-08-16): header leaves then each entry's
+        // leaves in order, no container markers. The hash is
+        // entry-count-dependent by design -- the count is part of the
+        // layout the vehicle will read.
+        let hash = tprm::layout_hash(
+            dict_leaf_specs(&hdr_struct.fields).into_iter().chain(
+                std::iter::repeat_with(|| dict_leaf_specs(&ent_struct.fields))
+                    .take(entries.len())
+                    .flatten(),
+            ),
+        );
+
+        (buf, hash)
     } else {
         // Flat: single struct
         if let Some((_comp, _sname, sdef)) =
@@ -1096,25 +1124,52 @@ async fn update_params(
         } else {
             vec![0u8; struct_size]
         };
+        let mut unencodable: Vec<&str> = Vec::new();
         for field in &struct_fields {
             if let Some(value) = body.fields.get(&field.name) {
-                encode_field(&mut buf, field, value);
+                if !encode_field(&mut buf, field, value) {
+                    unencodable.push(&field.name);
+                }
             }
         }
-        buf
+        if !unencodable.is_empty() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!(
+                    "Cannot encode edited field(s): {} -- unsupported type/size or wrong value type",
+                    unencodable.join(", ")
+                ),
+            ));
+        }
+        let hash = tprm::layout_hash(dict_leaf_specs(&struct_fields));
+        (buf, hash)
     };
+
+    // Stamp the v3 prelude: the vehicle verifies magic, version, size,
+    // target uid, layout hash, and body CRC before the payload reaches
+    // a component, and rejects unstamped uploads. The layout hash came
+    // from the same dict fields that encoded the body (dict
+    // declaration order is template emission order). The dicts are
+    // flattened, so a template using explicitly-typed nested-struct
+    // containers would hash differently on the vehicle -- which
+    // rejects with a distinct layout-hash fault rather than
+    // misloading; the dict generator exporting the hash is accepted
+    // apex-side work (relay thread).
+    let stamped = tprm::stamp_v3(full_uid, payload_layout_hash, &binary)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("TPRM stamp failed: {}", e)))?;
 
     // Upload and reload
     let detail = format!(
-        "uid=0x{:06X} bytes={} field_count={}",
+        "uid=0x{:06X} bytes={} stamped_bytes={} field_count={}",
         full_uid,
         binary.len(),
+        stamped.len(),
         body.fields.len()
     );
     let ip_str = addr.ip().to_string();
 
     let mut cli = client.lock().await;
-    let result = cli.update_tprm(full_uid, &binary).await;
+    let result = cli.update_tprm(full_uid, &stamped).await;
     drop(cli);
 
     match result {
@@ -1156,42 +1211,84 @@ async fn update_params(
     }
 }
 
+/// LeafSpec views over dict fields, shared by flat and variable-length
+/// layout hashing. Dict declaration order is template emission order.
+fn dict_leaf_specs(fields: &[crate::core::config_manager::FieldDef]) -> Vec<tprm::LeafSpec<'_>> {
+    fields
+        .iter()
+        .map(|f| tprm::LeafSpec {
+            name: &f.name,
+            field_type: &f.field_type,
+            size: f.size,
+            array: if f.field_type == "array" {
+                let count = f
+                    .dims
+                    .as_ref()
+                    .map(|d| d.iter().product::<usize>())
+                    .unwrap_or(1)
+                    .max(1);
+                Some((
+                    f.element_type.as_deref().unwrap_or("uint"),
+                    f.size / count,
+                    count,
+                ))
+            } else {
+                None
+            },
+        })
+        .collect()
+}
+
+/// Encode one edited field into the payload buffer. Returns false when
+/// the (type, size) shape is not encodable or the value has the wrong
+/// JSON type -- callers must surface that as an error: a silent skip
+/// here uploads the OLD value under a SUCCESS response, which reads as
+/// "applied" while changing nothing (this bit u64 swap thresholds).
 fn encode_field(
     buf: &mut [u8],
     field: &crate::core::config_manager::FieldDef,
     value: &serde_json::Value,
-) {
+) -> bool {
     let off = field.offset;
     if off + field.size > buf.len() {
-        return;
+        return false;
     }
     match (field.field_type.as_str(), field.size) {
-        ("uint", 1) => {
-            if let Some(v) = value.as_u64() {
-                buf[off] = v as u8;
-            }
-        }
-        ("uint", 2) => {
-            if let Some(v) = value.as_u64() {
-                buf[off..off + 2].copy_from_slice(&(v as u16).to_le_bytes());
-            }
-        }
-        ("uint", 4) => {
-            if let Some(v) = value.as_u64() {
-                buf[off..off + 4].copy_from_slice(&(v as u32).to_le_bytes());
-            }
-        }
-        ("float", 4) => {
-            if let Some(v) = value.as_f64() {
-                buf[off..off + 4].copy_from_slice(&(v as f32).to_le_bytes());
-            }
-        }
-        ("float", 8) | ("double", 8) => {
-            if let Some(v) = value.as_f64() {
-                buf[off..off + 8].copy_from_slice(&v.to_le_bytes());
-            }
-        }
-        _ => {}
+        ("uint", 1) | ("bool", 1) => value.as_u64().map(|v| buf[off] = v as u8).is_some(),
+        ("uint", 2) => value
+            .as_u64()
+            .map(|v| buf[off..off + 2].copy_from_slice(&(v as u16).to_le_bytes()))
+            .is_some(),
+        ("uint", 4) => value
+            .as_u64()
+            .map(|v| buf[off..off + 4].copy_from_slice(&(v as u32).to_le_bytes()))
+            .is_some(),
+        ("uint", 8) => value
+            .as_u64()
+            .map(|v| buf[off..off + 8].copy_from_slice(&v.to_le_bytes()))
+            .is_some(),
+        ("int", 1) => value.as_i64().map(|v| buf[off] = v as u8).is_some(),
+        ("int", 2) => value
+            .as_i64()
+            .map(|v| buf[off..off + 2].copy_from_slice(&(v as i16).to_le_bytes()))
+            .is_some(),
+        ("int", 4) => value
+            .as_i64()
+            .map(|v| buf[off..off + 4].copy_from_slice(&(v as i32).to_le_bytes()))
+            .is_some(),
+        ("int", 8) => value
+            .as_i64()
+            .map(|v| buf[off..off + 8].copy_from_slice(&v.to_le_bytes()))
+            .is_some(),
+        ("float", 4) => value
+            .as_f64()
+            .map(|v| buf[off..off + 4].copy_from_slice(&(v as f32).to_le_bytes()))
+            .is_some(),
+        ("float", 8) | ("double", 8) => value
+            .as_f64()
+            .map(|v| buf[off..off + 8].copy_from_slice(&v.to_le_bytes()))
+            .is_some(),
+        _ => false,
     }
 }
 
