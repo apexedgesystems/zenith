@@ -3,16 +3,27 @@
 [server]
 host = "0.0.0.0"
 port = 8080
+# Upload payload ceiling (files and libraries), decoded megabytes.
+upload_max_mb = 50
+# Cross-origin API access is denied unless origins are listed here.
+# cors_allowed_origins = ["https://ops.example.internal"]
 
 [auth]
 enabled = false
+# JWT signing key only -- never a login credential. 16+ chars required
+# when auth is enabled; startup refuses the default value.
 secret = "change-me-in-production"
+# Login identity. Generate the hash with: zenith --hash-password
+username = "admin"
+password_hash = ""
 
 [storage]
 # Use an absolute path inside the persistent volume when running under
 # docker compose (zenith-data mounts at /var/lib/zenith).
 path = "/var/lib/zenith/zenith.db"
 retention_hours = 24
+# Audit rows older than this are pruned (0 = keep forever).
+audit_retention_days = 90
 # Path to struct dictionaries (JSON files from apex_data_gen)
 # structs_dir = "/path/to/apex_data_db"
 
