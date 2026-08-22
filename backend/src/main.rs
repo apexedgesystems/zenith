@@ -2457,7 +2457,9 @@ async fn auth_middleware(
 ) -> Result<Response, (StatusCode, String)> {
     // Whitelist
     let path = request.uri().path();
-    if path == "/api/auth/login" || path == "/api/health" {
+    // The middleware is layered on the nested /api router, so the
+    // prefix is already stripped from the path it sees.
+    if path == "/auth/login" || path == "/health" {
         request
             .extensions_mut()
             .insert(Actor(Arc::from("operator")));
@@ -2602,7 +2604,7 @@ async fn rate_limit_middleware(
 
 /* ----------------------------- Server ----------------------------- */
 
-fn build_router(state: AppState, cors_origins: &[String]) -> Router {
+fn build_router(state: AppState, cors_origins: &[String], upload_max_mb: u32) -> Router {
     // Same-origin only unless origins are explicitly configured:
     // zenith serves its own frontend, and a permissive policy would
     // let any site drive a stolen token against an API that can
@@ -2695,6 +2697,13 @@ fn build_router(state: AppState, cors_origins: &[String]) -> Router {
         .nest("/api", api)
         .fallback_service(tower_http::services::ServeDir::new(static_dir).fallback(
             tower_http::services::ServeFile::new(format!("{}/index.html", static_dir)),
+        ))
+        // Body ceiling: the configured upload cap plus base64+JSON
+        // overhead. axum's 2 MB default silently made any library
+        // upload near the documented cap impossible; the handler-level
+        // decoded-size cap stays as the precise gate.
+        .layer(axum::extract::DefaultBodyLimit::max(
+            upload_max_mb as usize * 1024 * 1024 * 3 / 2,
         ))
         .layer(cors)
         // Span carries method + path only: query strings are excluded
@@ -3180,7 +3189,11 @@ async fn main() {
         }
     }
 
-    let app = build_router(state.clone(), &config.server.cors_allowed_origins);
+    let app = build_router(
+        state.clone(),
+        &config.server.cors_allowed_origins,
+        config.server.upload_max_mb,
+    );
 
     tracing::info!("Zenith v{} starting on {}", env!("CARGO_PKG_VERSION"), addr);
     tracing::info!("Telemetry database: {}", db_path.display());
