@@ -32,6 +32,9 @@ export interface TelemetryLayout {
   grid?: string;
   time_window_s?: number;
   plots: PlotDef[];
+  /** Channel references the target's current dictionaries cannot
+   *  produce (stale after a target-config refresh). */
+  unknown_channels?: string[];
 }
 
 export const COLORS = [

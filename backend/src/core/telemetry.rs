@@ -310,6 +310,23 @@ fn category_priority(category: &str) -> u8 {
     }
 }
 
+impl TelemetryDecoder {
+    /// Every channel name this decoder can emit, sorted and deduped.
+    /// Status surfaces use this to flag saved-layout references that a
+    /// dictionary refresh has orphaned.
+    pub fn channel_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .lookup
+            .values()
+            .flatten()
+            .map(|f| f.channel.to_string())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+}
+
 /* ----------------------------- Router ----------------------------- */
 
 /// Spawn a task that routes PushTelemetryPackets into decoded TelemetrySamples.

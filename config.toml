@@ -42,7 +42,7 @@ commands_config = "/data/targets/pi-ops-demo/commands.json"
 # Target: Thor Instance A (1 Hz sine + 5 Hz square, cores 0-3)
 [[targets]]
 name = "Thor - Instance A"
-host = "192.168.1.40"
+host = "192.168.1.41"
 port = 9000
 auto_connect = false
 manifest = "/data/targets/thor-ops-demo-a/app_manifest.json"
@@ -53,7 +53,7 @@ commands_config = "/data/targets/thor-ops-demo-a/commands.json"
 # Target: Thor Instance B (3 Hz triangle + 7 Hz sawtooth, cores 4-7)
 [[targets]]
 name = "Thor - Instance B"
-host = "192.168.1.40"
+host = "192.168.1.41"
 port = 9001
 auto_connect = false
 manifest = "/data/targets/thor-ops-demo-b/app_manifest.json"

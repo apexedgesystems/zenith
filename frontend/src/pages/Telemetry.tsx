@@ -574,10 +574,30 @@ export default function TelemetryPage({
               <option key={l.name} value={l.name}>
                 {l.name}
                 {l.source === "user" ? " *" : ""}
+                {(l.unknown_channels?.length ?? 0) > 0 ? " (!)" : ""}
               </option>
             ))}
           </select>
         )}
+        {(() => {
+          const cur = layouts.find((l) => l.name === selectedLayout);
+          const unknown = cur?.unknown_channels ?? [];
+          return unknown.length > 0 ? (
+            <div
+              className="text-[10px] mb-2 px-1.5 py-1 rounded"
+              style={{
+                color: "var(--color-warn, #d29922)",
+                backgroundColor: "var(--color-elevated)",
+              }}
+              title={unknown.join(", ")}
+            >
+              {unknown.length} channel{unknown.length > 1 ? "s" : ""} in this
+              layout no longer exist{unknown.length > 1 ? "" : "s"} in the
+              target dictionaries: {unknown.slice(0, 3).join(", ")}
+              {unknown.length > 3 ? ", ..." : ""}
+            </div>
+          ) : null;
+        })()}
 
         {/* Controls */}
         <div className="flex items-center justify-between mb-2">
