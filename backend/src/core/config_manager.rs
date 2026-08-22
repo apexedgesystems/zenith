@@ -39,6 +39,25 @@ pub struct StructDef {
     pub opcode: Option<String>,
     #[serde(default)]
     pub fields: Vec<FieldDef>,
+    /// Producer-stated v3 layout hash ("0x" hex), exported by
+    /// apex_data_gen for spec-defined structs. When present it is THE
+    /// hash the vehicle verifies -- consumers must not recompute.
+    #[serde(default)]
+    pub layout_hash: Option<String>,
+    /// The canonical field-spec string the hash derives from
+    /// (diagnostic surface; the hash is the contract).
+    #[serde(default)]
+    pub canonical_spec: Option<String>,
+}
+
+impl StructDef {
+    /// The producer-stated layout hash as the u32 the prelude carries,
+    /// when the dictionary exports one.
+    pub fn layout_hash_u32(&self) -> Option<u32> {
+        let s = self.layout_hash.as_deref()?;
+        let hex = s.trim_start_matches("0x").trim_start_matches("0X");
+        u32::from_str_radix(hex, 16).ok()
+    }
 }
 
 /// A component's struct dictionary (one JSON file).
@@ -555,5 +574,31 @@ impl TelemetryConfig {
             }
         }
         warnings
+    }
+}
+
+/* ----------------------------- Tests ----------------------------- */
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// @test A dictionary entry carrying the producer-stated layout
+    /// hash exposes the u32 the prelude carries; entries without one
+    /// (dictionaries predating the export) return None.
+    #[test]
+    fn struct_def_layout_hash_parses() {
+        let json = r#"{
+            "category": "TUNABLE_PARAM",
+            "size": 80,
+            "fields": [],
+            "layout_hash": "0xC93CD892",
+            "canonical_spec": "a:uint:1;"
+        }"#;
+        let sdef: StructDef = serde_json::from_str(json).unwrap();
+        assert_eq!(sdef.layout_hash_u32(), Some(0xC93C_D892));
+
+        let bare: StructDef = serde_json::from_str(r#"{"size": 4}"#).unwrap();
+        assert_eq!(bare.layout_hash_u32(), None);
     }
 }
