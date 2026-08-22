@@ -1,0 +1,102 @@
+{
+  "component": "SpecChannel",
+  "component_id": 218,
+  "structs": {
+    "SpecChannelOutput": {
+      "category": "OUTPUT",
+      "size": 8,
+      "fields": [
+        {
+          "name": "value",
+          "type": "float",
+          "offset": 0,
+          "size": 4,
+          "doc": "gain * elapsed + offset."
+        },
+        {
+          "name": "sequence",
+          "type": "uint",
+          "offset": 4,
+          "size": 4
+        }
+      ],
+      "spec_defined": true,
+      "layout_hash": "0x930F87EA",
+      "canonical_spec": "value:float:4;sequence:uint:4;"
+    },
+    "SpecChannelState": {
+      "category": "STATE",
+      "size": 8,
+      "fields": [
+        {
+          "name": "elapsed",
+          "type": "float",
+          "offset": 0,
+          "size": 4,
+          "doc": "Seconds since boot (or last Zero)."
+        },
+        {
+          "name": "zeros",
+          "type": "uint",
+          "offset": 4,
+          "size": 4,
+          "doc": "Zero commands handled."
+        }
+      ],
+      "spec_defined": true,
+      "layout_hash": "0x5BEBA9CF",
+      "canonical_spec": "elapsed:float:4;zeros:uint:4;"
+    },
+    "SpecChannelTunableParams": {
+      "category": "TUNABLE_PARAM",
+      "size": 12,
+      "fields": [
+        {
+          "name": "gain",
+          "type": "float",
+          "offset": 0,
+          "size": 4,
+          "value": 1.0,
+          "doc": "Ramp slope [units/s].",
+          "constraints": {
+            "min": -10.0,
+            "max": 10.0
+          }
+        },
+        {
+          "name": "offset",
+          "type": "float",
+          "offset": 4,
+          "size": 4,
+          "value": 0.0,
+          "doc": "Ramp intercept."
+        },
+        {
+          "name": "channelTag",
+          "type": "string",
+          "offset": 8,
+          "size": 4,
+          "doc": "Instance tag for operator displays."
+        }
+      ],
+      "spec_defined": true,
+      "layout_hash": "0xEB487440",
+      "canonical_spec": "gain:float:4;offset:float:4;channelTag:string:4;"
+    }
+  },
+  "commands": [
+    {
+      "name": "Zero",
+      "opcode": "0x0248",
+      "doc": "Restart the ramp: elapsed returns to zero."
+    }
+  ],
+  "telemetry": [
+    {
+      "name": "Ramp",
+      "opcode": "0x0348",
+      "struct": "SpecChannelOutput",
+      "doc": "Published ramp value, readable via INSPECT (OUTPUT category)."
+    }
+  ]
+}

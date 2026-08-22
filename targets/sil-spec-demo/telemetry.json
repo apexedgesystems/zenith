@@ -1,0 +1,115 @@
+{
+  "layouts": [
+    {
+      "name": "Default",
+      "plots": [
+        {
+          "title": "SpecSensor Output",
+          "channels": ["SpecSensor.value", "SpecSensor.sequence"],
+          "height": 200
+        },
+        {
+          "title": "SpecSensor Output",
+          "channels": [
+            "SpecSensor.samples",
+            "SpecSensor.rejects",
+            "SpecSensor.lastValue",
+            "SpecSensor.mode"
+          ],
+          "height": 200
+        },
+        {
+          "title": "SpecActuator Output",
+          "channels": ["SpecActuator.position", "SpecActuator.moving"],
+          "height": 200
+        },
+        {
+          "title": "SpecActuator Output",
+          "channels": ["SpecActuator.position", "SpecActuator.sequence"],
+          "height": 200
+        },
+        {
+          "title": "SpecBusDriver Output",
+          "channels": [
+            "SpecBusDriver.txFrames",
+            "SpecBusDriver.rxFrames",
+            "SpecBusDriver.txBytes",
+            "SpecBusDriver.rxBytes"
+          ],
+          "height": 200
+        },
+        {
+          "title": "SpecBusDriver Output",
+          "channels": ["SpecBusDriver.rxFrames", "SpecBusDriver.lastRxLen"],
+          "height": 200
+        },
+        {
+          "title": "SpecMatrix Output",
+          "channels": ["SpecMatrix.checksum", "SpecMatrix.stepCount"],
+          "height": 200
+        },
+        {
+          "title": "SpecProtoMax Output",
+          "channels": ["SpecProtoMax.checksum", "SpecProtoMax.stepCount"],
+          "height": 200
+        },
+        {
+          "title": "SpecChannel#0 Output",
+          "channels": ["SpecChannel#0.value", "SpecChannel#0.sequence"],
+          "height": 200
+        },
+        {
+          "title": "SpecChannel#1 Output",
+          "channels": ["SpecChannel#1.value", "SpecChannel#1.sequence"],
+          "height": 200
+        },
+        {
+          "title": "CPU Temperature",
+          "channels": ["SystemMonitor.cpuTempC"],
+          "height": 180,
+          "y_min": 0,
+          "y_max": 100,
+          "y_label": "C",
+          "thresholds": [
+            {
+              "value": 75,
+              "color": "#d29922",
+              "label": "warn"
+            },
+            {
+              "value": 85,
+              "color": "#f85149",
+              "label": "crit"
+            }
+          ]
+        },
+        {
+          "title": "RAM Utilization",
+          "channels": ["SystemMonitor.ramUsedPercent"],
+          "height": 160,
+          "y_min": 0,
+          "y_max": 100,
+          "y_label": "%",
+          "thresholds": [
+            {
+              "value": 80,
+              "color": "#d29922",
+              "label": "warn"
+            },
+            {
+              "value": 95,
+              "color": "#f85149",
+              "label": "crit"
+            }
+          ]
+        },
+        {
+          "title": "Open File Descriptors",
+          "channels": ["SystemMonitor.fdCount"],
+          "height": 140,
+          "y_label": "count"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,553 @@
+{
+  "quickCommands": [
+    {
+      "label": "NOOP",
+      "fullUid": "0x000000",
+      "opcode": "0x0000",
+      "desc": "Connectivity check"
+    },
+    {
+      "label": "Ping",
+      "fullUid": "0x000000",
+      "opcode": "0x0001",
+      "desc": "Echo test"
+    },
+    {
+      "label": "Pause",
+      "fullUid": "0x000000",
+      "opcode": "0x0110",
+      "desc": "Pause execution"
+    },
+    {
+      "label": "Resume",
+      "fullUid": "0x000000",
+      "opcode": "0x0111",
+      "desc": "Resume execution"
+    },
+    {
+      "label": "Sleep",
+      "fullUid": "0x000000",
+      "opcode": "0x0116",
+      "desc": "Enter sleep mode"
+    },
+    {
+      "label": "Wake",
+      "fullUid": "0x000000",
+      "opcode": "0x0117",
+      "desc": "Exit sleep mode"
+    }
+  ],
+  "components": {
+    "Executive": {
+      "fullUid": "0x000000",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "PING",
+          "opcode": "0x0001",
+          "desc": "Echo payload",
+          "fields": []
+        },
+        {
+          "name": "GET_HEALTH",
+          "opcode": "0x0100",
+          "desc": "Executive health (48B response)",
+          "fields": []
+        },
+        {
+          "name": "EXEC_NOOP",
+          "opcode": "0x0101",
+          "desc": "Executive connectivity check",
+          "fields": []
+        },
+        {
+          "name": "GET_CLOCK_FREQ",
+          "opcode": "0x0102",
+          "desc": "Clock frequency (2B response)",
+          "fields": []
+        },
+        {
+          "name": "GET_RT_MODE",
+          "opcode": "0x0103",
+          "desc": "RT mode (1B response)",
+          "fields": []
+        },
+        {
+          "name": "GET_CLOCK_CYCLES",
+          "opcode": "0x0104",
+          "desc": "Cycle count (8B response)",
+          "fields": []
+        },
+        {
+          "name": "CMD_PAUSE",
+          "opcode": "0x0110",
+          "desc": "Pause execution",
+          "fields": []
+        },
+        {
+          "name": "CMD_RESUME",
+          "opcode": "0x0111",
+          "desc": "Resume execution",
+          "fields": []
+        },
+        {
+          "name": "CMD_SHUTDOWN",
+          "opcode": "0x0112",
+          "desc": "Graceful shutdown",
+          "fields": []
+        },
+        {
+          "name": "CMD_FAST_FORWARD",
+          "opcode": "0x0113",
+          "desc": "Enter fast-forward mode (non-RT)",
+          "fields": []
+        },
+        {
+          "name": "CMD_LOCK_COMPONENT",
+          "opcode": "0x0114",
+          "desc": "Lock component",
+          "fields": [
+            {
+              "name": "fullUid",
+              "type": "uint32",
+              "desc": "Component to lock"
+            }
+          ]
+        },
+        {
+          "name": "CMD_UNLOCK_COMPONENT",
+          "opcode": "0x0115",
+          "desc": "Unlock component",
+          "fields": [
+            {
+              "name": "fullUid",
+              "type": "uint32",
+              "desc": "Component to unlock"
+            }
+          ]
+        },
+        {
+          "name": "CMD_SLEEP",
+          "opcode": "0x0116",
+          "desc": "Enter sleep mode",
+          "fields": []
+        },
+        {
+          "name": "CMD_WAKE",
+          "opcode": "0x0117",
+          "desc": "Exit sleep mode",
+          "fields": []
+        },
+        {
+          "name": "SET_VERBOSITY",
+          "opcode": "0x0121",
+          "desc": "Set log verbosity level",
+          "fields": [
+            {
+              "name": "level",
+              "type": "uint8",
+              "desc": "0=OFF 1=ERROR 2=WARN 3=INFO 4=DEBUG",
+              "default": 3
+            }
+          ]
+        },
+        {
+          "name": "RELOAD_TPRM",
+          "opcode": "0x0125",
+          "desc": "Reload component parameters",
+          "fields": [
+            {
+              "name": "fullUid",
+              "type": "uint32",
+              "desc": "Target component UID"
+            }
+          ]
+        },
+        {
+          "name": "RELOAD_LIBRARY",
+          "opcode": "0x0126",
+          "desc": "Hot-swap shared library",
+          "fields": [
+            {
+              "name": "fullUid",
+              "type": "uint32",
+              "desc": "Target component UID"
+            }
+          ]
+        },
+        {
+          "name": "RELOAD_EXECUTIVE",
+          "opcode": "0x0127",
+          "desc": "Restart via execve (destructive)",
+          "fields": []
+        },
+        {
+          "name": "INSPECT",
+          "opcode": "0x0130",
+          "desc": "Read registered data block",
+          "fields": [
+            {
+              "name": "fullUid",
+              "type": "uint32",
+              "desc": "Component UID"
+            },
+            {
+              "name": "category",
+              "type": "uint8",
+              "desc": "0=STATIC 1=TUNABLE 2=STATE 3=INPUT 4=OUTPUT"
+            },
+            {
+              "name": "offset",
+              "type": "uint16",
+              "desc": "Byte offset",
+              "default": 0
+            },
+            {
+              "name": "length",
+              "type": "uint16",
+              "desc": "Byte count (0=all)",
+              "default": 0
+            }
+          ]
+        },
+        {
+          "name": "GET_REGISTRY",
+          "opcode": "0x0140",
+          "desc": "Dump component registry (44B/entry)",
+          "fields": []
+        },
+        {
+          "name": "GET_DATA_CATALOG",
+          "opcode": "0x0141",
+          "desc": "Dump data entry catalog (44B/entry)",
+          "fields": []
+        }
+      ]
+    },
+    "Scheduler": {
+      "fullUid": "0x000100",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "GET_HEALTH",
+          "opcode": "0x0100",
+          "desc": "Executive health (48B response)",
+          "fields": []
+        }
+      ]
+    },
+    "FileSystem": {
+      "fullUid": "0x000200",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "GET_HEALTH",
+          "opcode": "0x0100",
+          "desc": "Component health telemetry",
+          "fields": []
+        }
+      ]
+    },
+    "Registry": {
+      "fullUid": "0x000300",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "GET_HEALTH",
+          "opcode": "0x0100",
+          "desc": "Component health telemetry",
+          "fields": []
+        }
+      ]
+    },
+    "Interface": {
+      "fullUid": "0x000400",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "GET_HEALTH",
+          "opcode": "0x0100",
+          "desc": "Component health telemetry",
+          "fields": []
+        }
+      ]
+    },
+    "Action": {
+      "fullUid": "0x000500",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "GET_HEALTH",
+          "opcode": "0x0100",
+          "desc": "Component health telemetry",
+          "fields": []
+        }
+      ]
+    },
+    "SpecSensor #0": {
+      "fullUid": "0x00D400",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "SetMode",
+          "opcode": "0x0200",
+          "desc": "Select the operating mode; FAULT_INJECT only from MEASURE.",
+          "fields": [
+            {
+              "name": "mode",
+              "type": "uint8",
+              "desc": "Requested mode (0=IDLE, 1=MEASURE, 2=FAULT_INJECT)."
+            }
+          ]
+        },
+        {
+          "name": "Recalibrate",
+          "opcode": "0x0201",
+          "desc": "Set a new reference, zero the drift, return the stats snapshot.",
+          "fields": [
+            {
+              "name": "referenceValue",
+              "type": "float",
+              "desc": "New calibrated reference."
+            }
+          ]
+        },
+        {
+          "name": "GetStats",
+          "opcode": "0x0202",
+          "desc": "Return the stats snapshot.",
+          "fields": []
+        },
+        {
+          "name": "Reset",
+          "opcode": "0x0203",
+          "desc": "Zero counters and drift; mode returns to the tunable default.",
+          "fields": []
+        }
+      ]
+    },
+    "SpecActuator #0": {
+      "fullUid": "0x00D500",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "Move",
+          "opcode": "0x0210",
+          "desc": "Command a new target position; slew begins next step.",
+          "fields": [
+            {
+              "name": "position",
+              "type": "float",
+              "desc": "Commanded target position [units], range -1000..1000."
+            }
+          ]
+        },
+        {
+          "name": "Halt",
+          "opcode": "0x0211",
+          "desc": "Stop where we are: target becomes the current position.",
+          "fields": []
+        },
+        {
+          "name": "GetPosition",
+          "opcode": "0x0212",
+          "desc": "Return the current position and settling state.",
+          "fields": []
+        }
+      ]
+    },
+    "SpecBusDriver #0": {
+      "fullUid": "0x00D600",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "SendFrame",
+          "opcode": "0x0220",
+          "desc": "Queue a frame on the loopback bus.",
+          "fields": [
+            {
+              "name": "length",
+              "type": "uint8",
+              "desc": "Frame length in data[], 1..maxFrameBytes."
+            },
+            {
+              "name": "reserved",
+              "type": "raw[3]",
+              "desc": ""
+            },
+            {
+              "name": "data",
+              "type": "raw[16]",
+              "desc": "Frame payload (fixed 16-byte buffer, length bytes used)."
+            }
+          ]
+        },
+        {
+          "name": "Flush",
+          "opcode": "0x0221",
+          "desc": "Drop any pending frame.",
+          "fields": []
+        },
+        {
+          "name": "GetStats",
+          "opcode": "0x0222",
+          "desc": "Return the traffic counters.",
+          "fields": []
+        }
+      ]
+    },
+    "SpecMatrix": {
+      "fullUid": "0x00D700",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "GetSnapshot",
+          "opcode": "0x0230",
+          "desc": "Return the current checksum and step count.",
+          "fields": []
+        }
+      ]
+    },
+    "SpecLimits #0": {
+      "fullUid": "0x00D800",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "Nudge",
+          "opcode": "0x0238",
+          "desc": "Nudge the value; out-of-band results reject and count.",
+          "fields": [
+            {
+              "name": "delta",
+              "type": "float",
+              "desc": "Added to value; results outside the banded rail reject."
+            }
+          ]
+        }
+      ]
+    },
+    "SpecProtoMax #0": {
+      "fullUid": "0x00D900",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "Report",
+          "opcode": "0x0241",
+          "desc": "Return the checksum/step snapshot.",
+          "fields": []
+        }
+      ]
+    },
+    "SpecChannel #0": {
+      "fullUid": "0x00DA00",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "Zero",
+          "opcode": "0x0248",
+          "desc": "Restart the ramp: elapsed returns to zero.",
+          "fields": []
+        }
+      ]
+    },
+    "SpecChannel #1": {
+      "fullUid": "0x00DA01",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "Zero",
+          "opcode": "0x0248",
+          "desc": "Restart the ramp: elapsed returns to zero.",
+          "fields": []
+        }
+      ]
+    },
+    "SystemMonitor": {
+      "fullUid": "0x00C800",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "HEALTH_SAMPLE",
+          "opcode": "0x0100",
+          "desc": "Health Sample",
+          "fields": []
+        }
+      ]
+    }
+  }
+}

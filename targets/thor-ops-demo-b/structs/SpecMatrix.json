@@ -1,0 +1,200 @@
+{
+  "component": "SpecMatrix",
+  "component_id": 215,
+  "structs": {
+    "MatrixSnapshot": {
+      "category": "TELEMETRY",
+      "opcode": "0x0230",
+      "size": 8,
+      "fields": [
+        {
+          "name": "checksum",
+          "type": "uint",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "stepCount",
+          "type": "uint",
+          "offset": 4,
+          "size": 4
+        }
+      ],
+      "spec_defined": true,
+      "layout_hash": "0x7E448D88",
+      "canonical_spec": "checksum:uint:4;stepCount:uint:4;"
+    },
+    "SpecMatrixState": {
+      "category": "STATE",
+      "size": 8,
+      "fields": [
+        {
+          "name": "stepCount",
+          "type": "uint",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "checksum",
+          "type": "uint",
+          "offset": 4,
+          "size": 4,
+          "doc": "Running XOR over the tunable bytes, recomputed each step."
+        }
+      ],
+      "spec_defined": true,
+      "layout_hash": "0x26945ADF",
+      "canonical_spec": "stepCount:uint:4;checksum:uint:4;"
+    },
+    "SpecMatrixTunableParams": {
+      "category": "TUNABLE_PARAM",
+      "size": 80,
+      "fields": [
+        {
+          "name": "iWide",
+          "type": "int",
+          "offset": 0,
+          "size": 8,
+          "value": -8000000000,
+          "doc": "int64 lane."
+        },
+        {
+          "name": "uWide",
+          "type": "uint",
+          "offset": 8,
+          "size": 8,
+          "value": 9000000000,
+          "doc": "uint64 lane."
+        },
+        {
+          "name": "precise",
+          "type": "float",
+          "offset": 16,
+          "size": 8,
+          "value": 2.718281828,
+          "doc": "double lane."
+        },
+        {
+          "name": "iWord",
+          "type": "int",
+          "offset": 24,
+          "size": 4,
+          "value": -70000,
+          "doc": "int32 lane."
+        },
+        {
+          "name": "uWord",
+          "type": "uint",
+          "offset": 28,
+          "size": 4,
+          "value": 70000,
+          "doc": "uint32 lane."
+        },
+        {
+          "name": "ratio",
+          "type": "float",
+          "offset": 32,
+          "size": 4,
+          "value": 0.5,
+          "doc": "float lane."
+        },
+        {
+          "name": "gains",
+          "type": "array",
+          "element_type": "uint",
+          "dims": [4],
+          "offset": 36,
+          "size": 8,
+          "value": [0, 0, 0, 0],
+          "doc": "uint16 array lane."
+        },
+        {
+          "name": "iShort",
+          "type": "int",
+          "offset": 44,
+          "size": 2,
+          "value": -300,
+          "doc": "int16 lane."
+        },
+        {
+          "name": "uShort",
+          "type": "uint",
+          "offset": 46,
+          "size": 2,
+          "value": 300,
+          "doc": "uint16 lane."
+        },
+        {
+          "name": "iTiny",
+          "type": "int",
+          "offset": 48,
+          "size": 1,
+          "value": -5,
+          "doc": "int8 lane."
+        },
+        {
+          "name": "uTiny",
+          "type": "uint",
+          "offset": 49,
+          "size": 1,
+          "value": 5,
+          "doc": "uint8 lane."
+        },
+        {
+          "name": "enabled",
+          "type": "bool",
+          "offset": 50,
+          "size": 1,
+          "value": true,
+          "doc": "bool lane."
+        },
+        {
+          "name": "label",
+          "type": "string",
+          "offset": 51,
+          "size": 12,
+          "doc": "Bounded string lane (12-byte char buffer)."
+        },
+        {
+          "name": "tags",
+          "type": "array",
+          "element_type": "string",
+          "dims": [2],
+          "offset": 63,
+          "size": 12,
+          "value": [0, 0],
+          "doc": "String array lane (2 x 6-byte char buffers)."
+        },
+        {
+          "name": "blob",
+          "type": "array",
+          "element_type": "uint",
+          "dims": [5],
+          "offset": 75,
+          "size": 5,
+          "value": [0, 0, 0, 0, 0],
+          "doc": "Byte buffer lane."
+        }
+      ],
+      "spec_defined": true,
+      "layout_hash": "0x5D6CD6BA",
+      "canonical_spec": "iWide:int:8;uWide:uint:8;precise:float:8;iWord:int:4;uWord:uint:4;ratio:float:4;gains:array:8;[uint:2x4]iShort:int:2;uShort:uint:2;iTiny:int:1;uTiny:uint:1;enabled:bool:1;label:string:12;tags:array:12;[string:6x2]blob:array:5;[uint:1x5]"
+    }
+  },
+  "commands": [
+    {
+      "name": "GetSnapshot",
+      "opcode": "0x0230",
+      "response": "MatrixSnapshot",
+      "doc": "Return the current checksum and step count."
+    }
+  ],
+  "telemetry": [
+    {
+      "name": "Snapshot",
+      "opcode": "0x0330",
+      "struct": "MatrixSnapshot",
+      "doc": "Checksum/step snapshot, also readable via INSPECT (STATE)."
+    }
+  ]
+}
