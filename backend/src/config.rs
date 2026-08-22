@@ -26,6 +26,18 @@ pub struct ServerSection {
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
+    /// Ceiling for file/library upload payloads, megabytes (decoded).
+    #[serde(default = "default_upload_max_mb")]
+    pub upload_max_mb: u32,
+    /// Origins allowed to call the API cross-origin. Empty (the
+    /// default) means same-origin only -- zenith serves its own
+    /// frontend, so cross-origin access is opt-in.
+    #[serde(default)]
+    pub cors_allowed_origins: Vec<String>,
+}
+
+fn default_upload_max_mb() -> u32 {
+    50
 }
 
 /// Authentication and rate-limiting configuration. Disabled by default
@@ -59,6 +71,11 @@ pub struct StorageSection {
     pub path: String,
     #[serde(default = "default_retention")]
     pub retention_hours: u32,
+    /// Audit rows older than this many days are pruned by the
+    /// maintenance loop. 0 keeps the log forever (pre-existing
+    /// behavior; unbounded growth inside the size-capped DB file).
+    #[serde(default = "default_audit_retention_days")]
+    pub audit_retention_days: u32,
     /// Max DB size in MB before FIFO kicks in (default 2048 = 2GB)
     #[serde(default)]
     pub max_db_size_mb: Option<u32>,
@@ -100,6 +117,10 @@ fn default_secret() -> String {
 fn default_db_path() -> String {
     "./data/zenith.db".to_string()
 }
+fn default_audit_retention_days() -> u32 {
+    90
+}
+
 fn default_retention() -> u32 {
     24
 }
@@ -113,6 +134,8 @@ impl Default for ServerConfig {
             server: ServerSection {
                 host: default_host(),
                 port: default_port(),
+                upload_max_mb: default_upload_max_mb(),
+                cors_allowed_origins: Vec::new(),
             },
             auth: AuthSection {
                 enabled: false,
@@ -123,6 +146,7 @@ impl Default for ServerConfig {
             storage: StorageSection {
                 path: default_db_path(),
                 retention_hours: default_retention(),
+                audit_retention_days: default_audit_retention_days(),
                 max_db_size_mb: None,
                 structs_dir: None,
             },
@@ -136,6 +160,8 @@ impl Default for ServerSection {
         Self {
             host: default_host(),
             port: default_port(),
+            upload_max_mb: default_upload_max_mb(),
+            cors_allowed_origins: Vec::new(),
         }
     }
 }
@@ -156,6 +182,7 @@ impl Default for StorageSection {
         Self {
             path: default_db_path(),
             retention_hours: default_retention(),
+            audit_retention_days: default_audit_retention_days(),
             max_db_size_mb: None,
             structs_dir: None,
         }

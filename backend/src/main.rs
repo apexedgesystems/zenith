@@ -447,6 +447,31 @@ async fn upload_file(
     Json(body): Json<FileUploadRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let (client, db_for_audit) = target_client(&state, &id).await?;
+    let max_bytes = {
+        let st = state.read().await;
+        st.config.server.upload_max_mb as usize * 1024 * 1024
+    };
+
+    // Path policy: relative, no parent traversal -- this string lands
+    // on the target's filesystem verbatim.
+    if body.remote_path.starts_with('/')
+        || body.remote_path.split('/').any(|seg| seg == "..")
+        || body.remote_path.is_empty()
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "remote_path must be relative with no parent traversal".to_string(),
+        ));
+    }
+
+    // Cap BEFORE decoding: base64 length bounds the decoded size, so an
+    // oversized body is rejected without materializing it.
+    if body.content_base64.len() / 4 * 3 > max_bytes {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("upload exceeds {} MB cap", max_bytes / 1024 / 1024),
+        ));
+    }
 
     // Decode base64 file content
     use base64::Engine;
@@ -600,10 +625,25 @@ async fn swap_library(
     if data.is_empty() {
         return Err((StatusCode::BAD_REQUEST, "empty .so payload".to_string()));
     }
-    if data.len() > 50 * 1024 * 1024 {
+    let max_bytes = {
+        let st = state.read().await;
+        st.config.server.upload_max_mb as usize * 1024 * 1024
+    };
+    if data.len() > max_bytes {
         return Err((
             StatusCode::PAYLOAD_TOO_LARGE,
-            "library exceeds 50MB cap".to_string(),
+            format!("library exceeds {} MB cap", max_bytes / 1024 / 1024),
+        ));
+    }
+    // These strings become a target filesystem path.
+    if body.component_name.contains('/')
+        || body.component_name.contains("..")
+        || body.inactive_bank.contains('/')
+        || body.inactive_bank.contains("..")
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "component_name and inactive_bank must be plain names".to_string(),
         ));
     }
 
@@ -1323,6 +1363,17 @@ struct HistoryQuery {
     limit: usize,
 }
 
+/// Hard ceiling on rows any history/CSV request can materialize.
+/// A request may ask for less, never more -- an unclamped limit was a
+/// one-request memory exhaustion.
+const HISTORY_LIMIT_MAX: usize = 200_000;
+
+impl HistoryQuery {
+    fn clamped_limit(&self) -> usize {
+        self.limit.min(HISTORY_LIMIT_MAX)
+    }
+}
+
 fn default_start() -> u64 {
     0
 }
@@ -1351,7 +1402,7 @@ async fn telemetry_history(
             query.channel.as_deref(),
             query.start_ms,
             query.end_ms,
-            query.limit,
+            query.clamped_limit(),
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
 
@@ -1576,11 +1627,13 @@ async fn telemetry_csv(
             query.channel.as_deref(),
             query.start_ms,
             query.end_ms,
-            query.limit,
+            query.clamped_limit(),
         )
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
 
-    let mut csv = String::from("timestamp_ms,channel,value\n");
+    // ~40 bytes/row; the clamp bounds worst case to a few MB.
+    let mut csv = String::with_capacity(32 + samples.len() * 40);
+    csv.push_str("timestamp_ms,channel,value\n");
     for s in &samples {
         csv.push_str(&format!("{},{},{}\n", s.timestamp_ms, s.channel, s.value));
     }
@@ -2488,6 +2541,15 @@ impl RateLimiter {
     async fn check(&self, ip: std::net::IpAddr) -> bool {
         let mut buckets = self.buckets.lock().await;
         let now = std::time::Instant::now();
+        // Lazy eviction: a bucket idle long enough to be full again
+        // carries no state worth keeping. Bounds the map against
+        // address churn without a background task.
+        if buckets.len() >= 4096 {
+            buckets.retain(|_, b| {
+                now.duration_since(b.last_refill).as_secs_f64()
+                    < RATE_LIMIT_BURST / RATE_LIMIT_PER_SEC
+            });
+        }
         let bucket = buckets.entry(ip).or_insert_with(|| TokenBucket {
             tokens: RATE_LIMIT_BURST,
             last_refill: now,
@@ -2540,7 +2602,22 @@ async fn rate_limit_middleware(
 
 /* ----------------------------- Server ----------------------------- */
 
-fn build_router(state: AppState) -> Router {
+fn build_router(state: AppState, cors_origins: &[String]) -> Router {
+    // Same-origin only unless origins are explicitly configured:
+    // zenith serves its own frontend, and a permissive policy would
+    // let any site drive a stolen token against an API that can
+    // restart executives and write target filesystems.
+    let cors = if cors_origins.is_empty() {
+        CorsLayer::new()
+    } else {
+        let origins: Vec<axum::http::HeaderValue> =
+            cors_origins.iter().filter_map(|o| o.parse().ok()).collect();
+        CorsLayer::new()
+            .allow_origin(origins)
+            .allow_methods(tower_http::cors::Any)
+            .allow_headers(tower_http::cors::Any)
+    };
+
     let api = Router::new()
         .route("/health", get(health))
         .route("/version", get(server_version))
@@ -2619,7 +2696,7 @@ fn build_router(state: AppState) -> Router {
         .fallback_service(tower_http::services::ServeDir::new(static_dir).fallback(
             tower_http::services::ServeFile::new(format!("{}/index.html", static_dir)),
         ))
-        .layer(CorsLayer::permissive())
+        .layer(cors)
         // Span carries method + path only: query strings are excluded
         // deliberately (WebSocket auth falls back to a ?token= query
         // parameter, which must never reach the request logs).
@@ -2998,6 +3075,7 @@ async fn main() {
         config.storage.retention_hours
     );
     let retention_ms = config.storage.retention_hours as u64 * 3600 * 1000;
+    let audit_retention_days = config.storage.audit_retention_days;
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
@@ -3029,6 +3107,21 @@ async fn main() {
             match db_maint.prune(retention_ms) {
                 Ok(n) if n > 0 => tracing::info!("Pruned {} samples beyond retention", n),
                 _ => {}
+            }
+
+            // Audit retention (0 = keep forever)
+            if audit_retention_days > 0 {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let cutoff = now_ms.saturating_sub(audit_retention_days as u64 * 86_400_000);
+                match db_maint.prune_audit(cutoff) {
+                    Ok(n) if n > 0 => {
+                        tracing::info!("Pruned {} audit rows beyond retention", n)
+                    }
+                    _ => {}
+                }
             }
         }
     });
@@ -3087,7 +3180,7 @@ async fn main() {
         }
     }
 
-    let app = build_router(state.clone());
+    let app = build_router(state.clone(), &config.server.cors_allowed_origins);
 
     tracing::info!("Zenith v{} starting on {}", env!("CARGO_PKG_VERSION"), addr);
     tracing::info!("Telemetry database: {}", db_path.display());
