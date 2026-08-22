@@ -1,63 +1,56 @@
 {
   "layouts": [
     {
-      "name": "Wave Output",
+      "name": "Default",
       "plots": [
         {
-          "title": "Waveform Output",
-          "channels": ["WaveGenerator#0.output", "WaveGenerator#1.output"],
-          "height": 220,
-          "y_label": "amplitude"
-        },
-        {
-          "title": "Phase",
-          "channels": ["WaveGenerator#0.phase", "WaveGenerator#1.phase"],
-          "height": 160,
-          "y_label": "radians"
-        }
-      ]
-    },
-    {
-      "name": "Wave Detail",
-      "plots": [
-        {
-          "title": "WaveGen #0 Output",
-          "channels": ["WaveGenerator#0.output"],
-          "height": 220,
-          "y_label": "amplitude",
-          "y_min": -1.5,
-          "y_max": 1.5,
-          "thresholds": [
-            { "value": 1.0, "color": "#d29922", "label": "upper limit" },
-            { "value": -1.0, "color": "#d29922", "label": "lower limit" }
-          ]
-        },
-        {
-          "title": "WaveGen #1 Output",
-          "channels": ["WaveGenerator#1.output"],
-          "height": 220,
-          "y_label": "amplitude",
-          "y_min": -3.0,
-          "y_max": 3.0,
-          "thresholds": [
-            { "value": 2.0, "color": "#d29922", "label": "upper limit" },
-            { "value": -2.0, "color": "#d29922", "label": "lower limit" }
-          ]
-        },
-        {
-          "title": "Step Counters",
+          "title": "WaveGenerator#0 Output",
           "channels": [
-            "WaveGenerator#0.stepCount",
-            "WaveGenerator#1.stepCount"
+            "WaveGenerator#0.waveType",
+            "WaveGenerator#0.frequency",
+            "WaveGenerator#0.amplitude",
+            "WaveGenerator#0.output",
+            "WaveGenerator#0.peakPos",
+            "WaveGenerator#0.peakNeg",
+            "WaveGenerator#0.rms",
+            "WaveGenerator#0.sampleCount"
           ],
-          "height": 140,
-          "y_label": "count"
-        }
-      ]
-    },
-    {
-      "name": "System Health",
-      "plots": [
+          "height": 200
+        },
+        {
+          "title": "WaveGenerator#0 Output",
+          "channels": ["WaveGenerator#0.output", "WaveGenerator#0.phase"],
+          "height": 200
+        },
+        {
+          "title": "WaveGenerator#1 Output",
+          "channels": [
+            "WaveGenerator#1.waveType",
+            "WaveGenerator#1.frequency",
+            "WaveGenerator#1.amplitude",
+            "WaveGenerator#1.output",
+            "WaveGenerator#1.peakPos",
+            "WaveGenerator#1.peakNeg",
+            "WaveGenerator#1.rms",
+            "WaveGenerator#1.sampleCount"
+          ],
+          "height": 200
+        },
+        {
+          "title": "WaveGenerator#1 Output",
+          "channels": ["WaveGenerator#1.output", "WaveGenerator#1.phase"],
+          "height": 200
+        },
+        {
+          "title": "TelemetryManager Output",
+          "channels": [
+            "TelemetryManager.collectCount",
+            "TelemetryManager.packetsSent",
+            "TelemetryManager.sendFailures",
+            "TelemetryManager.activeCount"
+          ],
+          "height": 200
+        },
         {
           "title": "CPU Temperature",
           "channels": ["SystemMonitor.cpuTempC"],
@@ -66,8 +59,16 @@
           "y_max": 100,
           "y_label": "C",
           "thresholds": [
-            { "value": 75, "color": "#d29922", "label": "warn" },
-            { "value": 85, "color": "#f85149", "label": "crit" }
+            {
+              "value": 75,
+              "color": "#d29922",
+              "label": "warn"
+            },
+            {
+              "value": 85,
+              "color": "#f85149",
+              "label": "crit"
+            }
           ]
         },
         {
@@ -78,8 +79,16 @@
           "y_max": 100,
           "y_label": "%",
           "thresholds": [
-            { "value": 80, "color": "#d29922", "label": "warn" },
-            { "value": 95, "color": "#f85149", "label": "crit" }
+            {
+              "value": 80,
+              "color": "#d29922",
+              "label": "warn"
+            },
+            {
+              "value": 95,
+              "color": "#f85149",
+              "label": "crit"
+            }
           ]
         },
         {

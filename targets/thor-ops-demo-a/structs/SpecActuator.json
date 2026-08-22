@@ -1,0 +1,180 @@
+{
+  "component": "SpecActuator",
+  "component_id": 213,
+  "structs": {
+    "MoveRequest": {
+      "category": "COMMAND",
+      "opcode": "0x0210",
+      "size": 4,
+      "fields": [
+        {
+          "name": "position",
+          "type": "float",
+          "offset": 0,
+          "size": 4,
+          "doc": "Commanded target position [units], range -1000..1000."
+        }
+      ],
+      "spec_defined": true
+    },
+    "PositionResponse": {
+      "category": "TELEMETRY",
+      "opcode": "0x0212",
+      "size": 8,
+      "fields": [
+        {
+          "name": "position",
+          "type": "float",
+          "offset": 0,
+          "size": 4,
+          "doc": "Current position [units]."
+        },
+        {
+          "name": "moving",
+          "type": "uint",
+          "offset": 4,
+          "size": 1,
+          "doc": "1 while outside the hold band, 0 when settled."
+        },
+        {
+          "name": "reserved",
+          "type": "array",
+          "element_type": "uint",
+          "dims": [3],
+          "offset": 5,
+          "size": 3,
+          "value": [0, 0, 0]
+        }
+      ],
+      "spec_defined": true
+    },
+    "SpecActuatorOutput": {
+      "category": "OUTPUT",
+      "size": 8,
+      "fields": [
+        {
+          "name": "position",
+          "type": "float",
+          "offset": 0,
+          "size": 4,
+          "doc": "Published position [units]."
+        },
+        {
+          "name": "sequence",
+          "type": "uint",
+          "offset": 4,
+          "size": 4,
+          "doc": "Monotonic publish counter."
+        }
+      ],
+      "spec_defined": true
+    },
+    "SpecActuatorState": {
+      "category": "STATE",
+      "size": 16,
+      "fields": [
+        {
+          "name": "position",
+          "type": "float",
+          "offset": 0,
+          "size": 4,
+          "doc": "Current position [units]."
+        },
+        {
+          "name": "target",
+          "type": "float",
+          "offset": 4,
+          "size": 4,
+          "doc": "Commanded target [units]."
+        },
+        {
+          "name": "moves",
+          "type": "uint",
+          "offset": 8,
+          "size": 4,
+          "doc": "Accepted move commands."
+        },
+        {
+          "name": "rejects",
+          "type": "uint",
+          "offset": 12,
+          "size": 4,
+          "doc": "Rejected move commands (out-of-range target)."
+        }
+      ],
+      "spec_defined": true
+    },
+    "SpecActuatorTunableParams": {
+      "category": "TUNABLE_PARAM",
+      "size": 20,
+      "fields": [
+        {
+          "name": "rateLimit",
+          "type": "float",
+          "offset": 0,
+          "size": 4,
+          "value": 5.0,
+          "doc": "Slew rate limit [units/s], range 0.1..50.",
+          "constraints": {
+            "min": 0.1,
+            "max": 50.0
+          }
+        },
+        {
+          "name": "holdBand",
+          "type": "float",
+          "offset": 4,
+          "size": 4,
+          "value": 0.1,
+          "doc": "Hold band around the target: inside it the actuator is settled.",
+          "constraints": {
+            "min": 0.0
+          }
+        },
+        {
+          "name": "startPosition",
+          "type": "float",
+          "offset": 8,
+          "size": 4,
+          "value": 0.0,
+          "doc": "Position adopted at boot."
+        },
+        {
+          "name": "axisLabel",
+          "type": "string",
+          "offset": 12,
+          "size": 8,
+          "doc": "Axis label for operator displays (fixed 8-byte char buffer)."
+        }
+      ],
+      "spec_defined": true
+    }
+  },
+  "commands": [
+    {
+      "name": "Move",
+      "opcode": "0x0210",
+      "request": "MoveRequest",
+      "doc": "Command a new target position; slew begins next step."
+    },
+    {
+      "name": "Halt",
+      "opcode": "0x0211",
+      "doc": "Stop where we are: target becomes the current position."
+    },
+    {
+      "name": "GetPosition",
+      "opcode": "0x0212",
+      "response": "PositionResponse",
+      "doc": "Return the current position and settling state."
+    }
+  ],
+  "telemetry": [
+    {
+      "name": "Position",
+      "opcode": "0x0310",
+      "struct": "SpecActuatorOutput",
+      "doc": "Published position, readable via INSPECT (OUTPUT category)."
+    }
+  ]
+}

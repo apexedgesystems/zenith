@@ -114,17 +114,38 @@ producing repo's golden vectors; the backend conformance suite fails
 CI on any divergence, and the copy's README documents the refresh
 procedure.
 
+## Refreshing a Target Directory
+
+Everything under `targets/<name>/` is disposable generator output --
+no file in it is hand-maintained. When the producing repo's
+components change:
+
+```bash
+# in the apex repo
+make apex-data-db && make zenith-target APP=MyApp
+# in zenith
+rm -rf targets/<name> && cp -r <apex>/build/*/zenith_targets/MyApp targets/<name>
+```
+
+On the next startup zenith re-syncs config-seeded layouts to the new
+file (stale ones removed, changed ones updated) and leaves DB-saved
+user layouts untouched. Operator-curated layouts belong in the
+database (save them from the Telemetry page); the layout picker
+flags any saved layout whose channels no longer exist in the
+refreshed dictionaries. Back curation up with
+`GET /api/targets/{id}/telemetry/layouts/export`.
+
 ## Quickstart
 
 ```bash
-# 1. Create target config directory and copy in build artifacts
-mkdir -p targets/my-target/structs
-cp /path/to/apex/build/apex_data_db/*.json targets/my-target/structs/
-cp /path/to/apex/app_manifest.json targets/my-target/
+# 1. Generate the target config directory from the apex build
+#    (in the apex repo; emits manifest, struct dicts, commands, and
+#    a default telemetry layout in one step)
+make apex-data-db && make zenith-target APP=MyApp
+cp -r build/*/zenith_targets/MyApp targets/my-target
 
-# 2. Optional: write a telemetry.json plot layout and a commands.json
-#    Both are optional -- zenith works without them. See targets/pi-ops-demo/
-#    in this repo for working examples.
+# 2. Optional: curate plot layouts IN THE UI and save them -- saved
+#    layouts live in zenith's database, not in the target directory.
 
 # 3. Configure
 cat > config.toml << 'EOF'
