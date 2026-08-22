@@ -1368,18 +1368,56 @@ async fn telemetry_layouts(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let st = state.read().await;
-    if !st.targets.contains_key(&id) {
-        return Err((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)));
-    }
-    let db = st.db.clone();
-    drop(st);
+    let (db, dicts, manifest) = {
+        let st = state.read().await;
+        let target = st
+            .targets
+            .get(&id)
+            .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
+        (
+            st.db.clone(),
+            target.struct_dicts.clone(),
+            target.manifest.clone(),
+        )
+    };
 
     let layouts = db
         .get_layouts(&id)
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
 
-    Ok(Json(serde_json::json!({ "layouts": layouts })))
+    // Annotate each layout with channel references the current
+    // dictionaries cannot produce -- after a target-config refresh,
+    // saved layouts can point at renamed or removed fields, and that
+    // rot should be visible in the picker instead of silently
+    // rendering an empty plot.
+    let uid_names: Vec<(u32, String)> = manifest
+        .as_ref()
+        .map(|m| m.component_uids())
+        .unwrap_or_default();
+    let uid_refs: Vec<(u32, &str)> = uid_names.iter().map(|(u, n)| (*u, n.as_str())).collect();
+    let known: std::collections::HashSet<String> =
+        telemetry::TelemetryDecoder::new(&dicts, &uid_refs)
+            .channel_names()
+            .into_iter()
+            .collect();
+
+    let annotated: Vec<serde_json::Value> = layouts
+        .iter()
+        .map(|l| {
+            let mut v = serde_json::to_value(l).unwrap_or_default();
+            let unknown: Vec<&str> = l
+                .plots
+                .iter()
+                .flat_map(|p| p.channels.iter())
+                .filter(|c| !known.contains(c.as_str()))
+                .map(|c| c.as_str())
+                .collect();
+            v["unknown_channels"] = serde_json::json!(unknown);
+            v
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({ "layouts": annotated })))
 }
 
 #[derive(Deserialize)]
