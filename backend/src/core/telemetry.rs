@@ -434,6 +434,7 @@ mod tests {
             value: serde_json::Value::Null,
             element_type: None,
             dims: None,
+            constraints: None,
         };
         let comp = ComponentDict {
             component: "WaveGenerator".to_string(),
@@ -572,6 +573,7 @@ mod tests {
             value: serde_json::Value::Null,
             element_type: None,
             dims: None,
+            constraints: None,
         };
         let comp = ComponentDict {
             component: "X".to_string(),

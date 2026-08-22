@@ -12,6 +12,54 @@ use serde_json::Value as Json;
 
 /* ----------------------------- Types ----------------------------- */
 
+/// Constraint rails exported per field by the dictionary generator.
+/// The vehicle enforces the same rails on load; ground-side checks are
+/// the front door, the vehicle is the backstop.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FieldConstraints {
+    #[serde(default)]
+    pub min: Option<f64>,
+    #[serde(default)]
+    pub max: Option<f64>,
+    #[serde(default)]
+    pub step: Option<f64>,
+    #[serde(default)]
+    pub allowed: Option<Vec<f64>>,
+}
+
+impl FieldConstraints {
+    /// Check one numeric value against the rails. Step granularity is
+    /// measured from min (or zero) with a small epsilon for float
+    /// representation.
+    pub fn check(&self, v: f64) -> Result<(), String> {
+        if let Some(min) = self.min {
+            if v < min {
+                return Err(format!("{} below min {}", v, min));
+            }
+        }
+        if let Some(max) = self.max {
+            if v > max {
+                return Err(format!("{} above max {}", v, max));
+            }
+        }
+        if let Some(step) = self.step {
+            if step > 0.0 {
+                let base = self.min.unwrap_or(0.0);
+                let n = (v - base) / step;
+                if (n - n.round()).abs() > 1e-6 {
+                    return Err(format!("{} not on step {} from {}", v, step, base));
+                }
+            }
+        }
+        if let Some(allowed) = &self.allowed {
+            if !allowed.iter().any(|a| (a - v).abs() < 1e-9) {
+                return Err(format!("{} not in allowed set {:?}", v, allowed));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// A single field in a struct.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FieldDef {
@@ -26,6 +74,9 @@ pub struct FieldDef {
     pub element_type: Option<String>,
     #[serde(default)]
     pub dims: Option<Vec<usize>>,
+    /// Rails from the dictionary; array fields apply them per element.
+    #[serde(default)]
+    pub constraints: Option<FieldConstraints>,
 }
 
 /// A struct definition with its fields.
@@ -582,6 +633,28 @@ impl TelemetryConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// @test Constraint rails: min, max, step-from-min, and allowed
+    /// sets each reject out-of-rail values and accept in-rail ones,
+    /// matching the vehicle's semantics so the front door and the
+    /// backstop agree.
+    #[test]
+    fn field_constraints_check_each_rail() {
+        let c = |j: &str| serde_json::from_str::<FieldConstraints>(j).unwrap();
+
+        let banded = c(r#"{"min": 0.0, "max": 10.0}"#);
+        assert!(banded.check(5.0).is_ok());
+        assert!(banded.check(-0.1).is_err());
+        assert!(banded.check(10.1).is_err());
+
+        let stepped = c(r#"{"min": 0.0, "step": 0.25}"#);
+        assert!(stepped.check(0.75).is_ok());
+        assert!(stepped.check(0.3).is_err());
+
+        let allowed = c(r#"{"allowed": [1.0, 3.0, 5.0, 7.0]}"#);
+        assert!(allowed.check(3.0).is_ok());
+        assert!(allowed.check(2.0).is_err());
+    }
 
     /// @test A dictionary entry carrying the producer-stated layout
     /// hash exposes the u32 the prelude carries; entries without one

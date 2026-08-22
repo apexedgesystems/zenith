@@ -1108,6 +1108,19 @@ async fn update_params(
             .as_ref()
             .ok_or((StatusCode::BAD_REQUEST, "Missing entries".to_string()))?;
 
+        let mut rail_violations = constraint_violations(&hdr_struct.fields, &body.fields);
+        if let Some(entries) = body.entries.as_ref() {
+            for e in entries {
+                rail_violations.extend(constraint_violations(&ent_struct.fields, e));
+            }
+        }
+        if !rail_violations.is_empty() {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("Constraint violation(s): {}", rail_violations.join("; ")),
+            ));
+        }
+
         let total_size = hdr_struct.size + entries.len() * ent_struct.size;
         let mut buf = vec![0u8; total_size];
         let mut unencodable: Vec<String> = Vec::new();
@@ -1173,6 +1186,14 @@ async fn update_params(
                     "No matching TUNABLE_PARAM struct found for {} bytes",
                     original_binary.len()
                 ),
+            ));
+        }
+
+        let rail_violations = constraint_violations(&struct_fields, &body.fields);
+        if !rail_violations.is_empty() {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("Constraint violation(s): {}", rail_violations.join("; ")),
             ));
         }
 
@@ -1279,6 +1300,32 @@ async fn update_params(
             Err((StatusCode::BAD_GATEWAY, err_msg))
         }
     }
+}
+
+/// Validate edited values against the dictionary's constraint rails
+/// before anything is encoded or uploaded. Arrays apply their rails
+/// per element. Returns "field: reason" strings for every violation.
+fn constraint_violations(
+    fields: &[crate::core::config_manager::FieldDef],
+    edits: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    for field in fields {
+        let (Some(value), Some(rails)) = (edits.get(&field.name), field.constraints.as_ref())
+        else {
+            continue;
+        };
+        let numbers: Vec<f64> = match value {
+            serde_json::Value::Array(a) => a.iter().filter_map(|v| v.as_f64()).collect(),
+            v => v.as_f64().into_iter().collect(),
+        };
+        for n in numbers {
+            if let Err(reason) = rails.check(n) {
+                violations.push(format!("{}: {}", field.name, reason));
+            }
+        }
+    }
+    violations
 }
 
 /// LeafSpec views over dict fields, shared by flat and variable-length
@@ -1395,6 +1442,7 @@ fn encode_field(
                     value: serde_json::Value::Null,
                     element_type: None,
                     dims: None,
+                    constraints: None,
                 };
                 encode_field(buf, &elem, v)
             })
