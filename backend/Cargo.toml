@@ -26,7 +26,7 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 
 # Auth
 jsonwebtoken = "9"
-argon2 = "0.5"
+argon2 = { version = "0.5", features = ["std"] }
 
 # Logging
 tracing = "0.1"

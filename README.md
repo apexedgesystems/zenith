@@ -262,6 +262,7 @@ GET    /api/metrics                              # Per-target pipeline counters 
 GET    /api/version
 GET    /api/audit?limit=N&offset=N
 POST   /api/auth/login
+POST   /api/auth/ws-ticket                       # Trade a bearer token for a 30s WebSocket ticket
 
 # Targets
 GET    /api/targets
@@ -317,21 +318,40 @@ GET    /api/structs/{component}                  # Same
 
 ## Authentication and Audit
 
-When `[auth] enabled = true` in `config.toml`:
+Setup: generate a password hash with `zenith --hash-password` (reads
+the password from stdin, prints an argon2 PHC string), then set
+`[auth] enabled = true`, `username`, `password_hash`, and a `secret`
+of at least 16 characters. The secret signs tokens and is never a
+login credential. Startup refuses to boot with the default secret,
+a missing hash, or a malformed hash while auth is enabled.
+
+When auth is enabled:
 
 - All `/api/*` routes except `/api/auth/login` and `/api/health`
-  require `Authorization: Bearer <jwt>` (or `?token=<jwt>` for
-  WebSocket upgrades, since browsers can't set Authorization on
-  WS).
+  require `Authorization: Bearer <jwt>`. Tokens carry `sub` and
+  `exp` (24 h) and the subject is recorded as the actor on every
+  audited action.
+- WebSocket upgrades (which browsers cannot attach headers to) use
+  `POST /api/auth/ws-ticket` to trade the bearer token for a 30 s
+  single-purpose ticket passed as `?ticket=`. Long-lived tokens on
+  a query string are rejected so they can never reach request logs
+  (which record method and path only, never query strings).
 - Per-IP token bucket rate limit of 10 req/sec (burst 30) on POST
-  endpoints. Returns 429 when exceeded.
-- Login: `POST /api/auth/login` with `{username, password}`.
-  Returns `{token, expires_in}`. The hash compares against
-  `[auth] secret`.
+  endpoints. Returns 429 when exceeded. Idle buckets are evicted.
 
 When auth is disabled (the default for development), the middleware
-is a pass-through. All endpoints are open and no rate limiting
-applies.
+is a pass-through, all endpoints are open, no rate limiting applies,
+and audit entries record the anonymous actor "operator". This is a
+deliberate trusted-LAN development posture -- enable auth for any
+deployment where the network is not fully trusted.
+
+Independent of auth, every request is bounded: history and CSV row
+limits clamp at 200k, uploads cap at `[server] upload_max_mb`
+(default 50) with remote paths required to be relative and
+traversal-free, cross-origin API access is denied unless
+`[server] cors_allowed_origins` lists origins, and audit rows prune
+after `[storage] audit_retention_days` (default 90; 0 keeps
+forever).
 
 The audit log captures every state-changing action regardless of
 whether auth is on. View it at `GET /api/audit` or via the Audit Log

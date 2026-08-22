@@ -422,6 +422,19 @@ impl TelemetryDb {
         Ok(deleted)
     }
 
+    /// Prune audit rows older than the cutoff. The audit log is
+    /// append-only in normal operation; retention runs from the
+    /// maintenance loop so the log cannot grow without bound inside
+    /// the size-capped DB file.
+    pub fn prune_audit(&self, cutoff_ms: u64) -> Result<usize, DbError> {
+        let conn = self.writer.lock().map_err(|_| DbError::Lock)?;
+        let deleted = conn.execute(
+            "DELETE FROM audit_log WHERE ts_ms < ?1",
+            params![cutoff_ms as i64],
+        )?;
+        Ok(deleted)
+    }
+
     /// Cheap writability probe for health reporting. BEGIN IMMEDIATE
     /// acquires SQLite's RESERVED lock -- it fails on a read-only file
     /// or filesystem -- then rolls back without touching data. A busy
@@ -1750,6 +1763,26 @@ mod tests {
         assert_eq!(layouts.len(), 1);
         assert_eq!(layouts[0].source, "user");
         assert_eq!(layouts[0].plots[0].channels, vec!["C.custom"]);
+    }
+
+    /// @test prune_audit removes rows strictly older than the cutoff
+    /// and leaves newer rows intact.
+    #[test]
+    fn prune_audit_removes_only_old_rows() {
+        let (_dir, db) = open_temp_db();
+        {
+            let conn = db.writer.lock().unwrap();
+            for (ts, action) in [(1_000i64, "old"), (2_000, "old2"), (9_000, "new")] {
+                conn.execute(
+                    "INSERT INTO audit_log (ts_ms, actor, action, status) VALUES (?1, 'op', ?2, 'ok')",
+                    params![ts, action],
+                )
+                .unwrap();
+            }
+        }
+        assert_eq!(db.prune_audit(5_000).unwrap(), 2);
+        let remaining = db.query_audit(10, 0).unwrap();
+        assert_eq!(remaining.len(), 1);
     }
 
     /// @test prune retains the newest 100 user layouts per target, not
