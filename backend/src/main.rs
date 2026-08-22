@@ -1157,11 +1157,13 @@ async fn update_params(
         (buf, hash)
     } else {
         // Flat: single struct
+        let mut dict_hash: Option<u32> = None;
         if let Some((_comp, _sname, sdef)) =
             find_tunable_struct(&dicts, original_binary.len(), full_uid, manifest.as_deref())
         {
             struct_size = sdef.size;
             struct_fields = sdef.fields.clone();
+            dict_hash = sdef.layout_hash_u32();
         }
 
         if struct_size == 0 {
@@ -1198,7 +1200,18 @@ async fn update_params(
                 ),
             ));
         }
-        let hash = tprm::layout_hash(dict_leaf_specs(&struct_fields));
+        // Producer-stated hash when the dictionary exports one -- that
+        // is the value the vehicle verifies. Recompute only for
+        // dictionaries predating the export, with a warning: the
+        // flattened-fields recompute predates string leaves and cannot
+        // be trusted once those appear.
+        let hash = dict_hash.unwrap_or_else(|| {
+            tracing::warn!(
+                "no layout_hash in dictionary for uid 0x{:06X}; recomputing from flattened fields",
+                full_uid
+            );
+            tprm::layout_hash(dict_leaf_specs(&struct_fields))
+        });
         (buf, hash)
     };
 
@@ -1345,6 +1358,47 @@ fn encode_field(
             .as_f64()
             .map(|v| buf[off..off + 8].copy_from_slice(&v.to_le_bytes()))
             .is_some(),
+        // Bounded string: fixed char buffer, NUL-padded. A value longer
+        // than the field is refused, never truncated -- the packer on
+        // the producing side errors the same way.
+        ("string", n) => match value.as_str() {
+            Some(s) if s.len() <= n => {
+                buf[off..off + n].fill(0);
+                buf[off..off + s.len()].copy_from_slice(s.as_bytes());
+                true
+            }
+            _ => false,
+        },
+        // Array: exact element count required; each element encodes by
+        // element_type at its slot (strings recurse into the bounded-
+        // string rule above).
+        ("array", total) => {
+            let count = field
+                .dims
+                .as_ref()
+                .map(|d| d.iter().product::<usize>())
+                .unwrap_or(0);
+            let Some(arr) = value.as_array() else {
+                return false;
+            };
+            if count == 0 || arr.len() != count || total % count != 0 {
+                return false;
+            }
+            let elem_size = total / count;
+            let elem_type = field.element_type.as_deref().unwrap_or("uint");
+            arr.iter().enumerate().all(|(i, v)| {
+                let elem = crate::core::config_manager::FieldDef {
+                    name: field.name.clone(),
+                    field_type: elem_type.to_string(),
+                    offset: off + i * elem_size,
+                    size: elem_size,
+                    value: serde_json::Value::Null,
+                    element_type: None,
+                    dims: None,
+                };
+                encode_field(buf, &elem, v)
+            })
+        }
         _ => false,
     }
 }
