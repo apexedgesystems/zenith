@@ -883,52 +883,95 @@ pub struct SavedLayout {
 }
 
 impl TelemetryDb {
-    /// Seed layouts from a TelemetryConfig (from telemetry.json).
-    /// Only inserts layouts with source='config' that don't already exist.
+    /// Synchronize config-sourced layouts with the target's telemetry
+    /// config file: insert new, replace changed, delete config layouts
+    /// no longer in the file. User-sourced layouts are never touched.
+    /// This keeps the file a pure regenerable default -- insert-if-
+    /// absent seeding left stale config rows behind forever, which is
+    /// what made targets/ un-refreshable.
     pub fn seed_layouts(
         &self,
         target_id: &str,
         config: &crate::core::config_manager::TelemetryConfig,
     ) -> Result<usize, DbError> {
-        let conn = self.writer.lock().map_err(|_| DbError::Lock)?;
+        let mut conn = self.writer.lock().map_err(|_| DbError::Lock)?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs() as i64;
 
+        let tx = conn.transaction()?;
         let mut count = 0;
-        for layout in &config.layouts {
-            // Check if already exists
-            let exists: bool = conn
-                .query_row(
-                    "SELECT COUNT(*) > 0 FROM telemetry_layouts WHERE target_id = ?1 AND name = ?2",
-                    params![target_id, layout.name],
-                    |row| row.get(0),
-                )
-                .unwrap_or(false);
 
-            if exists {
-                continue;
-            }
-
-            conn.execute(
-                "INSERT INTO telemetry_layouts (target_id, name, source, grid, time_window_s, created_at)
-                 VALUES (?1, ?2, 'config', '1x1', 30, ?3)",
-                params![target_id, layout.name, now],
+        // Delete config-sourced layouts absent from the file (plots
+        // first: the FK cascade only fires with foreign_keys on).
+        let stale_ids: Vec<i64> = {
+            let file_names: Vec<&str> = config.layouts.iter().map(|l| l.name.as_str()).collect();
+            let mut stmt = tx.prepare(
+                "SELECT id, name FROM telemetry_layouts
+                 WHERE target_id = ?1 AND source = 'config'",
             )?;
-            let layout_id = conn.last_insert_rowid();
+            let rows = stmt.query_map(params![target_id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.filter_map(|r| r.ok())
+                .filter(|(_, name)| !file_names.contains(&name.as_str()))
+                .map(|(id, _)| id)
+                .collect()
+        };
+        for id in &stale_ids {
+            tx.execute(
+                "DELETE FROM telemetry_plots WHERE layout_id = ?1",
+                params![id],
+            )?;
+            tx.execute("DELETE FROM telemetry_layouts WHERE id = ?1", params![id])?;
+        }
+
+        // Upsert each file layout; replacing plots in place keeps the
+        // layout id stable when only content changed. Names are unique
+        // per target across sources, and a user-saved layout owns its
+        // name: the file default is skipped rather than clobbering it.
+        for layout in &config.layouts {
+            let existing: Option<(i64, String)> = tx
+                .query_row(
+                    "SELECT id, source FROM telemetry_layouts
+                     WHERE target_id = ?1 AND name = ?2",
+                    params![target_id, layout.name],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()?;
+
+            let layout_id = match existing {
+                Some((_, source)) if source != "config" => continue,
+                Some((id, _)) => {
+                    tx.execute(
+                        "DELETE FROM telemetry_plots WHERE layout_id = ?1",
+                        params![id],
+                    )?;
+                    id
+                }
+                None => {
+                    tx.execute(
+                        "INSERT INTO telemetry_layouts (target_id, name, source, grid, time_window_s, created_at)
+                         VALUES (?1, ?2, 'config', '1x1', 30, ?3)",
+                        params![target_id, layout.name, now],
+                    )?;
+                    count += 1;
+                    tx.last_insert_rowid()
+                }
+            };
 
             for (i, plot) in layout.plots.iter().enumerate() {
                 let channels_json = serde_json::to_string(&plot.channels).unwrap_or_default();
-                conn.execute(
+                tx.execute(
                     "INSERT INTO telemetry_plots (layout_id, title, channels, height, position_row, position_col)
                      VALUES (?1, ?2, ?3, ?4, ?5, 0)",
                     params![layout_id, plot.title, channels_json, plot.height, i as i64],
                 )?;
             }
-            count += 1;
         }
 
+        tx.commit()?;
         Ok(count)
     }
 
@@ -1628,6 +1671,85 @@ mod tests {
         db.insert_batch(&[sample(&t, &ch, 100, 1.0)]).unwrap();
         assert_eq!(db.count().unwrap(), 1);
         db.probe_writable().unwrap();
+    }
+
+    fn telemetry_config(
+        layouts: &[(&str, &[&str])],
+    ) -> crate::core::config_manager::TelemetryConfig {
+        use crate::core::config_manager::{PlotDef, TelemetryConfig, TelemetryLayout};
+        TelemetryConfig {
+            layouts: layouts
+                .iter()
+                .map(|(name, channels)| TelemetryLayout {
+                    name: name.to_string(),
+                    plots: vec![PlotDef {
+                        title: format!("{name} plot"),
+                        channels: channels.iter().map(|c| c.to_string()).collect(),
+                        height: 180,
+                    }],
+                })
+                .collect(),
+        }
+    }
+
+    /// @test seed_layouts mirrors the config file: a renamed layout in
+    /// the file replaces the old config row (stale one deleted), a
+    /// content change updates plots in place, and user layouts survive
+    /// every resync untouched.
+    #[test]
+    fn seed_layouts_syncs_config_source_with_file() {
+        let (_dir, db) = open_temp_db();
+
+        // Initial file: two config layouts; plus one user layout.
+        db.seed_layouts(
+            "t1",
+            &telemetry_config(&[("Waves", &["A.x"]), ("Health", &["B.y"])]),
+        )
+        .unwrap();
+        db.save_layout("t1", "MyCustom", "1x1", 30, &[]).unwrap();
+        assert_eq!(db.get_layouts("t1").unwrap().len(), 3);
+
+        // File evolves: Health renamed to Monitor, Waves gains a channel.
+        db.seed_layouts(
+            "t1",
+            &telemetry_config(&[("Waves", &["A.x", "A.z"]), ("Monitor", &["B.y"])]),
+        )
+        .unwrap();
+
+        let layouts = db.get_layouts("t1").unwrap();
+        let names: Vec<&str> = layouts.iter().map(|l| l.name.as_str()).collect();
+        assert!(names.contains(&"Waves") && names.contains(&"Monitor"));
+        assert!(!names.contains(&"Health"), "stale config layout must go");
+        assert!(names.contains(&"MyCustom"), "user layout must survive");
+
+        let waves = layouts.iter().find(|l| l.name == "Waves").unwrap();
+        assert_eq!(waves.plots[0].channels, vec!["A.x", "A.z"]);
+    }
+
+    /// @test A user-saved layout owns its name: a config layout with
+    /// the same name in the file is skipped, never clobbers the user's.
+    #[test]
+    fn seed_layouts_user_name_wins_over_file_default() {
+        let (_dir, db) = open_temp_db();
+        let plots = vec![SavedPlot {
+            title: "mine".into(),
+            channels: vec!["C.custom".into()],
+            height: 200,
+            position: [0, 0],
+            y_min: None,
+            y_max: None,
+            y_label: None,
+            thresholds: None,
+        }];
+        db.save_layout("t1", "Waves", "1x1", 30, &plots).unwrap();
+
+        db.seed_layouts("t1", &telemetry_config(&[("Waves", &["A.x"])]))
+            .unwrap();
+
+        let layouts = db.get_layouts("t1").unwrap();
+        assert_eq!(layouts.len(), 1);
+        assert_eq!(layouts[0].source, "user");
+        assert_eq!(layouts[0].plots[0].channels, vec!["C.custom"]);
     }
 
     /// @test prune retains the newest 100 user layouts per target, not
