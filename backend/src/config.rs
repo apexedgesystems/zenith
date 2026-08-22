@@ -35,8 +35,21 @@ pub struct ServerSection {
 pub struct AuthSection {
     #[serde(default)]
     pub enabled: bool,
+    /// JWT signing key ONLY -- never a login credential. Startup
+    /// refuses to boot with the default value while auth is enabled.
     #[serde(default = "default_secret")]
     pub secret: String,
+    /// Login username (single-operator scheme).
+    #[serde(default = "default_username")]
+    pub username: String,
+    /// argon2 PHC hash of the login password. Generate with
+    /// `zenith --hash-password`. Required when auth is enabled.
+    #[serde(default)]
+    pub password_hash: String,
+}
+
+fn default_username() -> String {
+    "admin".to_string()
 }
 
 /// Storage layer configuration: SQLite path, retention, FIFO trigger.
@@ -104,6 +117,8 @@ impl Default for ServerConfig {
             auth: AuthSection {
                 enabled: false,
                 secret: default_secret(),
+                username: default_username(),
+                password_hash: String::new(),
             },
             storage: StorageSection {
                 path: default_db_path(),
@@ -130,6 +145,8 @@ impl Default for AuthSection {
         Self {
             enabled: false,
             secret: default_secret(),
+            username: default_username(),
+            password_hash: String::new(),
         }
     }
 }

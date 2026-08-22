@@ -47,7 +47,17 @@ struct Cli {
     config: PathBuf,
     #[arg(short, long)]
     port: Option<u16>,
+    /// Read a password from stdin, print its argon2 PHC hash for
+    /// config.toml's [auth] password_hash, and exit.
+    #[arg(long)]
+    hash_password: bool,
 }
+
+/// Authenticated principal for audit attribution, inserted by the auth
+/// middleware on every request: the token's sub when auth is on, the
+/// anonymous "operator" when it is off.
+#[derive(Clone)]
+struct Actor(Arc<str>);
 
 /* ----------------------------- App State ----------------------------- */
 
@@ -290,6 +300,7 @@ async fn list_targets(State(state): State<AppState>) -> Json<serde_json::Value> 
 
 async fn connect_target(
     State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
     Path(id): Path<String>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -314,7 +325,7 @@ async fn connect_target(
         Ok(true) => {
             record_audit(
                 &db_for_audit,
-                "operator",
+                &actor.0,
                 "connect_target",
                 Some(&id),
                 Some(&format!("{}:{}", host, port)),
@@ -328,7 +339,7 @@ async fn connect_target(
         Err((code, err_msg)) => {
             record_audit(
                 &db_for_audit,
-                "operator",
+                &actor.0,
                 "connect_target",
                 Some(&id),
                 Some(&format!("{}:{}", host, port)),
@@ -342,6 +353,7 @@ async fn connect_target(
 
 async fn disconnect_target(
     State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
     Path(id): Path<String>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -366,7 +378,7 @@ async fn disconnect_target(
     drop(cli);
     record_audit(
         &db_for_audit,
-        "operator",
+        &actor.0,
         "disconnect_target",
         Some(&id),
         None,
@@ -429,6 +441,7 @@ async fn target_inspect(
 /// Upload a file to the target filesystem via APROTO file transfer.
 async fn upload_file(
     State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
     Path(id): Path<String>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<FileUploadRequest>,
@@ -457,7 +470,7 @@ async fn upload_file(
             };
             record_audit(
                 &db_for_audit,
-                "operator",
+                &actor.0,
                 "upload_file",
                 Some(&id),
                 Some(&detail),
@@ -475,7 +488,7 @@ async fn upload_file(
             let err_msg = format!("Upload failed: {}", e);
             record_audit(
                 &db_for_audit,
-                "operator",
+                &actor.0,
                 "upload_file",
                 Some(&id),
                 Some(&detail),
@@ -517,6 +530,7 @@ fn default_inactive_bank() -> String {
 /// callers reconnect after a few seconds.
 async fn restart_target(
     State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
     Path(id): Path<String>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -531,7 +545,7 @@ async fn restart_target(
         Ok(resp) => {
             record_audit(
                 &db_for_audit,
-                "operator",
+                &actor.0,
                 "restart_executive",
                 Some(&id),
                 Some("execve restart, connection closed as expected"),
@@ -548,7 +562,7 @@ async fn restart_target(
             let err_msg = format!("{}", e);
             record_audit(
                 &db_for_audit,
-                "operator",
+                &actor.0,
                 "restart_executive",
                 Some(&id),
                 None,
@@ -563,6 +577,7 @@ async fn restart_target(
 /// Hot-swap a component's shared library: lock, upload .so, reload, auto-unlock.
 async fn swap_library(
     State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
     Path((id, uid_str)): Path<(String, String)>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<SwapLibraryRequest>,
@@ -623,7 +638,7 @@ async fn swap_library(
             };
             record_audit(
                 &db_for_audit,
-                "operator",
+                &actor.0,
                 "swap_library",
                 Some(&id),
                 Some(&detail),
@@ -640,7 +655,7 @@ async fn swap_library(
             let err_msg = format!("{}", e);
             record_audit(
                 &db_for_audit,
-                "operator",
+                &actor.0,
                 "swap_library",
                 Some(&id),
                 Some(&detail),
@@ -676,6 +691,7 @@ async fn get_commands_config(
 
 async fn send_command(
     State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
     Path(id): Path<String>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<SendCommandRequest>,
@@ -739,7 +755,7 @@ async fn send_command(
             };
             record_audit(
                 &db_for_audit,
-                "operator",
+                &actor.0,
                 "send_command",
                 Some(&id),
                 Some(&detail),
@@ -752,7 +768,7 @@ async fn send_command(
             let err_msg = format!("{}", e);
             record_audit(
                 &db_for_audit,
-                "operator",
+                &actor.0,
                 "send_command",
                 Some(&id),
                 Some(&detail),
@@ -962,6 +978,7 @@ struct UpdateParamsRequest {
 
 async fn update_params(
     State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
     Path((id, uid_str)): Path<(String, String)>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<UpdateParamsRequest>,
@@ -1181,7 +1198,7 @@ async fn update_params(
             };
             record_audit(
                 &db_for_audit,
-                "operator",
+                &actor.0,
                 "update_tprm",
                 Some(&id),
                 Some(&detail),
@@ -1199,7 +1216,7 @@ async fn update_params(
             let err_msg = format!("{}", e);
             record_audit(
                 &db_for_audit,
-                "operator",
+                &actor.0,
                 "update_tprm",
                 Some(&id),
                 Some(&detail),
@@ -1632,6 +1649,7 @@ async fn downsample_data(
 
 async fn delete_target_data(
     State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
     Path(id): Path<String>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -1648,7 +1666,7 @@ async fn delete_target_data(
         Ok(deleted) => {
             record_audit(
                 &db,
-                "operator",
+                &actor.0,
                 "delete_target_data",
                 Some(&id),
                 Some(&format!("deleted={}", deleted)),
@@ -1663,7 +1681,7 @@ async fn delete_target_data(
             let err_msg = format!("{}", e);
             record_audit(
                 &db,
-                "operator",
+                &actor.0,
                 "delete_target_data",
                 Some(&id),
                 None,
@@ -1687,6 +1705,7 @@ struct TrimRequest {
 /// storage management UI to free space without dropping a whole target.
 async fn trim_target_data(
     State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
     Path(id): Path<String>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<TrimRequest>,
@@ -1714,7 +1733,7 @@ async fn trim_target_data(
         Ok(deleted) => {
             record_audit(
                 &db,
-                "operator",
+                &actor.0,
                 "trim_target_data",
                 Some(&id),
                 Some(&format!("requested={} deleted={}", count, deleted)),
@@ -1730,7 +1749,7 @@ async fn trim_target_data(
             let err_msg = format!("{}", e);
             record_audit(
                 &db,
-                "operator",
+                &actor.0,
                 "trim_target_data",
                 Some(&id),
                 Some(&format!("requested={}", count)),
@@ -1760,6 +1779,7 @@ fn default_port_9000() -> u16 {
 
 async fn add_target(
     State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<AddTargetRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -1837,7 +1857,7 @@ async fn add_target(
     tracing::info!("Added target: {} ({}:{})", body.name, body.host, body.port);
     record_audit(
         &db_for_audit,
-        "operator",
+        &actor.0,
         "add_target",
         Some(&id),
         Some(&format!(
@@ -1858,6 +1878,7 @@ async fn add_target(
 
 async fn remove_target(
     State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
     Path(id): Path<String>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
@@ -1888,7 +1909,7 @@ async fn remove_target(
     tracing::info!("Removed target: {}", id);
     record_audit(
         &db_for_audit,
-        "operator",
+        &actor.0,
         "remove_target",
         Some(&id),
         Some(&format!("name={}", target_name)),
@@ -2174,16 +2195,24 @@ async fn login(
         })));
     }
 
-    // Simple admin check (production would use a user database)
-    if body.username == "admin" && body.password == st.config.auth.secret {
-        let claims = serde_json::json!({
-            "sub": body.username,
-            "exp": chrono::Utc::now().timestamp() + 86400, // 24 hours
-        });
-        let token = jsonwebtoken::encode(
-            &jsonwebtoken::Header::default(),
-            &claims,
-            &jsonwebtoken::EncodingKey::from_secret(st.config.auth.secret.as_bytes()),
+    // Credential check: the argon2 hash from config is the gate; the
+    // signing secret is never compared against user input. Boot
+    // validation guarantees password_hash is present when auth is on.
+    let auth = st.config.auth.clone();
+    drop(st);
+
+    let ok = crate::core::auth::verify_credentials(
+        &body.username,
+        &body.password,
+        &auth.username,
+        &auth.password_hash,
+    );
+
+    if ok {
+        let token = crate::core::auth::mint_token(
+            &body.username,
+            &auth.secret,
+            chrono::Utc::now().timestamp(),
         )
         .map_err(|e| {
             (
@@ -2194,11 +2223,41 @@ async fn login(
 
         Ok(Json(serde_json::json!({
             "token": token,
-            "expires_in": 86400,
+            "expires_in": crate::core::auth::TOKEN_TTL_SECS,
         })))
     } else {
         Err((StatusCode::UNAUTHORIZED, "Invalid credentials".to_string()))
     }
+}
+
+/// Mint a short-lived single-purpose WebSocket ticket for the caller.
+/// Browsers cannot set Authorization on WebSocket upgrades, so the
+/// authenticated page trades its bearer token for a 30 s ticket and
+/// puts THAT on the query string -- a leaked ticket is stale before a
+/// log file is ever read.
+async fn ws_ticket(
+    State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let (enabled, secret) = {
+        let st = state.read().await;
+        (st.config.auth.enabled, st.config.auth.secret.clone())
+    };
+    if !enabled {
+        return Ok(Json(serde_json::json!({ "ticket": "auth-disabled" })));
+    }
+    let ticket =
+        crate::core::auth::mint_ws_ticket(&actor.0, &secret, chrono::Utc::now().timestamp())
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("JWT error: {}", e),
+                )
+            })?;
+    Ok(Json(serde_json::json!({
+        "ticket": ticket,
+        "expires_in": crate::core::auth::WS_TICKET_TTL_SECS,
+    })))
 }
 
 /* ----------------------------- WebSocket ----------------------------- */
@@ -2340,12 +2399,15 @@ fn record_audit(
 async fn auth_middleware(
     State(state): State<AppState>,
     headers: HeaderMap,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Result<Response, (StatusCode, String)> {
     // Whitelist
     let path = request.uri().path();
     if path == "/api/auth/login" || path == "/api/health" {
+        request
+            .extensions_mut()
+            .insert(Actor(Arc::from("operator")));
         return Ok(next.run(request).await);
     }
 
@@ -2359,44 +2421,46 @@ async fn auth_middleware(
     };
 
     if !auth_enabled {
+        request
+            .extensions_mut()
+            .insert(Actor(Arc::from("operator")));
         return Ok(next.run(request).await);
     }
 
-    // Extract bearer token from Authorization header.
-    // For WebSocket upgrades the browser can't set Authorization, so we
-    // also accept ?token=... on the query string as a fallback.
-    let token = headers
+    // Bearer token from the Authorization header, or -- for WebSocket
+    // upgrades, which cannot set headers from a browser -- a
+    // short-lived ticket on the query string. A query credential MUST
+    // be a ticket (ws claim, 30 s expiry, minted via
+    // POST /api/auth/ws-ticket): long-lived tokens are rejected there
+    // so they can never land in request logs.
+    let header_token = headers
         .get("authorization")
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer "))
-        .map(|s| s.to_string())
-        .or_else(|| {
-            request.uri().query().and_then(|q| {
-                q.split('&').find_map(|kv| {
-                    let mut parts = kv.splitn(2, '=');
-                    if parts.next()? == "token" {
-                        Some(parts.next()?.to_string())
-                    } else {
-                        None
-                    }
-                })
-            })
-        });
+        .map(|s| s.to_string());
+    let query_ticket = request.uri().query().and_then(|q| {
+        q.split('&').find_map(|kv| {
+            let mut parts = kv.splitn(2, '=');
+            if parts.next()? == "ticket" {
+                Some(parts.next()?.to_string())
+            } else {
+                None
+            }
+        })
+    });
+    let from_query = header_token.is_none();
+    let token = header_token
+        .or(query_ticket)
+        .ok_or((StatusCode::UNAUTHORIZED, "missing token".to_string()))?;
 
-    let token = token.ok_or((StatusCode::UNAUTHORIZED, "missing token".to_string()))?;
+    // Validation lives in core::auth (lib-testable); the subject
+    // becomes the audit actor for the request.
+    let sub = crate::core::auth::validate_token(&token, &secret, from_query)
+        .map_err(|e| (StatusCode::UNAUTHORIZED, e))?;
 
-    // Validate JWT against the configured secret. Default validation
-    // (which checks `exp` if present and rejects expired tokens) is fine.
-    let mut validation = jsonwebtoken::Validation::default();
-    validation.validate_exp = true;
-    validation.required_spec_claims.clear(); // sub is recommended but not required for this minimal scheme
-    let _decoded = jsonwebtoken::decode::<serde_json::Value>(
-        &token,
-        &jsonwebtoken::DecodingKey::from_secret(secret.as_bytes()),
-        &validation,
-    )
-    .map_err(|e| (StatusCode::UNAUTHORIZED, format!("invalid token: {}", e)))?;
-
+    request
+        .extensions_mut()
+        .insert(Actor(Arc::from(sub.as_str())));
     Ok(next.run(request).await)
 }
 
@@ -2529,7 +2593,8 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/audit", get(list_audit))
         .route("/metrics", get(get_metrics))
-        .route("/auth/login", post(login));
+        .route("/auth/login", post(login))
+        .route("/auth/ws-ticket", post(ws_ticket));
 
     let static_dir = if std::path::Path::new("/usr/local/share/zenith/static/index.html").exists() {
         "/usr/local/share/zenith/static"
@@ -2700,10 +2765,40 @@ async fn main() {
 
     let cli = Cli::parse();
 
+    if cli.hash_password {
+        let mut password = String::new();
+        eprintln!("Password (echoed):");
+        if std::io::stdin().read_line(&mut password).is_err() || password.trim().is_empty() {
+            eprintln!("no password read from stdin");
+            std::process::exit(1);
+        }
+        match crate::core::auth::hash_password(password.trim()) {
+            Ok(hash) => {
+                println!("{}", hash);
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("hash failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
     let config = config::load(&cli.config).unwrap_or_else(|e| {
         tracing::warn!("Config load failed ({}), using defaults", e);
         ServerConfig::default()
     });
+
+    // Refuse to boot with unusable auth: a default signing secret or a
+    // missing password hash while auth is enabled is a misconfiguration
+    // that must fail loudly at startup, not quietly at first login.
+    let auth_errors = crate::core::auth::boot_errors(&config.auth);
+    if !auth_errors.is_empty() {
+        for e in &auth_errors {
+            tracing::error!("auth misconfiguration: {}", e);
+        }
+        std::process::exit(1);
+    }
 
     let port = cli.port.unwrap_or(config.server.port);
     // Honor the configured bind host instead of hardcoding 0.0.0.0.
