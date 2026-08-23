@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState, useMemo } from "react";
+import { computePadL, pixelToTime } from "./chartGeometry";
 import { COLORS, fieldName, exportPng, exportCsv } from "../types/telemetry";
 import type { ThresholdDef, ChannelData } from "../types/telemetry";
 
@@ -38,6 +39,9 @@ const MultiChart = memo(function MultiChart({
     values: { ch: string; v: number; color: string }[];
   } | null>(null);
   const rafRef = useRef(0);
+  // The renderer's actual left pad, for pixel->time mapping in the
+  // pointer handler -- a diverged copy shifts every readout.
+  const padLRef = useRef(60);
 
   // Visible channels (filter hidden)
   const visibleChannels = useMemo(
@@ -100,10 +104,8 @@ const MultiChart = memo(function MultiChart({
       maxV = 1;
     }
     // Dynamic left padding based on Y-axis label width
-    const maxLabel = Math.max(Math.abs(minV), Math.abs(maxV));
-    const labelLen =
-      maxLabel >= 1000000 ? 10 : maxLabel >= 1000 ? 8 : maxLabel >= 1 ? 6 : 7;
-    const PAD_L = Math.max(50, labelLen * 7 + 10);
+    const PAD_L = computePadL(minV, maxV);
+    padLRef.current = PAD_L;
     if (yMin != null) minV = yMin;
     if (yMax != null) maxV = yMax;
     if (maxV - minV < 0.001) {
@@ -317,13 +319,6 @@ const MultiChart = memo(function MultiChart({
       if (!canvas) return;
       const rect = canvas.getBoundingClientRect();
       const mx = e.clientX - rect.left;
-      const PAD_L = 60,
-        PAD_R = 10;
-      const plotW = rect.width - PAD_L - PAD_R;
-      if (mx < PAD_L || mx > rect.width - PAD_R) {
-        setCrosshair(null);
-        return;
-      }
 
       let globalMaxT = -Infinity;
       for (const ch of visibleChannels) {
@@ -334,7 +329,17 @@ const MultiChart = memo(function MultiChart({
       }
       if (!isFinite(globalMaxT)) return;
       const globalMinT = globalMaxT - timeWindowMs;
-      const tAtMouse = globalMinT + ((mx - PAD_L) / plotW) * timeWindowMs;
+      const tAtMouse = pixelToTime(
+        mx,
+        rect.width,
+        padLRef.current,
+        globalMinT,
+        globalMaxT,
+      );
+      if (tAtMouse === null) {
+        setCrosshair(null);
+        return;
+      }
 
       const values: { ch: string; v: number; color: string }[] = [];
       visibleChannels.forEach((ch, ci) => {
@@ -361,12 +366,22 @@ const MultiChart = memo(function MultiChart({
     [visibleChannels, data, timeWindowMs],
   );
 
-  // Stats: single-pass min/max/sum, no intermediate allocations.
-  // Previously did filter().map().Math.min(...spread) which allocated
-  // 3 arrays per channel per render -- noticeable on the WS hot path.
+  // Stats: single-pass min/max/sum. Keep it allocation-free -- a
+  // filter/map/spread chain here allocates three arrays per channel
+  // per render, noticeable on the WS hot path.
   const stats = useMemo(() => {
-    const now = Date.now();
-    const cutoff = now - timeWindowMs;
+    // Window anchored to the newest DATA timestamp, not wall clock:
+    // Date.now() inside a memo without it in deps freezes at whatever
+    // moment the memo last ran, and wall-anchoring would silently
+    // empty the stats when a target pauses. Stats describe what the
+    // chart shows.
+    let newest = -Infinity;
+    for (const ch of visibleChannels) {
+      const pts = data[ch];
+      if (pts && pts.length > 0 && pts[pts.length - 1].t > newest)
+        newest = pts[pts.length - 1].t;
+    }
+    const cutoff = newest - timeWindowMs;
     const result: { ch: string; min: number; max: number; mean: number }[] = [];
     for (const ch of visibleChannels) {
       const pts = data[ch];
