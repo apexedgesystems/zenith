@@ -60,3 +60,14 @@ manifest = "/data/targets/thor-ops-demo-b/app_manifest.json"
 structs_dir = "/data/targets/thor-ops-demo-b/structs"
 telemetry_config = "/data/targets/thor-ops-demo-b/telemetry.json"
 commands_config = "/data/targets/thor-ops-demo-b/commands.json"
+
+# Target: Local SIL spec demo (dev only; published on host port 9002)
+[[targets]]
+name = "Local SIL - Spec Demo"
+host = "172.21.0.1"
+port = 9002
+auto_connect = false
+manifest = "/data/targets/sil-spec-demo/app_manifest.json"
+structs_dir = "/data/targets/sil-spec-demo/structs"
+telemetry_config = "/data/targets/sil-spec-demo/telemetry.json"
+commands_config = "/data/targets/sil-spec-demo/commands.json"

@@ -15,7 +15,9 @@
           "doc": "New calibrated reference."
         }
       ],
-      "spec_defined": true
+      "spec_defined": true,
+      "layout_hash": "0xBFA1F4A4",
+      "canonical_spec": "referenceValue:float:4;"
     },
     "SetModeRequest": {
       "category": "COMMAND",
@@ -30,7 +32,9 @@
           "doc": "Requested mode (0=IDLE, 1=MEASURE, 2=FAULT_INJECT)."
         }
       ],
-      "spec_defined": true
+      "spec_defined": true,
+      "layout_hash": "0xD9AF370A",
+      "canonical_spec": "mode:uint:1;"
     },
     "SpecSensorOutput": {
       "category": "OUTPUT",
@@ -51,7 +55,9 @@
           "doc": "Monotonic sample counter."
         }
       ],
-      "spec_defined": true
+      "spec_defined": true,
+      "layout_hash": "0x930F87EA",
+      "canonical_spec": "value:float:4;sequence:uint:4;"
     },
     "SpecSensorState": {
       "category": "STATE",
@@ -103,7 +109,9 @@
           "doc": "Alignment padding."
         }
       ],
-      "spec_defined": true
+      "spec_defined": true,
+      "layout_hash": "0xACA7D3C9",
+      "canonical_spec": "elapsed:float:4;drift:float:4;samples:uint:4;rejects:uint:4;mode:uint:1;reserved:array:3;[uint:1x3]"
     },
     "SpecSensorTunableParams": {
       "category": "TUNABLE_PARAM",
@@ -174,7 +182,9 @@
           "doc": "Alignment padding."
         }
       ],
-      "spec_defined": true
+      "spec_defined": true,
+      "layout_hash": "0x2924797D",
+      "canonical_spec": "sampleRateHz:float:4;referenceValue:float:4;driftRate:float:4;noiseAmplitude:float:4;mode:uint:1;reserved:array:3;[uint:1x3]"
     },
     "StatsResponse": {
       "category": "TELEMETRY",
@@ -220,7 +230,9 @@
           "doc": "Alignment padding."
         }
       ],
-      "spec_defined": true
+      "spec_defined": true,
+      "layout_hash": "0x4F601226",
+      "canonical_spec": "samples:uint:4;rejects:uint:4;lastValue:float:4;mode:uint:1;reserved:array:3;[uint:1x3]"
     }
   },
   "commands": [

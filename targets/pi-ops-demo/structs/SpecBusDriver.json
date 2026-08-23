@@ -1,0 +1,232 @@
+{
+  "component": "SpecBusDriver",
+  "component_id": 214,
+  "structs": {
+    "BusStats": {
+      "category": "TELEMETRY",
+      "opcode": "0x0222",
+      "size": 16,
+      "fields": [
+        {
+          "name": "txFrames",
+          "type": "uint",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "rxFrames",
+          "type": "uint",
+          "offset": 4,
+          "size": 4
+        },
+        {
+          "name": "txBytes",
+          "type": "uint",
+          "offset": 8,
+          "size": 4
+        },
+        {
+          "name": "rxBytes",
+          "type": "uint",
+          "offset": 12,
+          "size": 4
+        }
+      ],
+      "spec_defined": true,
+      "layout_hash": "0x258BEC42",
+      "canonical_spec": "txFrames:uint:4;rxFrames:uint:4;txBytes:uint:4;rxBytes:uint:4;"
+    },
+    "FrameRequest": {
+      "category": "COMMAND",
+      "opcode": "0x0220",
+      "size": 20,
+      "fields": [
+        {
+          "name": "length",
+          "type": "uint",
+          "offset": 0,
+          "size": 1,
+          "doc": "Frame length in data[], 1..maxFrameBytes."
+        },
+        {
+          "name": "reserved",
+          "type": "array",
+          "element_type": "uint",
+          "dims": [3],
+          "offset": 1,
+          "size": 3,
+          "value": [0, 0, 0]
+        },
+        {
+          "name": "data",
+          "type": "array",
+          "element_type": "uint",
+          "dims": [16],
+          "offset": 4,
+          "size": 16,
+          "value": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+          "doc": "Frame payload (fixed 16-byte buffer, length bytes used)."
+        }
+      ],
+      "spec_defined": true,
+      "layout_hash": "0x024D2797",
+      "canonical_spec": "length:uint:1;reserved:array:3;[uint:1x3]data:array:16;[uint:1x16]"
+    },
+    "SpecBusDriverOutput": {
+      "category": "OUTPUT",
+      "size": 8,
+      "fields": [
+        {
+          "name": "rxFrames",
+          "type": "uint",
+          "offset": 0,
+          "size": 4,
+          "doc": "Received-frame counter (published)."
+        },
+        {
+          "name": "lastRxLen",
+          "type": "uint",
+          "offset": 4,
+          "size": 1,
+          "doc": "Length of the last received frame [bytes]."
+        },
+        {
+          "name": "reserved",
+          "type": "array",
+          "element_type": "uint",
+          "dims": [3],
+          "offset": 5,
+          "size": 3,
+          "value": [0, 0, 0]
+        }
+      ],
+      "spec_defined": true,
+      "layout_hash": "0xF67EFC97",
+      "canonical_spec": "rxFrames:uint:4;lastRxLen:uint:1;reserved:array:3;[uint:1x3]"
+    },
+    "SpecBusDriverState": {
+      "category": "STATE",
+      "size": 24,
+      "fields": [
+        {
+          "name": "txFrames",
+          "type": "uint",
+          "offset": 0,
+          "size": 4,
+          "doc": "Frames accepted for transmit."
+        },
+        {
+          "name": "rxFrames",
+          "type": "uint",
+          "offset": 4,
+          "size": 4,
+          "doc": "Frames received off the loopback."
+        },
+        {
+          "name": "txBytes",
+          "type": "uint",
+          "offset": 8,
+          "size": 4
+        },
+        {
+          "name": "rxBytes",
+          "type": "uint",
+          "offset": 12,
+          "size": 4
+        },
+        {
+          "name": "rejects",
+          "type": "uint",
+          "offset": 16,
+          "size": 4,
+          "doc": "Frames refused (oversize or bus busy)."
+        },
+        {
+          "name": "pending",
+          "type": "uint",
+          "offset": 20,
+          "size": 1,
+          "doc": "1 while a frame sits on the loopback."
+        },
+        {
+          "name": "reserved",
+          "type": "array",
+          "element_type": "uint",
+          "dims": [3],
+          "offset": 21,
+          "size": 3,
+          "value": [0, 0, 0]
+        }
+      ],
+      "spec_defined": true,
+      "layout_hash": "0xF209623F",
+      "canonical_spec": "txFrames:uint:4;rxFrames:uint:4;txBytes:uint:4;rxBytes:uint:4;rejects:uint:4;pending:uint:1;reserved:array:3;[uint:1x3]"
+    },
+    "SpecBusDriverTunableParams": {
+      "category": "TUNABLE_PARAM",
+      "size": 4,
+      "fields": [
+        {
+          "name": "loopDelayTicks",
+          "type": "uint",
+          "offset": 0,
+          "size": 2,
+          "value": 1,
+          "doc": "Steps a frame sits on the loopback before it is received.",
+          "constraints": {
+            "min": 1.0,
+            "max": 100.0
+          }
+        },
+        {
+          "name": "maxFrameBytes",
+          "type": "uint",
+          "offset": 2,
+          "size": 1,
+          "value": 16,
+          "doc": "Largest accepted frame length [bytes].",
+          "constraints": {
+            "min": 1.0,
+            "max": 16.0
+          }
+        },
+        {
+          "name": "reserved",
+          "type": "uint",
+          "offset": 3,
+          "size": 1
+        }
+      ],
+      "spec_defined": true,
+      "layout_hash": "0xB0B4CB9E",
+      "canonical_spec": "loopDelayTicks:uint:2;maxFrameBytes:uint:1;reserved:uint:1;"
+    }
+  },
+  "commands": [
+    {
+      "name": "SendFrame",
+      "opcode": "0x0220",
+      "request": "FrameRequest",
+      "doc": "Queue a frame on the loopback bus."
+    },
+    {
+      "name": "Flush",
+      "opcode": "0x0221",
+      "doc": "Drop any pending frame."
+    },
+    {
+      "name": "GetStats",
+      "opcode": "0x0222",
+      "response": "BusStats",
+      "doc": "Return the traffic counters."
+    }
+  ],
+  "telemetry": [
+    {
+      "name": "Traffic",
+      "opcode": "0x0320",
+      "struct": "SpecBusDriverOutput",
+      "doc": "Published rx counters, readable via INSPECT (OUTPUT category)."
+    }
+  ]
+}

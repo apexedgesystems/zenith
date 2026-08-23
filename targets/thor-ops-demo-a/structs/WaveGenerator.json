@@ -255,7 +255,9 @@
           "doc": "Reserved for future use."
         }
       ],
-      "spec_defined": true
+      "spec_defined": true,
+      "layout_hash": "0x3C65B01C",
+      "canonical_spec": "frequency:float:4;amplitude:float:4;dcOffset:float:4;phaseOffset:float:4;noiseAmplitude:float:4;dutyCycle:float:4;waveType:uint:1;reserved:array:3;[uint:1x3]reserved2:float:4;"
     }
   },
   "enums": {

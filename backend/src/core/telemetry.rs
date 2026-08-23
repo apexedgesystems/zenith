@@ -434,6 +434,7 @@ mod tests {
             value: serde_json::Value::Null,
             element_type: None,
             dims: None,
+            constraints: None,
         };
         let comp = ComponentDict {
             component: "WaveGenerator".to_string(),
@@ -445,6 +446,8 @@ mod tests {
                         size: 8,
                         opcode: None,
                         fields: vec![f("output", "float", 0, 4), f("phase", "float", 4, 4)],
+                        layout_hash: None,
+                        canonical_spec: None,
                     },
                 ),
                 (
@@ -459,6 +462,8 @@ mod tests {
                             f("cycleCount", "uint", 8, 4),
                             f("errorCount", "uint", 12, 4),
                         ],
+                        layout_hash: None,
+                        canonical_spec: None,
                     },
                 ),
             ]),
@@ -568,6 +573,7 @@ mod tests {
             value: serde_json::Value::Null,
             element_type: None,
             dims: None,
+            constraints: None,
         };
         let comp = ComponentDict {
             component: "X".to_string(),
@@ -582,6 +588,8 @@ mod tests {
                         f("padding", "uint", 4, 2),
                         f("reserved0", "uint", 6, 2),
                     ],
+                    layout_hash: None,
+                    canonical_spec: None,
                 },
             )]),
             enums: HashMap::new(),

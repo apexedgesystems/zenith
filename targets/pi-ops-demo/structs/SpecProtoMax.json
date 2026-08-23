@@ -1,0 +1,220 @@
+{
+  "component": "SpecProtoMax",
+  "component_id": 217,
+  "structs": {
+    "ReportResponse": {
+      "category": "TELEMETRY",
+      "opcode": "0x0241",
+      "size": 8,
+      "fields": [
+        {
+          "name": "checksum",
+          "type": "uint",
+          "offset": 0,
+          "size": 4,
+          "doc": "Current checksum."
+        },
+        {
+          "name": "stepCount",
+          "type": "uint",
+          "offset": 4,
+          "size": 4,
+          "doc": "Steps taken."
+        }
+      ],
+      "spec_defined": true,
+      "layout_hash": "0x7E448D88",
+      "canonical_spec": "checksum:uint:4;stepCount:uint:4;"
+    },
+    "SpecProtoMaxState": {
+      "category": "STATE",
+      "size": 8,
+      "fields": [
+        {
+          "name": "stepCount",
+          "type": "uint",
+          "offset": 0,
+          "size": 4,
+          "doc": "Steps taken."
+        },
+        {
+          "name": "checksum",
+          "type": "uint",
+          "offset": 4,
+          "size": 4,
+          "doc": "XOR checksum over the tunable bytes, recomputed each step."
+        }
+      ],
+      "spec_defined": true,
+      "layout_hash": "0x26945ADF",
+      "canonical_spec": "stepCount:uint:4;checksum:uint:4;"
+    },
+    "SpecProtoMaxTunableParams": {
+      "category": "TUNABLE_PARAM",
+      "size": 80,
+      "fields": [
+        {
+          "name": "precise",
+          "type": "float",
+          "offset": 0,
+          "size": 8,
+          "value": 3.141592653589793,
+          "doc": "double lane."
+        },
+        {
+          "name": "uWide",
+          "type": "uint",
+          "offset": 8,
+          "size": 8,
+          "value": 9000000000,
+          "doc": "uint64 lane."
+        },
+        {
+          "name": "iWide",
+          "type": "int",
+          "offset": 16,
+          "size": 8,
+          "value": -8000000000,
+          "doc": "int64 lane."
+        },
+        {
+          "name": "ratio",
+          "type": "float",
+          "offset": 24,
+          "size": 4,
+          "value": 0.25,
+          "doc": "float lane.",
+          "constraints": {
+            "min": 0.0,
+            "max": 1.0
+          }
+        },
+        {
+          "name": "uWord",
+          "type": "uint",
+          "offset": 28,
+          "size": 4,
+          "value": 70000,
+          "doc": "uint32 natural-width lane."
+        },
+        {
+          "name": "iWord",
+          "type": "int",
+          "offset": 32,
+          "size": 4,
+          "value": -70000,
+          "doc": "int32 natural-width lane."
+        },
+        {
+          "name": "taps",
+          "type": "array",
+          "element_type": "float",
+          "dims": [3],
+          "offset": 36,
+          "size": 12,
+          "value": [0, 0, 0],
+          "doc": "Bounded float array lane."
+        },
+        {
+          "name": "uShort",
+          "type": "uint",
+          "offset": 48,
+          "size": 2,
+          "value": 300,
+          "doc": "uint16 via width narrowing."
+        },
+        {
+          "name": "iShort",
+          "type": "int",
+          "offset": 50,
+          "size": 2,
+          "value": -300,
+          "doc": "int16 via width narrowing."
+        },
+        {
+          "name": "tag",
+          "type": "string",
+          "offset": 52,
+          "size": 8,
+          "doc": "Bounded string lane (8-byte char buffer, null-padded)."
+        },
+        {
+          "name": "aliases",
+          "type": "array",
+          "element_type": "string",
+          "dims": [2],
+          "offset": 60,
+          "size": 8,
+          "value": [0, 0],
+          "doc": "String array lane (2 x 4-byte char buffers)."
+        },
+        {
+          "name": "cookie",
+          "type": "array",
+          "element_type": "uint",
+          "dims": [4],
+          "offset": 68,
+          "size": 4,
+          "value": [0, 0, 0, 0],
+          "doc": "Byte buffer lane (fixed 4 bytes)."
+        },
+        {
+          "name": "uTiny",
+          "type": "uint",
+          "offset": 72,
+          "size": 1,
+          "value": 5,
+          "doc": "uint8 via width narrowing.",
+          "constraints": {
+            "max": 100.0
+          }
+        },
+        {
+          "name": "iTiny",
+          "type": "int",
+          "offset": 73,
+          "size": 1,
+          "value": -5,
+          "doc": "int8 via width narrowing."
+        },
+        {
+          "name": "enabled",
+          "type": "bool",
+          "offset": 74,
+          "size": 1,
+          "value": true,
+          "doc": "bool lane."
+        },
+        {
+          "name": "reserved",
+          "type": "array",
+          "element_type": "uint",
+          "dims": [5],
+          "offset": 75,
+          "size": 5,
+          "value": [0, 0, 0, 0, 0],
+          "doc": "Tail padding to the struct's 8-byte alignment boundary."
+        }
+      ],
+      "spec_defined": true,
+      "layout_hash": "0xB2F1408C",
+      "canonical_spec": "precise:float:8;uWide:uint:8;iWide:int:8;ratio:float:4;uWord:uint:4;iWord:int:4;taps:array:12;[float:4x3]uShort:uint:2;iShort:int:2;tag:string:8;aliases:array:8;[string:4x2]cookie:array:4;[uint:1x4]uTiny:uint:1;iTiny:int:1;enabled:bool:1;reserved:array:5;[uint:1x5]"
+    }
+  },
+  "commands": [
+    {
+      "name": "Report",
+      "opcode": "0x0241",
+      "response": "ReportResponse",
+      "doc": "Return the checksum/step snapshot."
+    }
+  ],
+  "telemetry": [
+    {
+      "name": "Health",
+      "opcode": "0x0341",
+      "struct": "SpecProtoMaxState",
+      "doc": "Step/checksum state, readable via INSPECT (STATE category)."
+    }
+  ]
+}

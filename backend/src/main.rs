@@ -1108,6 +1108,19 @@ async fn update_params(
             .as_ref()
             .ok_or((StatusCode::BAD_REQUEST, "Missing entries".to_string()))?;
 
+        let mut rail_violations = constraint_violations(&hdr_struct.fields, &body.fields);
+        if let Some(entries) = body.entries.as_ref() {
+            for e in entries {
+                rail_violations.extend(constraint_violations(&ent_struct.fields, e));
+            }
+        }
+        if !rail_violations.is_empty() {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("Constraint violation(s): {}", rail_violations.join("; ")),
+            ));
+        }
+
         let total_size = hdr_struct.size + entries.len() * ent_struct.size;
         let mut buf = vec![0u8; total_size];
         let mut unencodable: Vec<String> = Vec::new();
@@ -1157,11 +1170,13 @@ async fn update_params(
         (buf, hash)
     } else {
         // Flat: single struct
+        let mut dict_hash: Option<u32> = None;
         if let Some((_comp, _sname, sdef)) =
             find_tunable_struct(&dicts, original_binary.len(), full_uid, manifest.as_deref())
         {
             struct_size = sdef.size;
             struct_fields = sdef.fields.clone();
+            dict_hash = sdef.layout_hash_u32();
         }
 
         if struct_size == 0 {
@@ -1171,6 +1186,14 @@ async fn update_params(
                     "No matching TUNABLE_PARAM struct found for {} bytes",
                     original_binary.len()
                 ),
+            ));
+        }
+
+        let rail_violations = constraint_violations(&struct_fields, &body.fields);
+        if !rail_violations.is_empty() {
+            return Err((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("Constraint violation(s): {}", rail_violations.join("; ")),
             ));
         }
 
@@ -1198,7 +1221,18 @@ async fn update_params(
                 ),
             ));
         }
-        let hash = tprm::layout_hash(dict_leaf_specs(&struct_fields));
+        // Producer-stated hash when the dictionary exports one -- that
+        // is the value the vehicle verifies. Recompute only for
+        // dictionaries predating the export, with a warning: the
+        // flattened-fields recompute predates string leaves and cannot
+        // be trusted once those appear.
+        let hash = dict_hash.unwrap_or_else(|| {
+            tracing::warn!(
+                "no layout_hash in dictionary for uid 0x{:06X}; recomputing from flattened fields",
+                full_uid
+            );
+            tprm::layout_hash(dict_leaf_specs(&struct_fields))
+        });
         (buf, hash)
     };
 
@@ -1266,6 +1300,32 @@ async fn update_params(
             Err((StatusCode::BAD_GATEWAY, err_msg))
         }
     }
+}
+
+/// Validate edited values against the dictionary's constraint rails
+/// before anything is encoded or uploaded. Arrays apply their rails
+/// per element. Returns "field: reason" strings for every violation.
+fn constraint_violations(
+    fields: &[crate::core::config_manager::FieldDef],
+    edits: &serde_json::Map<String, serde_json::Value>,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    for field in fields {
+        let (Some(value), Some(rails)) = (edits.get(&field.name), field.constraints.as_ref())
+        else {
+            continue;
+        };
+        let numbers: Vec<f64> = match value {
+            serde_json::Value::Array(a) => a.iter().filter_map(|v| v.as_f64()).collect(),
+            v => v.as_f64().into_iter().collect(),
+        };
+        for n in numbers {
+            if let Err(reason) = rails.check(n) {
+                violations.push(format!("{}: {}", field.name, reason));
+            }
+        }
+    }
+    violations
 }
 
 /// LeafSpec views over dict fields, shared by flat and variable-length
@@ -1345,6 +1405,48 @@ fn encode_field(
             .as_f64()
             .map(|v| buf[off..off + 8].copy_from_slice(&v.to_le_bytes()))
             .is_some(),
+        // Bounded string: fixed char buffer, NUL-padded. A value longer
+        // than the field is refused, never truncated -- the packer on
+        // the producing side errors the same way.
+        ("string", n) => match value.as_str() {
+            Some(s) if s.len() <= n => {
+                buf[off..off + n].fill(0);
+                buf[off..off + s.len()].copy_from_slice(s.as_bytes());
+                true
+            }
+            _ => false,
+        },
+        // Array: exact element count required; each element encodes by
+        // element_type at its slot (strings recurse into the bounded-
+        // string rule above).
+        ("array", total) => {
+            let count = field
+                .dims
+                .as_ref()
+                .map(|d| d.iter().product::<usize>())
+                .unwrap_or(0);
+            let Some(arr) = value.as_array() else {
+                return false;
+            };
+            if count == 0 || arr.len() != count || total % count != 0 {
+                return false;
+            }
+            let elem_size = total / count;
+            let elem_type = field.element_type.as_deref().unwrap_or("uint");
+            arr.iter().enumerate().all(|(i, v)| {
+                let elem = crate::core::config_manager::FieldDef {
+                    name: field.name.clone(),
+                    field_type: elem_type.to_string(),
+                    offset: off + i * elem_size,
+                    size: elem_size,
+                    value: serde_json::Value::Null,
+                    element_type: None,
+                    dims: None,
+                    constraints: None,
+                };
+                encode_field(buf, &elem, v)
+            })
+        }
         _ => false,
     }
 }

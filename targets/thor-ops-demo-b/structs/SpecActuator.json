@@ -15,7 +15,9 @@
           "doc": "Commanded target position [units], range -1000..1000."
         }
       ],
-      "spec_defined": true
+      "spec_defined": true,
+      "layout_hash": "0x971368B4",
+      "canonical_spec": "position:float:4;"
     },
     "PositionResponse": {
       "category": "TELEMETRY",
@@ -46,7 +48,9 @@
           "value": [0, 0, 0]
         }
       ],
-      "spec_defined": true
+      "spec_defined": true,
+      "layout_hash": "0x2F8EB15E",
+      "canonical_spec": "position:float:4;moving:uint:1;reserved:array:3;[uint:1x3]"
     },
     "SpecActuatorOutput": {
       "category": "OUTPUT",
@@ -67,7 +71,9 @@
           "doc": "Monotonic publish counter."
         }
       ],
-      "spec_defined": true
+      "spec_defined": true,
+      "layout_hash": "0xC6EA6CC3",
+      "canonical_spec": "position:float:4;sequence:uint:4;"
     },
     "SpecActuatorState": {
       "category": "STATE",
@@ -102,7 +108,9 @@
           "doc": "Rejected move commands (out-of-range target)."
         }
       ],
-      "spec_defined": true
+      "spec_defined": true,
+      "layout_hash": "0x338FDB43",
+      "canonical_spec": "position:float:4;target:float:4;moves:uint:4;rejects:uint:4;"
     },
     "SpecActuatorTunableParams": {
       "category": "TUNABLE_PARAM",
@@ -147,7 +155,9 @@
           "doc": "Axis label for operator displays (fixed 8-byte char buffer)."
         }
       ],
-      "spec_defined": true
+      "spec_defined": true,
+      "layout_hash": "0xC93CD892",
+      "canonical_spec": "rateLimit:float:4;holdBand:float:4;startPosition:float:4;axisLabel:string:8;"
     }
   },
   "commands": [
