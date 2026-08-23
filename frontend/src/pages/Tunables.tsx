@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useRegistry, useTunableFields } from "../api/queries";
 
 /* ----------------------------- Types ----------------------------- */
 
@@ -55,61 +56,29 @@ export default function TunablesPage({
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
-  // Fetch component registry
+  // Component registry via the shared cache; reachable subset drives
+  // the picker, and the first reachable component auto-selects once.
+  const registryQuery = useRegistry(selectedTarget);
   useEffect(() => {
-    if (!selectedTarget) return;
-    fetch(`/api/targets/${selectedTarget}/registry`)
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (data?.components) {
-          const comps = data.components as {
-            fullUid: string;
-            name: string;
-            reachable: boolean;
-          }[];
-          const reachable = comps.filter((c) => c.reachable);
-          setRegistryComponents(reachable);
-          if (!selectedUid && reachable.length > 0) {
-            setSelectedUid(reachable[0].fullUid.replace("0x", ""));
-          }
-        }
-      })
-      .catch(() => {});
-    // selectedUid intentionally not in deps -- only auto-pick the
-    // initial UID when it's empty. Including it would re-fetch the
-    // registry every time the user picks a different component.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedTarget]);
-
-  // Load struct dict field info for response type display.
-  // Per-target endpoint (NOT /api/structs/X) -- the global dict is the
-  // optional fallback and is usually empty.
-  useEffect(() => {
-    if (!params?.component) {
-      setFieldInfo([]);
-      return;
+    const reachable = (registryQuery.data ?? []).filter((c) => c.reachable);
+    setRegistryComponents(reachable);
+    if (!selectedUid && reachable.length > 0) {
+      setSelectedUid(reachable[0].fullUid.replace("0x", ""));
     }
-    fetch(
-      `/api/targets/${selectedTarget}/structs/${encodeURIComponent(
-        params.component,
-      )}`,
-    )
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (!data?.structs) return;
-        for (const sdef of Object.values(data.structs) as {
-          category: string;
-          fields: FieldInfo[];
-        }[]) {
-          if (sdef.category === "TUNABLE_PARAM" && sdef.fields?.length > 0) {
-            setFieldInfo(sdef.fields);
-            return;
-          }
-        }
-        setFieldInfo([]);
-      })
-      .catch(() => setFieldInfo([]));
-  }, [selectedTarget, params?.component]);
+    // selectedUid intentionally not in deps -- only auto-pick the
+    // initial UID when it's empty.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [registryQuery.data]);
+
+  // Struct-dict field info for the selected component, cached
+  // per (target, component) -- dictionaries are immutable per process.
+  const tunableFieldsQuery = useTunableFields(
+    selectedTarget,
+    params?.component ?? null,
+  );
+  useEffect(() => {
+    setFieldInfo((tunableFieldsQuery.data ?? []) as FieldInfo[]);
+  }, [tunableFieldsQuery.data]);
 
   const loadParams = async () => {
     if (!selectedUid) return;

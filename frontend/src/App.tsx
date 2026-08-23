@@ -8,6 +8,7 @@ import AuditPage from "./pages/Audit";
 import TunablesPage from "./pages/Tunables";
 import FileTransferPage from "./pages/Files";
 import Clock from "./components/Clock";
+import ErrorBoundary from "./components/ErrorBoundary";
 import { type Target, formatBytes, formatCount } from "./utils/targets";
 import { useAllTargetStorage, useTargets } from "./api/queries";
 
@@ -677,7 +678,9 @@ function App() {
         </header>
 
         {/* Page content */}
-        <main className="flex-1 overflow-auto p-5">{content}</main>
+        <main className="flex-1 overflow-auto p-5">
+          <ErrorBoundary key={page + selectedTarget}>{content}</ErrorBoundary>
+        </main>
       </div>
     </div>
   );

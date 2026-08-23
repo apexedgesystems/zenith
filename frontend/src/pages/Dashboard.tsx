@@ -6,7 +6,11 @@ import {
   hexToBytes,
   type FieldDef,
 } from "../api/decode";
-import { useTargetMetrics, type PipelineMetrics } from "../api/queries";
+import {
+  useRegistry,
+  useTargetMetrics,
+  type PipelineMetrics,
+} from "../api/queries";
 
 /* ----------------------------- Types ----------------------------- */
 
@@ -546,17 +550,9 @@ export default function DashboardPage({
   });
   const tlmStructs = structsQuery.data ?? new Map<string, TelemetryStruct>();
 
-  // Component registry, refreshed on (re)connect.
-  const registryQuery = useQuery({
-    queryKey: ["registry", selectedTarget, isConnected],
-    enabled: !!selectedTarget && isConnected,
-    queryFn: async () => {
-      const r = await fetch(`/api/targets/${selectedTarget}/registry`);
-      if (!r.ok) throw new Error(`registry: ${r.status}`);
-      const data = await r.json();
-      return (data.components ?? []) as RegistryComponent[];
-    },
-  });
+  // Component registry via the shared hook (disconnect evicts it, so
+  // reconnect re-fetches fresh).
+  const registryQuery = useRegistry(selectedTarget, isConnected);
   const registry = registryQuery.data ?? [];
 
   // Health cards: composes the executive INSPECT, parallel

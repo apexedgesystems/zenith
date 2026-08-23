@@ -149,3 +149,68 @@ export function useTargetStorage(targetId: string | null) {
     queryFn: () => request(`/targets/${targetId}/storage`, isStorage),
   });
 }
+
+/* ------------------------------ registry ------------------------------ */
+
+export interface RegistryComponent {
+  fullUid: string;
+  name: string;
+  type: string;
+  reachable: boolean;
+}
+
+const isRegistryComponent: Validator<RegistryComponent> = (v) => {
+  if (!isObject(v)) return "expected object";
+  return (
+    field(v, "fullUid", "string") ??
+    field(v, "name", "string") ??
+    field(v, "reachable", "boolean")
+  );
+};
+
+/** Component registry for a target. One cache entry shared by every
+ *  page that shows components (Dashboard, Tunables, ...). Callers that
+ *  need reconnect-freshness invalidate on connect; disconnect eviction
+ *  removes it by key prefix. */
+export function useRegistry(targetId: string | null, enabled = true) {
+  return useQuery({
+    queryKey: ["registry", targetId],
+    enabled: !!targetId && enabled,
+    queryFn: () =>
+      request(`/targets/${targetId}/registry`, (v) => {
+        if (!isObject(v)) return "expected object";
+        return arrayOf(v.components, isRegistryComponent, "components");
+      }),
+    select: (d) => (d as { components: RegistryComponent[] }).components,
+  });
+}
+
+/** TUNABLE_PARAM field definitions for one component, from the
+ *  per-target struct-dict endpoint. */
+export function useTunableFields(
+  targetId: string | null,
+  component: string | null,
+) {
+  return useQuery({
+    queryKey: ["tunable-fields", targetId, component],
+    enabled: !!targetId && !!component,
+    staleTime: Infinity,
+    queryFn: async () => {
+      const data = await request(
+        `/targets/${targetId}/structs/${encodeURIComponent(
+          component as string,
+        )}`,
+        (v) => (isObject(v) ? null : "expected object"),
+      );
+      const structs =
+        (data as { structs?: Record<string, unknown> }).structs ?? {};
+      for (const sdef of Object.values(structs)) {
+        const def = sdef as { category?: string; fields?: unknown[] };
+        if (def.category === "TUNABLE_PARAM" && (def.fields?.length ?? 0) > 0) {
+          return def.fields as unknown[];
+        }
+      }
+      return [] as unknown[];
+    },
+  });
+}
