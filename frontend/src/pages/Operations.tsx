@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTargets } from "../api/queries";
 import { useDialogs } from "../components/dialogs";
+import { fileToBase64 } from "../api/upload";
 
 /**
  * Operations Page (Phase 2 of the MVP roadmap).
@@ -428,11 +429,12 @@ export default function OperationsPage({
     setAudit((prev) => [pending, ...prev].slice(0, 50));
 
     try {
-      const buf = await swapFile.arrayBuffer();
-      const bytes = new Uint8Array(buf);
-      let binary = "";
-      for (const b of bytes) binary += String.fromCharCode(b);
-      const base64 = btoa(binary);
+      const encoded = await fileToBase64(swapFile);
+      if ("error" in encoded) {
+        void notify(encoded.error, "Library swap");
+        return;
+      }
+      const base64 = encoded.base64;
 
       const r = await fetch(
         `/api/targets/${selectedTarget}/components/${swapUid}/library`,
