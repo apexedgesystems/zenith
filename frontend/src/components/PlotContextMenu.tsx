@@ -1,6 +1,14 @@
 import { useEffect, useRef } from "react";
 import { TIME_WINDOWS } from "../types/telemetry";
 import type { PlotDef } from "../types/telemetry";
+import { useDialogs, type PromptField } from "../components/dialogs";
+
+const numberOrBlank = (v: string) =>
+  v.trim() === "" || !Number.isNaN(parseFloat(v)) ? null : "must be a number";
+const requiredNumber = (v: string) =>
+  !Number.isNaN(parseFloat(v)) ? null : "must be a number";
+const hexColor = (v: string) =>
+  /^#[0-9a-fA-F]{6}$/.test(v) ? null : "must be a hex color like #d29922";
 
 export default function PlotContextMenu({
   x,
@@ -20,6 +28,7 @@ export default function PlotContextMenu({
   onClose: () => void;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
+  const { promptForm } = useDialogs();
 
   useEffect(() => {
     const handler = (e: MouseEvent) => {
@@ -74,39 +83,71 @@ export default function PlotContextMenu({
         boxShadow: "0 4px 12px rgba(0,0,0,0.4)",
       }}
     >
-      {item("Rename...", () => {
-        const name = prompt("Plot title:", plot.title);
-        if (name) onUpdate({ title: name });
+      {item("Rename...", async () => {
+        const form = await promptForm("Rename plot", [
+          {
+            name: "title",
+            label: "Plot title",
+            initial: plot.title,
+            validate: (v) => (v.trim() ? null : "required"),
+          },
+        ]);
+        if (form) onUpdate({ title: form.title.trim() });
       })}
-      {item("Set Y range...", () => {
-        const min = prompt(
-          "Y min (blank for auto):",
-          plot.y_min != null ? String(plot.y_min) : "",
-        );
-        const max = prompt(
-          "Y max (blank for auto):",
-          plot.y_max != null ? String(plot.y_max) : "",
-        );
-        onUpdate({
-          y_min: min ? parseFloat(min) : null,
-          y_max: max ? parseFloat(max) : null,
-        });
+      {item("Set Y range...", async () => {
+        const fields: PromptField[] = [
+          {
+            name: "min",
+            label: "Y min (blank for auto)",
+            initial: plot.y_min != null ? String(plot.y_min) : "",
+            validate: numberOrBlank,
+          },
+          {
+            name: "max",
+            label: "Y max (blank for auto)",
+            initial: plot.y_max != null ? String(plot.y_max) : "",
+            validate: numberOrBlank,
+          },
+        ];
+        const form = await promptForm("Y axis range", fields);
+        if (form) {
+          onUpdate({
+            y_min: form.min.trim() ? parseFloat(form.min) : null,
+            y_max: form.max.trim() ? parseFloat(form.max) : null,
+          });
+        }
       })}
-      {item("Set Y label...", () => {
-        const label = prompt("Y axis label:", plot.y_label || "");
-        onUpdate({ y_label: label || null });
+      {item("Set Y label...", async () => {
+        const form = await promptForm("Y axis label", [
+          { name: "label", label: "Label", initial: plot.y_label || "" },
+        ]);
+        if (form) onUpdate({ y_label: form.label || null });
       })}
-      {item("Add threshold...", () => {
-        const val = prompt("Threshold value:");
-        if (!val) return;
-        const color = prompt("Color (hex):", "#d29922") || "#d29922";
-        const label = prompt("Label (optional):", "") || "";
-        onUpdate({
-          thresholds: [
-            ...(plot.thresholds || []),
-            { value: parseFloat(val), color, label },
-          ],
-        });
+      {item("Add threshold...", async () => {
+        // One validated form replaces the old chain of four prompts --
+        // and NaN can no longer reach a persisted layout.
+        const form = await promptForm("Add threshold", [
+          { name: "value", label: "Threshold value", validate: requiredNumber },
+          {
+            name: "color",
+            label: "Color",
+            initial: "#d29922",
+            validate: hexColor,
+          },
+          { name: "label", label: "Label (optional)" },
+        ]);
+        if (form) {
+          onUpdate({
+            thresholds: [
+              ...(plot.thresholds || []),
+              {
+                value: parseFloat(form.value),
+                color: form.color,
+                label: form.label,
+              },
+            ],
+          });
+        }
       })}
       {item("Clear thresholds", () => onUpdate({ thresholds: null }))}
       {sep}

@@ -9,6 +9,7 @@ import TunablesPage from "./pages/Tunables";
 import FileTransferPage from "./pages/Files";
 import Clock from "./components/Clock";
 import ErrorBoundary from "./components/ErrorBoundary";
+import { useDialogs } from "./components/dialogs";
 import { type Target, formatBytes, formatCount } from "./utils/targets";
 import { useAllTargetStorage, useTargets } from "./api/queries";
 
@@ -103,6 +104,7 @@ function App() {
   // how many components need the target list, structural sharing in
   // place of the old hand-rolled equality diffing, and errors surfaced
   // instead of leaving the sidebar silently stale.
+  const { notify, confirmDialog } = useDialogs();
   const targetsQuery = useTargets();
   const targets: Target[] = targetsQuery.data ?? [];
   const [showAddForm, setShowAddForm] = useState(false);
@@ -249,7 +251,7 @@ function App() {
   };
 
   const removeTarget = async (id: string) => {
-    if (!confirm("Remove this target?")) return;
+    if (!(await confirmDialog("Remove this target?", "Remove target"))) return;
     await fetch(`/api/targets/${id}/remove`, { method: "POST" });
     if (selectedTarget === id) {
       const remaining = targets.filter((t) => t.id !== id);
@@ -261,13 +263,14 @@ function App() {
     const s = storage[id];
     const count = s ? Math.max(1, Math.floor(s.sample_count / 4)) : 0;
     if (!count) {
-      alert("No samples to trim");
+      await notify("No samples to trim");
       return;
     }
     if (
-      !confirm(
+      !(await confirmDialog(
         `Delete the oldest ~${formatCount(count)} samples for this target?`,
-      )
+        "Trim stored telemetry",
+      ))
     )
       return;
     try {
@@ -277,10 +280,10 @@ function App() {
         body: JSON.stringify({ count }),
       });
       if (!r.ok) {
-        alert(`Trim failed: ${await r.text()}`);
+        await notify(`Trim failed: ${await r.text()}`, "Trim failed");
       }
     } catch (e) {
-      alert(`Trim failed: ${e}`);
+      await notify(`Trim failed: ${e}`, "Trim failed");
     }
   };
 

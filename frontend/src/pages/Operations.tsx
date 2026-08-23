@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useDialogs } from "../components/dialogs";
 
 /**
  * Operations Page (Phase 2 of the MVP roadmap).
@@ -66,6 +67,7 @@ export default function OperationsPage({
 }: {
   selectedTarget: string;
 }) {
+  const { notify } = useDialogs();
   const [registry, setRegistry] = useState<RegistryComponent[]>([]);
   const [connected, setConnected] = useState(false);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
@@ -349,7 +351,7 @@ export default function OperationsPage({
   const setVerb = useCallback(async () => {
     const v = parseInt(verbosity);
     if (isNaN(v) || v < 0 || v > 7) {
-      alert("Verbosity must be 0-7");
+      void notify("Verbosity must be 0-7", "Invalid verbosity");
       return;
     }
     await send(
@@ -408,18 +410,18 @@ export default function OperationsPage({
   const swapLibrary = useCallback(async () => {
     setConfirmSwap(false);
     if (!swapUid || !swapFile) {
-      alert("Pick a component and a .so file");
+      void notify("Pick a component and a .so file", "Library swap");
       return;
     }
     const comp = registry.find((c) => c.fullUid.replace("0x", "") === swapUid);
     if (!comp) {
-      alert("Component not in registry");
+      void notify("Component not in registry", "Library swap");
       return;
     }
     const baseName = comp.name.split("#")[0].split(" ")[0].trim();
     const idx = parseInt(swapInstance);
     if (isNaN(idx) || idx < 0) {
-      alert("Instance index must be >= 0");
+      void notify("Instance index must be >= 0", "Library swap");
       return;
     }
 
@@ -922,7 +924,7 @@ export default function OperationsPage({
               onChange={(e) => {
                 const f = e.target.files?.[0] || null;
                 if (f && f.size > 50 * 1024 * 1024) {
-                  alert("File exceeds 50MB cap");
+                  void notify("File exceeds 50MB cap", "Library swap");
                   return;
                 }
                 setSwapFile(f);
