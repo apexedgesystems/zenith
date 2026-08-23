@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useTargets } from "../api/queries";
 import { useDialogs } from "../components/dialogs";
 
 /**
@@ -96,28 +97,14 @@ export default function OperationsPage({
 
   /* ---- Load connection state + registry ---- */
 
+  // Connection state from the app-wide targets cache: one poller for
+  // the whole app instead of a private copy with its own divergent
+  // notion of "connected".
+  const targetsData = useTargets().data;
   useEffect(() => {
-    let cancelled = false;
-    const fetchState = async () => {
-      try {
-        const r = await fetch("/api/targets");
-        if (!r.ok || cancelled) return;
-        const data = await r.json();
-        const t = (data.targets || []).find(
-          (x: { id: string }) => x.id === selectedTarget,
-        );
-        setConnected(!!t?.connected);
-      } catch {
-        /* ignore */
-      }
-    };
-    fetchState();
-    const interval = setInterval(fetchState, 3000);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, [selectedTarget]);
+    const t = (targetsData ?? []).find((x) => x.id === selectedTarget);
+    setConnected(!!t?.connected);
+  }, [targetsData, selectedTarget]);
 
   useEffect(() => {
     if (!connected) {

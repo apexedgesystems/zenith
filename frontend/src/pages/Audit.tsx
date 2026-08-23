@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useTargets } from "../api/queries";
 
 /**
  * Audit Log viewer.
@@ -28,22 +29,12 @@ export default function AuditPage() {
   const [filter, setFilter] = useState("");
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [offset, setOffset] = useState(0);
-  // Map target_id -> friendly display name. Audit log writes raw IDs
-  // Resolve target IDs to display names from /api/targets.
-  const [targetNames, setTargetNames] = useState<Record<string, string>>({});
-
-  useEffect(() => {
-    fetch("/api/targets")
-      .then((r) => (r.ok ? r.json() : { targets: [] }))
-      .then((data) => {
-        const map: Record<string, string> = {};
-        for (const t of data.targets || []) {
-          map[t.id] = t.name;
-        }
-        setTargetNames(map);
-      })
-      .catch(() => {});
-  }, []);
+  // Map target_id -> friendly display name, from the app-wide targets
+  // cache (audit rows carry raw ids).
+  const targetsData = useTargets().data;
+  const targetNames: Record<string, string> = Object.fromEntries(
+    (targetsData ?? []).map((t) => [t.id, t.name]),
+  );
 
   const fetchAudit = useCallback(async () => {
     setLoading(true);
