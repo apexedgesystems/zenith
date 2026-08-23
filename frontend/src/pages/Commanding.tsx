@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   bytesToHex,
   decodeField,
@@ -157,7 +157,10 @@ export default function CommandingPage({
   const [rawUid, setRawUid] = useState("0x000000");
   const [rawOpcode, setRawOpcode] = useState("0x0000");
   const [rawPayload, setRawPayload] = useState("");
-  let nextId = history.length;
+  // Monotonic ids from a ref: ids derived from history.length reissue
+  // after the cap trims the list, cross-wiring entries (in Commanding,
+  // one entry's interpret-as choice applied to another).
+  const idCounter = useRef(0);
 
   // Load ALL non-empty structs (any category) from the per-target dict
   // for the Interpret feature. The previous version only loaded TELEMETRY
@@ -271,7 +274,7 @@ export default function CommandingPage({
     ) => {
       setSending(true);
       const entry: HistoryEntry = {
-        id: nextId++,
+        id: ++idCounter.current,
         timestamp: new Date().toISOString().split("T")[1].split(".")[0],
         target:
           targets.find((t) => t.id === selectedTarget)?.name || selectedTarget,
