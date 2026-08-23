@@ -17,10 +17,14 @@ export class ApiError extends Error {
   }
 }
 
-/** A runtime validator: returns a description of the first problem,
- *  or null when the value conforms. Kept hand-rolled (no schema
- *  dependency); each endpoint's validator lives beside its type. */
-export type Validator<T> = (v: unknown) => string | null;
+/** A runtime validator for T: returns a description of the first
+ *  problem, or null when the value conforms. The phantom parameter
+ *  ties each validator to the type it certifies at request() call
+ *  sites. Kept hand-rolled (no schema dependency); each endpoint's
+ *  validator lives beside its type. */
+export type Validator<T> = ((v: unknown) => string | null) & {
+  __certifies?: T;
+};
 
 export async function request<T>(
   endpoint: string,

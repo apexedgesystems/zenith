@@ -8,18 +8,8 @@ import AuditPage from "./pages/Audit";
 import TunablesPage from "./pages/Tunables";
 import FileTransferPage from "./pages/Files";
 import Clock from "./components/Clock";
-import {
-  type Target,
-  targetsEqual,
-  formatBytes,
-  formatCount,
-} from "./utils/targets";
-
-interface TargetStorage {
-  sample_count: number;
-  channel_count: number;
-  byte_estimate: number;
-}
+import { type Target, formatBytes, formatCount } from "./utils/targets";
+import { useAllTargetStorage, useTargets } from "./api/queries";
 
 /* ----------------------------- Nav ----------------------------- */
 
@@ -108,7 +98,12 @@ function AddTargetForm({
 function App() {
   const [page, setPage] = useState(window.location.pathname);
   const [selectedTarget, setSelectedTarget] = useState("target-0");
-  const [targets, setTargets] = useState<Target[]>([]);
+  // Server state via the shared query cache: one poller regardless of
+  // how many components need the target list, structural sharing in
+  // place of the old hand-rolled equality diffing, and errors surfaced
+  // instead of leaving the sidebar silently stale.
+  const targetsQuery = useTargets();
+  const targets: Target[] = targetsQuery.data ?? [];
   const [showAddForm, setShowAddForm] = useState(false);
   const [targetMenu, setTargetMenu] = useState<{
     x: number;
@@ -116,7 +111,8 @@ function App() {
     target: Target;
   } | null>(null);
   const targetMenuRef = useRef<HTMLDivElement>(null);
-  const [storage, setStorage] = useState<Record<string, TargetStorage>>({});
+  const storageQuery = useAllTargetStorage(targets.map((t) => t.id));
+  const storage = storageQuery.data ?? {};
   // Per-target auto-reconnect preferences. Persisted in localStorage so
   // the user's choice survives refresh. The reconnect loop checks every
   // 3s whether any target with the flag is currently disconnected.
@@ -154,25 +150,6 @@ function App() {
     };
     document.addEventListener("click", handleClick);
     return () => document.removeEventListener("click", handleClick);
-  }, []);
-
-  // Poll targets. Skip the state update entirely if the response is
-  // Identical to current state -- avoids spurious 3s re-renders
-  // of every page that takes targets as a prop.
-  useEffect(() => {
-    const fetchTargets = () => {
-      fetch("/api/targets")
-        .then((r) => r.json())
-        .then((data) => {
-          setTargets((prev) =>
-            targetsEqual(prev, data.targets) ? prev : data.targets,
-          );
-        })
-        .catch(() => {});
-    };
-    fetchTargets();
-    const interval = setInterval(fetchTargets, 3000);
-    return () => clearInterval(interval);
   }, []);
 
   // Close target menu on outside click. useEffect cleanup ensures we
@@ -261,59 +238,6 @@ function App() {
   const toggleAutoReconnect = (id: string) => {
     setAutoReconnect((prev) => ({ ...prev, [id]: !prev[id] }));
   };
-
-  // Poll per-target storage usage. Slower interval (10s) than the
-  // targets list because the byte estimate moves slowly and a 50ms
-  // sample stream isn't going to nudge the MB display visibly.
-  useEffect(() => {
-    if (targets.length === 0) return;
-    let cancelled = false;
-    const fetchStorage = async () => {
-      const next: Record<string, TargetStorage> = {};
-      await Promise.allSettled(
-        targets.map(async (t) => {
-          try {
-            const r = await fetch(`/api/targets/${t.id}/storage`);
-            if (r.ok) {
-              const data = await r.json();
-              next[t.id] = {
-                sample_count: data.sample_count || 0,
-                channel_count: data.channel_count || 0,
-                byte_estimate: data.byte_estimate || 0,
-              };
-            }
-          } catch {
-            /* ignore */
-          }
-        }),
-      );
-      if (!cancelled) {
-        setStorage((prev) => {
-          // Skip update if values unchanged (avoids re-renders for 0 deltas)
-          for (const id in next) {
-            const a = prev[id];
-            const b = next[id];
-            if (
-              !a ||
-              a.sample_count !== b.sample_count ||
-              a.byte_estimate !== b.byte_estimate
-            ) {
-              return next;
-            }
-          }
-          if (Object.keys(prev).length !== Object.keys(next).length)
-            return next;
-          return prev;
-        });
-      }
-    };
-    fetchStorage();
-    const interval = setInterval(fetchStorage, 10_000);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, [targets]);
 
   const connectTarget = async (id: string) => {
     await fetch(`/api/targets/${id}/connect`, { method: "POST" });

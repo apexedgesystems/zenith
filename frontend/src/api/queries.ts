@@ -121,6 +121,26 @@ const isStorage: Validator<TargetStorage> = (v) => {
   );
 };
 
+/** Storage for every listed target in one keyed query (the sidebar's
+ *  10 s usage readout). Structural sharing suppresses re-renders when
+ *  nothing moved. */
+export function useAllTargetStorage(targetIds: string[]) {
+  return useQuery({
+    queryKey: ["storage-all", targetIds],
+    enabled: targetIds.length > 0,
+    refetchInterval: 10_000,
+    queryFn: async () => {
+      const out: Record<string, TargetStorage> = {};
+      await Promise.allSettled(
+        targetIds.map(async (id) => {
+          out[id] = await request(`/targets/${id}/storage`, isStorage);
+        }),
+      );
+      return out;
+    },
+  });
+}
+
 export function useTargetStorage(targetId: string | null) {
   return useQuery({
     queryKey: ["storage", targetId],
