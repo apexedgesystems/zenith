@@ -70,10 +70,10 @@ body.dragging * {
 }
 
 /* ------------------------------------------------------------------ */
-/* Global dark theme overrides for inline-styled pages                */
-/* These force dark colors on common light-theme patterns used across */
-/* Commanding, Configuration, Files, and Telemetry pages.             */
-/* Will be removed once pages are individually rewritten.             */
+/* Global dark theme overrides for inline-styled pages.               */
+/* Commanding, Files, and Telemetry still carry inline styles these   */
+/* rules re-theme; retire rules only alongside the page that needs    */
+/* them.                                                              */
 /* ------------------------------------------------------------------ */
 
 /* All inputs/selects */
