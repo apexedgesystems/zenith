@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useDialogs } from "../components/dialogs";
 import MultiChart from "../components/MultiChart";
 import PlotContextMenu from "../components/PlotContextMenu";
 import {
@@ -19,6 +20,7 @@ export default function TelemetryPage({
 }: {
   selectedTarget: string;
 }) {
+  const { promptForm } = useDialogs();
   const [allChannels, setAllChannels] = useState<ChannelData>({});
   const [plots, setPlots] = useState<PlotDef[]>([]);
   const [layouts, setLayouts] = useState<TelemetryLayout[]>([]);
@@ -426,7 +428,15 @@ export default function TelemetryPage({
   );
 
   const saveLayout = useCallback(async () => {
-    const name = prompt("Layout name:", selectedLayout || "My Layout");
+    const form = await promptForm("Save layout", [
+      {
+        name: "name",
+        label: "Layout name",
+        initial: selectedLayout || "My Layout",
+        validate: (v) => (v.trim() ? null : "required"),
+      },
+    ]);
+    const name = form?.name?.trim();
     if (!name) return;
     try {
       const r = await fetch(

@@ -1,4 +1,5 @@
 import { useCallback, useState } from "react";
+import { fileToBase64 } from "../api/upload";
 
 /* ----------------------------- Types ----------------------------- */
 
@@ -45,11 +46,11 @@ export default function FileTransferPage({
 
       try {
         // Read file as base64
-        const arrayBuffer = await file.arrayBuffer();
-        const bytes = new Uint8Array(arrayBuffer);
-        let binary = "";
-        for (const b of bytes) binary += String.fromCharCode(b);
-        const base64 = btoa(binary);
+        const encoded = await fileToBase64(file);
+        if ("error" in encoded) {
+          throw new Error(encoded.error);
+        }
+        const base64 = encoded.base64;
 
         const r = await fetch(`/api/targets/${selectedTarget}/upload`, {
           method: "POST",

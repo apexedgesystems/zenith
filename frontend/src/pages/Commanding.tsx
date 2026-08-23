@@ -1,4 +1,11 @@
 import { useState, useEffect, useCallback } from "react";
+import {
+  bytesToHex,
+  decodeField,
+  formatValue,
+  hexToBytes,
+  type FieldDef,
+} from "../api/decode";
 
 /* ----------------------------- Types ----------------------------- */
 
@@ -54,65 +61,29 @@ interface HistoryEntry {
 /** Decode a hex response using struct dict field definitions */
 function decodeResponseHex(
   hex: string,
-  fields: { name: string; type: string; offset: number; size: number }[],
+  fields: FieldDef[],
 ): Record<string, string> {
+  // Thin wrapper over THE shared decoder: same bytes render the same
+  // way here as on every other page. Skips pad/reserved names; strings
+  // and arrays now decode instead of being dropped.
   const result: Record<string, string> = {};
-  const bytes = new Uint8Array(
-    hex.match(/.{2}/g)?.map((b) => parseInt(b, 16)) || [],
-  );
-  if (bytes.length === 0) return result;
+  const bytes = hexToBytes(hex);
+  if (!bytes || bytes.length === 0) return result;
   const view = new DataView(bytes.buffer);
-
   for (const f of fields) {
-    if (f.offset + f.size > bytes.length) continue;
-    if (
-      f.type === "array" ||
-      f.type === "string" ||
-      f.name.startsWith("pad") ||
-      f.name.startsWith("reserved")
-    )
-      continue;
+    if (f.name.startsWith("pad") || f.name.startsWith("reserved")) continue;
     if (f.size === 0) continue;
-    try {
-      let val: string;
-      switch (`${f.type}:${f.size}`) {
-        case "uint:1":
-          val = String(view.getUint8(f.offset));
-          break;
-        case "uint:2":
-          val = String(view.getUint16(f.offset, true));
-          break;
-        case "uint:4":
-          val = view.getUint32(f.offset, true).toLocaleString();
-          break;
-        case "uint:8":
-          val = Number(view.getBigUint64(f.offset, true)).toLocaleString();
-          break;
-        case "int:1":
-          val = String(view.getInt8(f.offset));
-          break;
-        case "int:2":
-          val = String(view.getInt16(f.offset, true));
-          break;
-        case "int:4":
-          val = String(view.getInt32(f.offset, true));
-          break;
-        case "float:4":
-          val = view.getFloat32(f.offset, true).toFixed(4);
-          break;
-        case "float:8":
-          val = view.getFloat64(f.offset, true).toFixed(4);
-          break;
-        default:
-          val = `0x${[...bytes.slice(f.offset, f.offset + f.size)]
-            .map((b) => b.toString(16).padStart(2, "0"))
-            .join("")}`;
-          break;
+    const v = decodeField(view, f);
+    if (v === null) {
+      // Unknown shape: show raw hex rather than guessing.
+      if (f.offset + f.size <= bytes.length) {
+        result[f.name] = `0x${bytesToHex(
+          bytes.slice(f.offset, f.offset + f.size),
+        )}`;
       }
-      result[f.name] = val;
-    } catch {
-      /* skip */
+      continue;
     }
+    result[f.name] = formatValue(v, f);
   }
   return result;
 }

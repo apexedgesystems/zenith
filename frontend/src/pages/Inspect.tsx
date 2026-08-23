@@ -1,4 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useTargets } from "../api/queries";
+import {
+  decodeField,
+  formatValue,
+  hexToBytes as rawHexToBytes,
+  type FieldDef,
+} from "../api/decode";
+
+/** Whitespace-tolerant hex (the INSPECT browser displays spaced hex
+ *  and re-parses it); empty result on malformed input. */
+function sharedHexToBytes(hex: string): Uint8Array {
+  return rawHexToBytes(hex.replace(/\s+/g, "")) ?? new Uint8Array(0);
+}
 
 /**
  * INSPECT Browser (Phase 4 of the MVP roadmap).
@@ -18,13 +31,6 @@ interface RegistryComponent {
   name: string;
   type: string;
   reachable: boolean;
-}
-
-interface FieldDef {
-  name: string;
-  type: string;
-  offset: number;
-  size: number;
 }
 
 interface StructDef {
@@ -48,57 +54,24 @@ const CATEGORIES = [
 
 /* ----------------------------- Decoding ----------------------------- */
 
-function hexToBytes(hex: string): Uint8Array {
-  const clean = hex.replace(/\s+/g, "");
-  if (clean.length % 2 !== 0) return new Uint8Array(0);
-  const out = new Uint8Array(clean.length / 2);
-  for (let i = 0; i < clean.length; i += 2) {
-    out[i / 2] = parseInt(clean.substring(i, i + 2), 16);
-  }
-  return out;
-}
-
 function decodeFieldValue(view: DataView, field: FieldDef): string {
-  const off = field.offset;
-  if (off + field.size > view.byteLength) return "--";
-
-  switch (`${field.type}:${field.size}`) {
-    case "uint:1":
-      return String(view.getUint8(off));
-    case "uint:2":
-      return String(view.getUint16(off, true));
-    case "uint:4":
-      return String(view.getUint32(off, true));
-    case "uint:8":
-      return String(view.getBigUint64(off, true));
-    case "int:1":
-      return String(view.getInt8(off));
-    case "int:2":
-      return String(view.getInt16(off, true));
-    case "int:4":
-      return String(view.getInt32(off, true));
-    case "int:8":
-      return String(view.getBigInt64(off, true));
-    case "float:4":
-      return view.getFloat32(off, true).toFixed(4);
-    case "float:8":
-      return view.getFloat64(off, true).toFixed(6);
-    case "double:8":
-      return view.getFloat64(off, true).toFixed(6);
-    case "bool:1":
-      return view.getUint8(off) ? "true" : "false";
-    default: {
-      // Show raw hex for unknown types (arrays, strings, padding, etc.)
-      const bytes = new Uint8Array(
-        view.buffer,
-        view.byteOffset + off,
-        Math.min(field.size, view.byteLength - off),
-      );
-      return Array.from(bytes)
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join(" ");
-    }
+  // Shared decoder; unknown shapes fall back to spaced raw hex, which
+  // is what the INSPECT browser historically showed for them.
+  const v = decodeField(view, field);
+  if (v === null) {
+    const off = field.offset;
+    if (off >= view.byteLength) return "--";
+    const bytes = new Uint8Array(
+      view.buffer,
+      view.byteOffset + off,
+      Math.min(field.size, view.byteLength - off),
+    );
+    return Array.from(bytes)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join(" ");
   }
+  if (field.type === "bool") return v ? "true" : "false";
+  return formatValue(v, field);
 }
 
 /* ----------------------------- Page ----------------------------- */
@@ -130,28 +103,14 @@ export default function InspectPage({
 
   /* ---- Connection state ---- */
 
+  // Connection state from the app-wide targets cache: one poller for
+  // the whole app instead of a private copy with its own divergent
+  // notion of "connected".
+  const targetsData = useTargets().data;
   useEffect(() => {
-    let cancelled = false;
-    const fetchState = async () => {
-      try {
-        const r = await fetch("/api/targets");
-        if (!r.ok || cancelled) return;
-        const data = await r.json();
-        const t = (data.targets || []).find(
-          (x: { id: string }) => x.id === selectedTarget,
-        );
-        setConnected(!!t?.connected);
-      } catch {
-        /* ignore */
-      }
-    };
-    fetchState();
-    const interval = setInterval(fetchState, 3000);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, [selectedTarget]);
+    const t = (targetsData ?? []).find((x) => x.id === selectedTarget);
+    setConnected(!!t?.connected);
+  }, [targetsData, selectedTarget]);
 
   /* ---- Registry ---- */
 
@@ -317,7 +276,7 @@ export default function InspectPage({
       }
       const hex = data.extra_hex || "";
       setRawHex(hex);
-      const bytes = hexToBytes(hex);
+      const bytes = sharedHexToBytes(hex);
       const view = new DataView(bytes.buffer);
       const rows: { field: FieldDef; value: string }[] = [];
       for (const field of matchingStruct.fields) {
