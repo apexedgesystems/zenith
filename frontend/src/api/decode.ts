@@ -1,9 +1,9 @@
 /** THE binary decoder for struct-dict-described payloads.
  *
- *  This is the single implementation -- Dashboard, Inspect, and
- *  Commanding previously each carried a drifted copy (different type
- *  coverage, different formatting), so the same struct could display
- *  differently per page. Every consumer imports from here.
+ *  Single implementation by design: multiple per-page copies drift in
+ *  type coverage and formatting until the same struct displays
+ *  differently per page. Every consumer imports from here; do not
+ *  fork it into a component.
  */
 
 export interface FieldDef {

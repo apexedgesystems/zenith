@@ -36,10 +36,9 @@ const isTargetsResponse: Validator<{ targets: Target[] }> = (v) => {
   return arrayOf(v.targets, isTarget, "targets");
 };
 
-/** The one /api/targets poller. Three independent copies of this loop
- *  used to run simultaneously (App shell, reconnect probe, whichever
- *  page was mounted), each with its own divergent notion of
- *  "connected". */
+/** The one /api/targets poller for the whole app. Keep it singular:
+ *  parallel per-page pollers each develop their own divergent notion
+ *  of "connected" that can disagree for seconds. */
 export function useTargets() {
   return useQuery({
     queryKey: ["targets"],
