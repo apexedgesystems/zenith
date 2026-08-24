@@ -123,6 +123,8 @@ hooks:
 lint:
 	$(COMPOSE) run --rm -T dev bash -c \
 		'cd backend && cargo clippy --lib --bins -- -D warnings'
+	$(COMPOSE) run --rm -T dev bash -c \
+		'cd frontend && npx eslint . --max-warnings 200'
 
 # ------------------------------------------------------------------------------
 # Cleanup

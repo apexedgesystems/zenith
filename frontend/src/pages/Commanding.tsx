@@ -233,6 +233,10 @@ export default function CommandingPage({
         }
       })
       .catch(() => {});
+    // selectedComponent read only to auto-pick the first component
+    // when none is chosen; depping it would refetch the catalog on
+    // every user selection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedTarget]);
 
   // Reset command selection when component changes
@@ -309,7 +313,7 @@ export default function CommandingPage({
       setHistory((h) => [entry, ...h].slice(0, 200));
       setSending(false);
     },
-    [selectedTarget],
+    [selectedTarget, targets],
   );
 
   const sendFormCommand = () => {

@@ -15,6 +15,8 @@ interface UploadResult {
 
 /* ----------------------------- Page ----------------------------- */
 
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB limit
+
 export default function FileTransferPage({
   selectedTarget,
   targets,
@@ -82,8 +84,6 @@ export default function FileTransferPage({
     },
     [selectedTarget, remotePath],
   );
-
-  const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB limit
 
   const handleDrop = useCallback(
     (e: React.DragEvent) => {

@@ -70,6 +70,9 @@ export default function TelemetryPage({
         }
       })
       .catch(() => {});
+    // selectedLayout read only to auto-pick the first layout when none
+    // is chosen; depping it would refetch layouts on every selection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedTarget]);
 
   // Reset plots from a layout when the selected NAME changes. We use a
@@ -499,7 +502,14 @@ export default function TelemetryPage({
       setSaveMsg(`Save failed: ${e instanceof Error ? e.message : String(e)}`);
       setTimeout(() => setSaveMsg(null), 5000);
     }
-  }, [selectedTarget, selectedLayout, gridCols, timeWindowMs, plots]);
+  }, [
+    selectedTarget,
+    selectedLayout,
+    gridCols,
+    timeWindowMs,
+    plots,
+    promptForm,
+  ]);
 
   // Resize handle
   useEffect(() => {
