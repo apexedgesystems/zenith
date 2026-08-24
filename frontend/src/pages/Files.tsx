@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useState, useRef } from "react";
 import { fileToBase64 } from "../api/upload";
 
 /* ----------------------------- Types ----------------------------- */
@@ -15,6 +15,8 @@ interface UploadResult {
 
 /* ----------------------------- Page ----------------------------- */
 
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB limit
+
 export default function FileTransferPage({
   selectedTarget,
   targets,
@@ -27,7 +29,10 @@ export default function FileTransferPage({
   const [uploading, setUploading] = useState(false);
   const [history, setHistory] = useState<UploadResult[]>([]);
   const [dragOver, setDragOver] = useState(false);
-  let nextId = history.length;
+  // Monotonic ids from a ref: ids derived from history.length reissue
+  // after the cap trims the list, cross-wiring entries (in Commanding,
+  // one entry's interpret-as choice applied to another).
+  const idCounter = useRef(0);
 
   const targetName =
     targets.find((t) => t.id === selectedTarget)?.name || selectedTarget;
@@ -36,7 +41,7 @@ export default function FileTransferPage({
     async (file: File) => {
       setUploading(true);
       const entry: UploadResult = {
-        id: nextId++,
+        id: ++idCounter.current,
         timestamp: new Date().toISOString().split("T")[1].split(".")[0],
         fileName: file.name,
         remotePath: remotePath + file.name,
@@ -80,8 +85,6 @@ export default function FileTransferPage({
     [selectedTarget, remotePath],
   );
 
-  const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB limit
-
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault();
@@ -89,7 +92,7 @@ export default function FileTransferPage({
       if (e.dataTransfer.files.length > 1) {
         setHistory((h) => [
           {
-            id: h.length,
+            id: ++idCounter.current,
             timestamp: new Date().toISOString().split("T")[1].split(".")[0],
             fileName: "(multiple)",
             remotePath: "",
@@ -106,7 +109,7 @@ export default function FileTransferPage({
         if (file.size > MAX_FILE_SIZE) {
           setHistory((h) => [
             {
-              id: h.length,
+              id: ++idCounter.current,
               timestamp: new Date().toISOString().split("T")[1].split(".")[0],
               fileName: file.name,
               remotePath: "",

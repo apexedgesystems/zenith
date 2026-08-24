@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState, useMemo } from "react";
+import { computePadL, pixelToTime } from "./chartGeometry";
 import { COLORS, fieldName, exportPng, exportCsv } from "../types/telemetry";
 import type { ThresholdDef, ChannelData } from "../types/telemetry";
 
@@ -38,6 +39,9 @@ const MultiChart = memo(function MultiChart({
     values: { ch: string; v: number; color: string }[];
   } | null>(null);
   const rafRef = useRef(0);
+  // The renderer's actual left pad, for pixel->time mapping in the
+  // pointer handler -- a diverged copy shifts every readout.
+  const padLRef = useRef(60);
 
   // Visible channels (filter hidden)
   const visibleChannels = useMemo(
@@ -100,10 +104,8 @@ const MultiChart = memo(function MultiChart({
       maxV = 1;
     }
     // Dynamic left padding based on Y-axis label width
-    const maxLabel = Math.max(Math.abs(minV), Math.abs(maxV));
-    const labelLen =
-      maxLabel >= 1000000 ? 10 : maxLabel >= 1000 ? 8 : maxLabel >= 1 ? 6 : 7;
-    const PAD_L = Math.max(50, labelLen * 7 + 10);
+    const PAD_L = computePadL(minV, maxV);
+    padLRef.current = PAD_L;
     if (yMin != null) minV = yMin;
     if (yMax != null) maxV = yMax;
     if (maxV - minV < 0.001) {
@@ -251,36 +253,10 @@ const MultiChart = memo(function MultiChart({
       ctx.textAlign = "left";
       ctx.fillText(yLabel, PAD_L + 2, h - 2);
     }
-
-    // Crosshair
-    if (crosshair) {
-      ctx.strokeStyle = "rgba(230,237,243,0.3)";
-      ctx.lineWidth = 1;
-      ctx.setLineDash([4, 4]);
-      ctx.beginPath();
-      ctx.moveTo(crosshair.x, PAD_T);
-      ctx.lineTo(crosshair.x, h - PAD_B);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      let yOff = PAD_T + 12;
-      for (const cv of crosshair.values) {
-        ctx.fillStyle = cv.color;
-        ctx.font = "bold 10px monospace";
-        ctx.textAlign = "left";
-        const lbl = `${fieldName(cv.ch)}: ${cv.v.toFixed(4)}`;
-        const textX =
-          crosshair.x + 8 > w - 120
-            ? crosshair.x - 8 - ctx.measureText(lbl).width
-            : crosshair.x + 8;
-        ctx.fillText(lbl, textX, yOff);
-        yOff += 13;
-      }
-    }
   }, [
     visibleChannels,
     data,
     height,
-    crosshair,
     yMin,
     yMax,
     yLabel,
@@ -294,6 +270,50 @@ const MultiChart = memo(function MultiChart({
   // is a useCallback whose identity changes whenever its deps change.
   const drawRef = useRef(draw);
   drawRef.current = draw;
+
+  // Crosshair on its own overlay canvas: pointer motion repaints a
+  // dashed line and a few labels instead of re-stroking every series
+  // (formerly up to 6000 points per channel per mousemove).
+  const overlayRef = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const overlay = overlayRef.current;
+    const ctx = overlay?.getContext("2d");
+    if (!overlay || !ctx) return;
+    const rect = overlay.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const W = Math.round(rect.width * dpr);
+    const H = Math.round(rect.height * dpr);
+    if (overlay.width !== W || overlay.height !== H) {
+      overlay.width = W;
+      overlay.height = H;
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+    if (!crosshair) return;
+    const PAD_T = 14,
+      PAD_B = 22;
+    ctx.strokeStyle = "rgba(230,237,243,0.3)";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(crosshair.x, PAD_T);
+    ctx.lineTo(crosshair.x, rect.height - PAD_B);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    let yOff = PAD_T + 12;
+    for (const cv of crosshair.values) {
+      ctx.fillStyle = cv.color;
+      ctx.font = "bold 10px monospace";
+      ctx.textAlign = "left";
+      const lbl = `${fieldName(cv.ch)}: ${cv.v.toFixed(4)}`;
+      const textX =
+        crosshair.x + 8 > rect.width - 120
+          ? crosshair.x - 8 - ctx.measureText(lbl).width
+          : crosshair.x + 8;
+      ctx.fillText(lbl, textX, yOff);
+      yOff += 13;
+    }
+  }, [crosshair]);
 
   // Batched draw via requestAnimationFrame
   useEffect(() => {
@@ -317,13 +337,6 @@ const MultiChart = memo(function MultiChart({
       if (!canvas) return;
       const rect = canvas.getBoundingClientRect();
       const mx = e.clientX - rect.left;
-      const PAD_L = 60,
-        PAD_R = 10;
-      const plotW = rect.width - PAD_L - PAD_R;
-      if (mx < PAD_L || mx > rect.width - PAD_R) {
-        setCrosshair(null);
-        return;
-      }
 
       let globalMaxT = -Infinity;
       for (const ch of visibleChannels) {
@@ -334,7 +347,17 @@ const MultiChart = memo(function MultiChart({
       }
       if (!isFinite(globalMaxT)) return;
       const globalMinT = globalMaxT - timeWindowMs;
-      const tAtMouse = globalMinT + ((mx - PAD_L) / plotW) * timeWindowMs;
+      const tAtMouse = pixelToTime(
+        mx,
+        rect.width,
+        padLRef.current,
+        globalMinT,
+        globalMaxT,
+      );
+      if (tAtMouse === null) {
+        setCrosshair(null);
+        return;
+      }
 
       const values: { ch: string; v: number; color: string }[] = [];
       visibleChannels.forEach((ch, ci) => {
@@ -361,12 +384,22 @@ const MultiChart = memo(function MultiChart({
     [visibleChannels, data, timeWindowMs],
   );
 
-  // Stats: single-pass min/max/sum, no intermediate allocations.
-  // Previously did filter().map().Math.min(...spread) which allocated
-  // 3 arrays per channel per render -- noticeable on the WS hot path.
+  // Stats: single-pass min/max/sum. Keep it allocation-free -- a
+  // filter/map/spread chain here allocates three arrays per channel
+  // per render, noticeable on the WS hot path.
   const stats = useMemo(() => {
-    const now = Date.now();
-    const cutoff = now - timeWindowMs;
+    // Window anchored to the newest DATA timestamp, not wall clock:
+    // Date.now() inside a memo without it in deps freezes at whatever
+    // moment the memo last ran, and wall-anchoring would silently
+    // empty the stats when a target pauses. Stats describe what the
+    // chart shows.
+    let newest = -Infinity;
+    for (const ch of visibleChannels) {
+      const pts = data[ch];
+      if (pts && pts.length > 0 && pts[pts.length - 1].t > newest)
+        newest = pts[pts.length - 1].t;
+    }
+    const cutoff = newest - timeWindowMs;
     const result: { ch: string; min: number; max: number; mean: number }[] = [];
     for (const ch of visibleChannels) {
       const pts = data[ch];
@@ -477,16 +510,25 @@ const MultiChart = memo(function MultiChart({
           })}
         </div>
       </div>
-      <div ref={containerRef}>
+      <div ref={containerRef} style={{ position: "relative" }}>
         <canvas
           ref={canvasRef}
-          onMouseMove={handleMouseMove}
-          onMouseLeave={() => setCrosshair(null)}
           style={{
             width: "100%",
             height: `${height}px`,
             borderRadius: "6px",
             border: "1px solid var(--color-border)",
+          }}
+        />
+        <canvas
+          ref={overlayRef}
+          onMouseMove={handleMouseMove}
+          onMouseLeave={() => setCrosshair(null)}
+          style={{
+            position: "absolute",
+            inset: 0,
+            width: "100%",
+            height: `${height}px`,
             cursor: "crosshair",
           }}
         />

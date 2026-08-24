@@ -70,6 +70,9 @@ export default function TelemetryPage({
         }
       })
       .catch(() => {});
+    // selectedLayout read only to auto-pick the first layout when none
+    // is chosen; depping it would refetch layouts on every selection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedTarget]);
 
   // Reset plots from a layout when the selected NAME changes. We use a
@@ -120,7 +123,9 @@ export default function TelemetryPage({
     function connect() {
       if (stopped) return;
       const ws = new WebSocket(
-        `ws://${window.location.host}/api/targets/${selectedTarget}/telemetry/live`,
+        `${window.location.protocol === "https:" ? "wss" : "ws"}://${
+          window.location.host
+        }/api/targets/${selectedTarget}/telemetry/live`,
       );
       wsInstance = ws;
       let receivedData = false;
@@ -213,13 +218,17 @@ export default function TelemetryPage({
     [plots],
   );
 
+  // Widest window any plot needs, derived outside the poll effect so a
+  // per-plot window change re-drives the fetch -- keying the effect on
+  // plot identity would reset it on every rename or threshold edit.
+  const maxWindow = Math.max(
+    timeWindowMs,
+    ...plots.map((p) => p.time_window_ms || 0),
+  );
+
   // DB polling: all plotted channels, all time windows.
   // Poll interval adjusts: 500ms for short windows (smooth), 2s for large.
   useEffect(() => {
-    const maxWindow = Math.max(
-      timeWindowMs,
-      ...plots.map((p) => p.time_window_ms || 0),
-    );
     if (paused) return;
     const pollInterval = maxWindow <= 60000 ? 500 : 2000;
 
@@ -290,7 +299,7 @@ export default function TelemetryPage({
     // re-create the interval on every plot edit (rename, threshold change,
     // etc.) and lose in-flight poll responses.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedTarget, timeWindowMs, paused, plottedChannelKey]);
+  }, [selectedTarget, timeWindowMs, maxWindow, paused, plottedChannelKey]);
 
   // Memoized channel lists
   const availableChannels = useMemo(
@@ -353,6 +362,15 @@ export default function TelemetryPage({
         .filter((p) => p.channels.length > 0),
     );
   }, []);
+
+  // One stable handler per plot index: an inline closure here defeats
+  // MultiChart's React.memo on every render, which is exactly what the
+  // reference-reuse data slicing exists to enable.
+  const removeHandlers = useMemo(
+    () => plots.map((_, i) => (ch: string) => removeChannelFromPlot(i, ch)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [plots.length, removeChannelFromPlot],
+  );
 
   const updatePlot = useCallback((idx: number, changes: Partial<PlotDef>) => {
     setPlots((prev) =>
@@ -484,7 +502,14 @@ export default function TelemetryPage({
       setSaveMsg(`Save failed: ${e instanceof Error ? e.message : String(e)}`);
       setTimeout(() => setSaveMsg(null), 5000);
     }
-  }, [selectedTarget, selectedLayout, gridCols, timeWindowMs, plots]);
+  }, [
+    selectedTarget,
+    selectedLayout,
+    gridCols,
+    timeWindowMs,
+    plots,
+    promptForm,
+  ]);
 
   // Resize handle
   useEffect(() => {
@@ -1048,7 +1073,7 @@ export default function TelemetryPage({
                       height={plot.height || 180}
                       timeWindowMs={plot.time_window_ms || timeWindowMs}
                       hiddenChannels={hiddenChannels}
-                      onRemoveChannel={(ch) => removeChannelFromPlot(i, ch)}
+                      onRemoveChannel={removeHandlers[i]}
                       onToggleChannel={toggleChannelVisibility}
                       yMin={plot.y_min}
                       yMax={plot.y_max}

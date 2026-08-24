@@ -143,13 +143,19 @@ function App() {
 
   useEffect(() => {
     const handleClick = (e: MouseEvent) => {
+      // Let the browser handle anything that is not a plain left
+      // click: modifier clicks and middle clicks open new tabs, and
+      // explicit targets navigate normally.
+      if (e.defaultPrevented || e.button !== 0) return;
+      if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
       const target = e.target as HTMLElement;
       const anchor = target.closest("a");
-      if (anchor && anchor.href && anchor.origin === window.location.origin) {
-        e.preventDefault();
-        window.history.pushState({}, "", anchor.pathname);
-        setPage(anchor.pathname);
-      }
+      if (!anchor || !anchor.href) return;
+      if (anchor.origin !== window.location.origin) return;
+      if (anchor.target && anchor.target !== "_self") return;
+      e.preventDefault();
+      window.history.pushState({}, "", anchor.pathname);
+      setPage(anchor.pathname);
     };
     document.addEventListener("click", handleClick);
     return () => document.removeEventListener("click", handleClick);
@@ -323,9 +329,18 @@ function App() {
     content = (
       <FileTransferPage selectedTarget={selectedTarget} targets={targets} />
     );
-  else
+  else if (page === "/")
     content = (
       <DashboardPage selectedTarget={selectedTarget} targets={targets} />
+    );
+  else
+    content = (
+      <div className="p-6 text-sm" style={{ color: "var(--color-text-muted)" }}>
+        No page at <span className="mono">{page}</span>.{" "}
+        <a href="/" style={{ color: "var(--color-accent)" }}>
+          Back to the Dashboard
+        </a>
+      </div>
     );
 
   return (
@@ -580,7 +595,7 @@ function App() {
               onMouseLeave={(e) =>
                 (e.currentTarget.style.backgroundColor = "transparent")
               }
-              title="When enabled, zenith will keep trying to reconnect to this target every 3 seconds while it is disconnected"
+              title="When enabled, zenith will keep trying to reconnect to this target every 5 seconds while it is disconnected"
             >
               <span>Auto-reconnect</span>
               <span

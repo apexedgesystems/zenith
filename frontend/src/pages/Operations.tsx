@@ -334,7 +334,7 @@ export default function OperationsPage({
       message: "click Connect manually",
     };
     setAudit((prev) => [failEntry, ...prev].slice(0, 50));
-  }, [send, selectedTarget]);
+  }, [selectedTarget]);
 
   const setVerb = useCallback(async () => {
     const v = parseInt(verbosity);
@@ -349,7 +349,7 @@ export default function OperationsPage({
       u8Hex(v),
       `level ${v}`,
     );
-  }, [send, verbosity]);
+  }, [send, verbosity, notify]);
 
   const lockComp = useCallback(
     async (comp: RegistryComponent) => {
@@ -488,7 +488,15 @@ export default function OperationsPage({
     } finally {
       setSwapInProgress(false);
     }
-  }, [selectedTarget, swapUid, swapInstance, swapBank, swapFile, registry]);
+  }, [
+    selectedTarget,
+    swapUid,
+    swapInstance,
+    swapBank,
+    swapFile,
+    registry,
+    notify,
+  ]);
 
   /* ---- Render ---- */
 

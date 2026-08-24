@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import {
   bytesToHex,
   decodeField,
@@ -157,7 +157,10 @@ export default function CommandingPage({
   const [rawUid, setRawUid] = useState("0x000000");
   const [rawOpcode, setRawOpcode] = useState("0x0000");
   const [rawPayload, setRawPayload] = useState("");
-  let nextId = history.length;
+  // Monotonic ids from a ref: ids derived from history.length reissue
+  // after the cap trims the list, cross-wiring entries (in Commanding,
+  // one entry's interpret-as choice applied to another).
+  const idCounter = useRef(0);
 
   // Load ALL non-empty structs (any category) from the per-target dict
   // for the Interpret feature. The previous version only loaded TELEMETRY
@@ -168,9 +171,13 @@ export default function CommandingPage({
     if (!selectedTarget) return;
     setStructDicts({});
     setInterpretChoice({});
+    // Cancellation flag: without it, switching targets mid-flight let
+    // the OLD target's struct dicts land in the NEW target's state.
+    let cancelled = false;
     fetch(`/api/targets/${selectedTarget}/structs`)
       .then((r) => (r.ok ? r.json() : { components: [] }))
       .then((data) => {
+        if (cancelled) return;
         for (const comp of data.components || []) {
           // Pull every struct that has fields and a non-zero size
           const useful = (comp.structs || []).filter(
@@ -207,7 +214,7 @@ export default function CommandingPage({
                   fields: sdef.fields,
                 });
               }
-              if (list.length > 0) {
+              if (list.length > 0 && !cancelled) {
                 setStructDicts((prev) => ({ ...prev, [comp.component]: list }));
               }
             })
@@ -215,6 +222,9 @@ export default function CommandingPage({
         }
       })
       .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, [selectedTarget]);
 
   // Load command config from backend
@@ -230,6 +240,10 @@ export default function CommandingPage({
         }
       })
       .catch(() => {});
+    // selectedComponent read only to auto-pick the first component
+    // when none is chosen; depping it would refetch the catalog on
+    // every user selection.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedTarget]);
 
   // Reset command selection when component changes
@@ -271,7 +285,7 @@ export default function CommandingPage({
     ) => {
       setSending(true);
       const entry: HistoryEntry = {
-        id: nextId++,
+        id: ++idCounter.current,
         timestamp: new Date().toISOString().split("T")[1].split(".")[0],
         target:
           targets.find((t) => t.id === selectedTarget)?.name || selectedTarget,
@@ -306,7 +320,7 @@ export default function CommandingPage({
       setHistory((h) => [entry, ...h].slice(0, 200));
       setSending(false);
     },
-    [selectedTarget],
+    [selectedTarget, targets],
   );
 
   const sendFormCommand = () => {
