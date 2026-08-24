@@ -253,36 +253,10 @@ const MultiChart = memo(function MultiChart({
       ctx.textAlign = "left";
       ctx.fillText(yLabel, PAD_L + 2, h - 2);
     }
-
-    // Crosshair
-    if (crosshair) {
-      ctx.strokeStyle = "rgba(230,237,243,0.3)";
-      ctx.lineWidth = 1;
-      ctx.setLineDash([4, 4]);
-      ctx.beginPath();
-      ctx.moveTo(crosshair.x, PAD_T);
-      ctx.lineTo(crosshair.x, h - PAD_B);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      let yOff = PAD_T + 12;
-      for (const cv of crosshair.values) {
-        ctx.fillStyle = cv.color;
-        ctx.font = "bold 10px monospace";
-        ctx.textAlign = "left";
-        const lbl = `${fieldName(cv.ch)}: ${cv.v.toFixed(4)}`;
-        const textX =
-          crosshair.x + 8 > w - 120
-            ? crosshair.x - 8 - ctx.measureText(lbl).width
-            : crosshair.x + 8;
-        ctx.fillText(lbl, textX, yOff);
-        yOff += 13;
-      }
-    }
   }, [
     visibleChannels,
     data,
     height,
-    crosshair,
     yMin,
     yMax,
     yLabel,
@@ -296,6 +270,50 @@ const MultiChart = memo(function MultiChart({
   // is a useCallback whose identity changes whenever its deps change.
   const drawRef = useRef(draw);
   drawRef.current = draw;
+
+  // Crosshair on its own overlay canvas: pointer motion repaints a
+  // dashed line and a few labels instead of re-stroking every series
+  // (formerly up to 6000 points per channel per mousemove).
+  const overlayRef = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const overlay = overlayRef.current;
+    const ctx = overlay?.getContext("2d");
+    if (!overlay || !ctx) return;
+    const rect = overlay.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    const W = Math.round(rect.width * dpr);
+    const H = Math.round(rect.height * dpr);
+    if (overlay.width !== W || overlay.height !== H) {
+      overlay.width = W;
+      overlay.height = H;
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, rect.width, rect.height);
+    if (!crosshair) return;
+    const PAD_T = 14,
+      PAD_B = 22;
+    ctx.strokeStyle = "rgba(230,237,243,0.3)";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(crosshair.x, PAD_T);
+    ctx.lineTo(crosshair.x, rect.height - PAD_B);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    let yOff = PAD_T + 12;
+    for (const cv of crosshair.values) {
+      ctx.fillStyle = cv.color;
+      ctx.font = "bold 10px monospace";
+      ctx.textAlign = "left";
+      const lbl = `${fieldName(cv.ch)}: ${cv.v.toFixed(4)}`;
+      const textX =
+        crosshair.x + 8 > rect.width - 120
+          ? crosshair.x - 8 - ctx.measureText(lbl).width
+          : crosshair.x + 8;
+      ctx.fillText(lbl, textX, yOff);
+      yOff += 13;
+    }
+  }, [crosshair]);
 
   // Batched draw via requestAnimationFrame
   useEffect(() => {
@@ -492,16 +510,25 @@ const MultiChart = memo(function MultiChart({
           })}
         </div>
       </div>
-      <div ref={containerRef}>
+      <div ref={containerRef} style={{ position: "relative" }}>
         <canvas
           ref={canvasRef}
-          onMouseMove={handleMouseMove}
-          onMouseLeave={() => setCrosshair(null)}
           style={{
             width: "100%",
             height: `${height}px`,
             borderRadius: "6px",
             border: "1px solid var(--color-border)",
+          }}
+        />
+        <canvas
+          ref={overlayRef}
+          onMouseMove={handleMouseMove}
+          onMouseLeave={() => setCrosshair(null)}
+          style={{
+            position: "absolute",
+            inset: 0,
+            width: "100%",
+            height: `${height}px`,
             cursor: "crosshair",
           }}
         />

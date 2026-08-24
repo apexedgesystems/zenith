@@ -595,7 +595,7 @@ function App() {
               onMouseLeave={(e) =>
                 (e.currentTarget.style.backgroundColor = "transparent")
               }
-              title="When enabled, zenith will keep trying to reconnect to this target every 3 seconds while it is disconnected"
+              title="When enabled, zenith will keep trying to reconnect to this target every 5 seconds while it is disconnected"
             >
               <span>Auto-reconnect</span>
               <span
