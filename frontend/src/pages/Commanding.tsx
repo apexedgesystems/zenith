@@ -171,9 +171,13 @@ export default function CommandingPage({
     if (!selectedTarget) return;
     setStructDicts({});
     setInterpretChoice({});
+    // Cancellation flag: without it, switching targets mid-flight let
+    // the OLD target's struct dicts land in the NEW target's state.
+    let cancelled = false;
     fetch(`/api/targets/${selectedTarget}/structs`)
       .then((r) => (r.ok ? r.json() : { components: [] }))
       .then((data) => {
+        if (cancelled) return;
         for (const comp of data.components || []) {
           // Pull every struct that has fields and a non-zero size
           const useful = (comp.structs || []).filter(
@@ -210,7 +214,7 @@ export default function CommandingPage({
                   fields: sdef.fields,
                 });
               }
-              if (list.length > 0) {
+              if (list.length > 0 && !cancelled) {
                 setStructDicts((prev) => ({ ...prev, [comp.component]: list }));
               }
             })
@@ -218,6 +222,9 @@ export default function CommandingPage({
         }
       })
       .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
   }, [selectedTarget]);
 
   // Load command config from backend
