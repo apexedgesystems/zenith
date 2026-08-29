@@ -7,6 +7,7 @@ import InspectPage from "./pages/Inspect";
 import AuditPage from "./pages/Audit";
 import TunablesPage from "./pages/Tunables";
 import FileTransferPage from "./pages/Files";
+import StoragePage from "./pages/Storage";
 import Clock from "./components/Clock";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { useDialogs } from "./components/dialogs";
@@ -23,6 +24,7 @@ const NAV_ITEMS = [
   { path: "/tunables", label: "Tunables" },
   { path: "/inspect", label: "INSPECT" },
   { path: "/files", label: "File Transfer" },
+  { path: "/storage", label: "Storage" },
   { path: "/audit", label: "Audit Log" },
 ];
 
@@ -325,6 +327,7 @@ function App() {
   else if (page === "/inspect")
     content = <InspectPage selectedTarget={selectedTarget} />;
   else if (page === "/audit") content = <AuditPage />;
+  else if (page === "/storage") content = <StoragePage />;
   else if (page === "/files")
     content = (
       <FileTransferPage selectedTarget={selectedTarget} targets={targets} />
