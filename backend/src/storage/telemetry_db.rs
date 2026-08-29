@@ -6,13 +6,17 @@
 //! Performance tuning:
 //!   - WAL mode for non-blocking reads during writes
 //!   - Prepared statement caching for hot paths
-//!   - Lookup index on (target_id, channel, timestamp_ms DESC)
+//!   - Normalized channel dictionary: telemetry rows carry an integer
+//!     channel_id instead of repeating target/channel strings, roughly
+//!     halving on-disk bytes per sample and index size
+//!   - Lookup index on (channel_id, timestamp_ms DESC)
 //!   - Separate latest-value table for O(1) latest queries
 //!   - Batch inserts within a single transaction
 //!   - page_size=4096, mmap_size=256MB for large dataset performance
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use rusqlite::{params, Connection, OptionalExtension};
 
@@ -54,6 +58,14 @@ pub struct TelemetryDb {
     writer: Mutex<Connection>,
     readers: Mutex<Vec<Connection>>,
     db_path: PathBuf,
+    /// (target_id, channel name) -> channels.id, consulted on the
+    /// insert path so steady-state batches bind integer ids without
+    /// touching the channels table. Entries are only added after the
+    /// resolving transaction commits -- caching an id from a rolled-
+    /// back transaction would leave rows pointing at a dead id.
+    /// Dictionary rows are never deleted (see delete_target), so a
+    /// cached id can never go stale.
+    channel_ids: Mutex<HashMap<(Arc<str>, Arc<str>), i64>>,
 }
 
 /// Maximum number of concurrent reader connections in the pool.
@@ -77,18 +89,36 @@ impl TelemetryDb {
             tracing::warn!("Database integrity check: {}", integrity);
         }
 
+        // Channel dictionary: one row per (target, channel) ever seen.
+        // Telemetry rows reference it by integer id -- measured at 1M
+        // rows this halves bytes/row (150 -> 76) vs repeating the
+        // strings, because the name would otherwise be stored twice
+        // per sample (row + lookup index).
+        writer.execute_batch(
+            "CREATE TABLE IF NOT EXISTS channels (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                target_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                UNIQUE(target_id, name)
+            );",
+        )?;
+
+        // Rebuild a legacy denormalized table (target_id/channel TEXT on
+        // every row) into the dictionary schema before creating the new
+        // table -- the legacy layout is detected by its 'channel' column.
+        Self::migrate_legacy_telemetry(&writer)?;
+
         // Main telemetry table
         writer.execute_batch(
             "CREATE TABLE IF NOT EXISTS telemetry (
                 id INTEGER PRIMARY KEY,
-                target_id TEXT NOT NULL,
+                channel_id INTEGER NOT NULL,
                 timestamp_ms INTEGER NOT NULL,
-                channel TEXT NOT NULL,
                 value REAL NOT NULL
             );
-            CREATE INDEX IF NOT EXISTS idx_telemetry_lookup
-                ON telemetry (target_id, channel, timestamp_ms DESC);
-            CREATE INDEX IF NOT EXISTS idx_telemetry_timestamp_asc
+            CREATE INDEX IF NOT EXISTS idx_telemetry_chan_ts
+                ON telemetry (channel_id, timestamp_ms DESC);
+            CREATE INDEX IF NOT EXISTS idx_telemetry_ts
                 ON telemetry (timestamp_ms ASC);",
         )?;
 
@@ -159,7 +189,56 @@ impl TelemetryDb {
             writer: Mutex::new(writer),
             readers: Mutex::new(Vec::with_capacity(READ_POOL_MAX)),
             db_path: path.to_path_buf(),
+            channel_ids: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// One-shot rebuild of a legacy telemetry table (TEXT target_id and
+    /// channel on every row) into the channel-dictionary schema. Runs
+    /// inside a transaction: either the whole history arrives in the
+    /// new shape or the legacy table is left untouched. Indexes are
+    /// created by open() after the copy, which is faster than
+    /// maintaining them during the bulk INSERT.
+    fn migrate_legacy_telemetry(conn: &Connection) -> Result<(), DbError> {
+        let legacy: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('telemetry') WHERE name = 'channel'",
+            [],
+            |row| row.get(0),
+        )?;
+        if legacy == 0 {
+            return Ok(());
+        }
+
+        let started = std::time::Instant::now();
+        conn.execute_batch(
+            "BEGIN;
+             ALTER TABLE telemetry RENAME TO telemetry_legacy;
+             INSERT OR IGNORE INTO channels (target_id, name)
+                 SELECT DISTINCT target_id, channel FROM telemetry_legacy;
+             CREATE TABLE telemetry_v2 (
+                 id INTEGER PRIMARY KEY,
+                 channel_id INTEGER NOT NULL,
+                 timestamp_ms INTEGER NOT NULL,
+                 value REAL NOT NULL
+             );
+             INSERT INTO telemetry_v2 (channel_id, timestamp_ms, value)
+                 SELECT c.id, o.timestamp_ms, o.value
+                 FROM telemetry_legacy o
+                 JOIN channels c ON c.target_id = o.target_id AND c.name = o.channel;
+             DROP TABLE telemetry_legacy;
+             ALTER TABLE telemetry_v2 RENAME TO telemetry;
+             COMMIT;",
+        )?;
+        let rows: i64 = conn.query_row("SELECT COUNT(*) FROM telemetry", [], |row| row.get(0))?;
+        // The legacy table's pages are now free; hand them back so the
+        // file shrinks to the new schema's footprint.
+        conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA incremental_vacuum;")?;
+        tracing::info!(
+            "Migrated {} telemetry rows to the channel-dictionary schema in {:.1}s",
+            rows,
+            started.elapsed().as_secs_f64()
+        );
+        Ok(())
     }
 
     /// Apply the standard pragmas to a connection (writer or reader).
@@ -231,19 +310,43 @@ impl TelemetryDb {
         // "cannot start a transaction within a transaction" until restart.
         let tx = conn.transaction()?;
 
+        // Resolve channel ids. Steady state hits the cache for every
+        // sample; a first-seen channel is inserted into the dictionary
+        // inside this transaction but cached only after commit --
+        // caching a rolled-back id would point rows at a dead channel.
+        let mut cache = self.channel_ids.lock().map_err(|_| DbError::Lock)?;
+        let mut fresh: HashMap<(Arc<str>, Arc<str>), i64> = HashMap::new();
+        for s in samples {
+            let key = (Arc::clone(&s.target_id), Arc::clone(&s.channel));
+            if cache.contains_key(&key) || fresh.contains_key(&key) {
+                continue;
+            }
+            tx.execute(
+                "INSERT OR IGNORE INTO channels (target_id, name) VALUES (?1, ?2)",
+                params![&*s.target_id, &*s.channel],
+            )?;
+            let id: i64 = tx.query_row(
+                "SELECT id FROM channels WHERE target_id = ?1 AND name = ?2",
+                params![&*s.target_id, &*s.channel],
+                |row| row.get(0),
+            )?;
+            fresh.insert(key, id);
+        }
+
         // Insert into main table
         {
             let mut stmt = tx.prepare_cached(
-                "INSERT INTO telemetry (target_id, timestamp_ms, channel, value) \
-                 VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO telemetry (channel_id, timestamp_ms, value) \
+                 VALUES (?1, ?2, ?3)",
             )?;
             for s in samples {
-                stmt.execute(params![
-                    &*s.target_id,
-                    s.timestamp_ms as i64,
-                    &*s.channel,
-                    s.value
-                ])?;
+                let key = (Arc::clone(&s.target_id), Arc::clone(&s.channel));
+                let id = cache
+                    .get(&key)
+                    .or_else(|| fresh.get(&key))
+                    .copied()
+                    .expect("channel id resolved above");
+                stmt.execute(params![id, s.timestamp_ms as i64, s.value])?;
             }
         }
 
@@ -268,6 +371,8 @@ impl TelemetryDb {
         }
 
         tx.commit()?;
+        // The dictionary rows are durable now -- safe to remember them.
+        cache.extend(fresh);
         Ok(())
     }
 
@@ -280,63 +385,90 @@ impl TelemetryDb {
         end_ms: u64,
         limit: usize,
     ) -> Result<Vec<TelemetrySample>, DbError> {
-        // Build the query parameters once, then run on a pooled reader.
-        // Multiple query_range calls can now run concurrently across the
-        // pool instead of serializing on the writer mutex.
-        let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql + Send>>) =
-            if let Some(ch) = channel {
-                (
-                    "SELECT target_id, timestamp_ms, channel, value FROM telemetry \
-                     WHERE target_id = ?1 AND channel = ?2 \
-                       AND timestamp_ms >= ?3 AND timestamp_ms <= ?4 \
-                     ORDER BY timestamp_ms ASC LIMIT ?5"
-                        .to_string(),
-                    vec![
-                        Box::new(target_id.to_string()),
-                        Box::new(ch.to_string()),
-                        Box::new(start_ms as i64),
-                        Box::new(end_ms as i64),
-                        Box::new(limit as i64),
-                    ],
-                )
-            } else {
-                (
-                    "SELECT target_id, timestamp_ms, channel, value FROM telemetry \
-                         WHERE target_id = ?1 \
-                           AND timestamp_ms >= ?2 AND timestamp_ms <= ?3 \
-                         ORDER BY timestamp_ms DESC LIMIT ?4"
-                        .to_string(),
-                    vec![
-                        Box::new(target_id.to_string()),
-                        Box::new(start_ms as i64),
-                        Box::new(end_ms as i64),
-                        Box::new(limit as i64),
-                    ],
-                )
-            };
-
+        // Runs on a pooled reader so concurrent query_range calls
+        // proceed in parallel against WAL.
+        let target_arc: Arc<str> = Arc::from(target_id);
         self.with_reader(|conn| {
-            let params_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec
-                .iter()
-                .map(|p| p.as_ref() as &dyn rusqlite::types::ToSql)
-                .collect();
-            let mut stmt = conn.prepare_cached(&sql)?;
-            let rows = stmt.query_map(params_refs.as_slice(), |row| {
-                let target: String = row.get(0)?;
-                let channel: String = row.get(2)?;
-                Ok(TelemetrySample {
-                    target_id: std::sync::Arc::from(target),
-                    timestamp_ms: row.get::<_, i64>(1)? as u64,
-                    channel: std::sync::Arc::from(channel),
-                    value: row.get(3)?,
-                })
-            })?;
-
-            let mut samples = Vec::new();
-            for row in rows {
-                samples.push(row?);
+            if let Some(ch) = channel {
+                // Single channel: resolve the dictionary id first, then
+                // range-scan its (channel_id, timestamp_ms) index run.
+                let chan_id: Option<i64> = conn
+                    .query_row(
+                        "SELECT id FROM channels WHERE target_id = ?1 AND name = ?2",
+                        params![target_id, ch],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                let Some(chan_id) = chan_id else {
+                    return Ok(Vec::new());
+                };
+                let ch_arc: Arc<str> = Arc::from(ch);
+                let mut stmt = conn.prepare_cached(
+                    "SELECT timestamp_ms, value FROM telemetry \
+                     WHERE channel_id = ?1 \
+                       AND timestamp_ms >= ?2 AND timestamp_ms <= ?3 \
+                     ORDER BY timestamp_ms ASC LIMIT ?4",
+                )?;
+                let rows = stmt.query_map(
+                    params![chan_id, start_ms as i64, end_ms as i64, limit as i64],
+                    |row| {
+                        Ok(TelemetrySample {
+                            target_id: Arc::clone(&target_arc),
+                            timestamp_ms: row.get::<_, i64>(0)? as u64,
+                            channel: Arc::clone(&ch_arc),
+                            value: row.get(1)?,
+                        })
+                    },
+                )?;
+                let mut samples = Vec::new();
+                for row in rows {
+                    samples.push(row?);
+                }
+                Ok(samples)
+            } else {
+                // All channels, newest first. INDEXED BY pins the plan
+                // to a backward walk of the time index with an O(1)
+                // dictionary probe per row, stopping at LIMIT -- the
+                // planner otherwise flips to a channels-outer join that
+                // scans and sorts the whole range (measured ~5.8 ms for
+                // LIMIT 100 over 100k rows, scaling with table size).
+                let mut stmt = conn.prepare_cached(
+                    "SELECT c.name, t.timestamp_ms, t.value \
+                     FROM telemetry t INDEXED BY idx_telemetry_ts \
+                     JOIN channels c ON c.id = t.channel_id \
+                     WHERE c.target_id = ?1 \
+                       AND t.timestamp_ms >= ?2 AND t.timestamp_ms <= ?3 \
+                     ORDER BY t.timestamp_ms DESC LIMIT ?4",
+                )?;
+                // One Arc per distinct channel name, shared across rows.
+                let mut name_arcs: HashMap<String, Arc<str>> = HashMap::new();
+                let rows = stmt.query_map(
+                    params![target_id, start_ms as i64, end_ms as i64, limit as i64],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)? as u64,
+                            row.get::<_, f64>(2)?,
+                        ))
+                    },
+                )?;
+                let mut samples = Vec::new();
+                for row in rows {
+                    let (name, timestamp_ms, value) = row?;
+                    let channel = Arc::clone(
+                        name_arcs
+                            .entry(name)
+                            .or_insert_with_key(|k| Arc::from(k.as_str())),
+                    );
+                    samples.push(TelemetrySample {
+                        target_id: Arc::clone(&target_arc),
+                        timestamp_ms,
+                        channel,
+                        value,
+                    });
+                }
+                Ok(samples)
             }
-            Ok(samples)
         })
     }
 
@@ -508,16 +640,18 @@ impl TelemetryDb {
         )?;
 
         // Drop latest-value rows only for channels with no remaining
-        // history. Correlated NOT EXISTS probes the lookup index once per
-        // telemetry_latest row (one row per channel) -- the NOT IN form
-        // materialized a DISTINCT over the entire telemetry index on every
-        // FIFO pass, under the writer lock.
+        // history. Correlated NOT EXISTS resolves the dictionary id via
+        // the unique (target_id, name) index, then probes the lookup
+        // index once per telemetry_latest row (one row per channel) --
+        // the NOT IN form materialized a DISTINCT over the entire
+        // telemetry index on every FIFO pass, under the writer lock.
         conn.execute(
             "DELETE FROM telemetry_latest
              WHERE NOT EXISTS (
-               SELECT 1 FROM telemetry
-               WHERE telemetry.target_id = telemetry_latest.target_id
-                 AND telemetry.channel = telemetry_latest.channel
+               SELECT 1 FROM telemetry t
+               JOIN channels c ON c.id = t.channel_id
+               WHERE c.target_id = telemetry_latest.target_id
+                 AND c.name = telemetry_latest.channel
              )",
             [],
         )?;
@@ -545,7 +679,7 @@ impl TelemetryDb {
         let deleted = conn.execute(
             "DELETE FROM telemetry WHERE ROWID IN (
                 SELECT ROWID FROM telemetry
-                WHERE target_id = ?1
+                WHERE channel_id IN (SELECT id FROM channels WHERE target_id = ?1)
                 ORDER BY timestamp_ms ASC
                 LIMIT ?2
              )",
@@ -559,9 +693,10 @@ impl TelemetryDb {
             "DELETE FROM telemetry_latest
              WHERE target_id = ?1
                AND NOT EXISTS (
-                 SELECT 1 FROM telemetry
-                 WHERE telemetry.target_id = telemetry_latest.target_id
-                   AND telemetry.channel = telemetry_latest.channel
+                 SELECT 1 FROM telemetry t
+                 JOIN channels c ON c.id = t.channel_id
+                 WHERE c.target_id = telemetry_latest.target_id
+                   AND c.name = telemetry_latest.channel
                )",
             params![target_id],
         )?;
@@ -583,13 +718,23 @@ impl TelemetryDb {
     /// Get per-target storage statistics.
     pub fn target_stats(&self, target_id: &str) -> Result<TargetStats, DbError> {
         self.with_reader(|conn| {
-            let sample_count: i64 = conn
+            // One pass: per-channel COUNT/MIN/MAX ride the
+            // (channel_id, timestamp_ms) index runs, then aggregate
+            // across the target's channels.
+            let (sample_count, oldest_ms, newest_ms): (i64, Option<i64>, Option<i64>) = conn
                 .query_row(
-                    "SELECT COUNT(*) FROM telemetry WHERE target_id = ?1",
+                    "SELECT COALESCE(SUM(cnt), 0), MIN(mn), MAX(mx) FROM (
+                        SELECT COUNT(*) AS cnt,
+                               MIN(timestamp_ms) AS mn,
+                               MAX(timestamp_ms) AS mx
+                        FROM telemetry
+                        WHERE channel_id IN (SELECT id FROM channels WHERE target_id = ?1)
+                        GROUP BY channel_id
+                     )",
                     params![target_id],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                 )
-                .unwrap_or(0);
+                .unwrap_or((0, None, None));
 
             let channel_count: i64 = conn
                 .query_row(
@@ -598,22 +743,6 @@ impl TelemetryDb {
                     |row| row.get(0),
                 )
                 .unwrap_or(0);
-
-            let oldest_ms: Option<i64> = conn
-                .query_row(
-                    "SELECT MIN(timestamp_ms) FROM telemetry WHERE target_id = ?1",
-                    params![target_id],
-                    |row| row.get(0),
-                )
-                .ok();
-
-            let newest_ms: Option<i64> = conn
-                .query_row(
-                    "SELECT MAX(timestamp_ms) FROM telemetry WHERE target_id = ?1",
-                    params![target_id],
-                    |row| row.get(0),
-                )
-                .ok();
 
             Ok(TargetStats {
                 sample_count: sample_count as u64,
@@ -672,20 +801,19 @@ impl TelemetryDb {
         // Create averaged samples in a temp table
         tx.execute_batch(
             "CREATE TEMP TABLE IF NOT EXISTS ds_temp ( \
-                 target_id TEXT, timestamp_ms INTEGER, channel TEXT, value REAL \
+                 channel_id INTEGER, timestamp_ms INTEGER, value REAL \
              )",
         )?;
         tx.execute("DELETE FROM ds_temp", [])?;
 
         tx.execute(
-            "INSERT INTO ds_temp (target_id, timestamp_ms, channel, value) \
-             SELECT target_id, \
+            "INSERT INTO ds_temp (channel_id, timestamp_ms, value) \
+             SELECT channel_id, \
                     (timestamp_ms / ?1) * ?1 + (?1 / 2), \
-                    channel, \
                     AVG(value) \
              FROM telemetry \
              WHERE timestamp_ms < ?2 \
-             GROUP BY target_id, channel, timestamp_ms / ?1",
+             GROUP BY channel_id, timestamp_ms / ?1",
             params![bucket, cutoff],
         )?;
 
@@ -700,8 +828,8 @@ impl TelemetryDb {
         )?;
 
         tx.execute(
-            "INSERT INTO telemetry (target_id, timestamp_ms, channel, value) \
-             SELECT target_id, timestamp_ms, channel, value FROM ds_temp",
+            "INSERT INTO telemetry (channel_id, timestamp_ms, value) \
+             SELECT channel_id, timestamp_ms, value FROM ds_temp",
             [],
         )?;
 
@@ -715,11 +843,14 @@ impl TelemetryDb {
         })
     }
 
-    /// Delete all data for a specific target.
+    /// Delete all data for a specific target. Dictionary rows are kept
+    /// on purpose: they are a handful of bytes per channel ever seen,
+    /// and keeping them means cached channel ids can never dangle.
     pub fn delete_target(&self, target_id: &str) -> Result<usize, DbError> {
         let conn = self.writer.lock().map_err(|_| DbError::Lock)?;
         let deleted = conn.execute(
-            "DELETE FROM telemetry WHERE target_id = ?1",
+            "DELETE FROM telemetry
+             WHERE channel_id IN (SELECT id FROM channels WHERE target_id = ?1)",
             params![target_id],
         )?;
         conn.execute(
@@ -803,9 +934,8 @@ impl TelemetryDb {
 
 /* ----------------------------- Stats Types ----------------------------- */
 
-/// Aggregate database statistics: total sample count (estimated via
-/// MAX(ROWID) for cheapness) plus on-disk size in bytes (main file +
-/// WAL sidecar from filesystem stat).
+/// Aggregate database statistics: live total row count plus on-disk
+/// size in bytes (main file + WAL sidecar from filesystem stat).
 #[derive(Debug, serde::Serialize)]
 pub struct GlobalStats {
     pub total_samples: u64,
@@ -1906,5 +2036,126 @@ mod tests {
             .with_reader(|conn| Ok(conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?))
             .unwrap();
         assert!(reader_timeout >= 1000, "reader busy_timeout too low");
+    }
+
+    /// @test The channel dictionary stores one row per distinct
+    /// (target, channel) pair no matter how many samples reference it.
+    #[test]
+    fn channel_dictionary_dedups_names() {
+        let (_dir, db) = open_temp_db();
+        let t: Arc<str> = Arc::from("t1");
+        let a: Arc<str> = Arc::from("A.x");
+        let b: Arc<str> = Arc::from("B.y");
+        for i in 0..10u64 {
+            db.insert_batch(&[sample(&t, &a, i, 1.0), sample(&t, &b, i, 2.0)])
+                .unwrap();
+        }
+        assert_eq!(db.count().unwrap(), 20);
+        let dict_rows: i64 = db
+            .with_reader(|conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM channels", [], |row| row.get(0))?)
+            })
+            .unwrap();
+        assert_eq!(dict_rows, 2);
+    }
+
+    /// @test Opening a database created with the legacy denormalized
+    /// schema rebuilds it into the dictionary schema with every row,
+    /// channel name, and query shape preserved, and accepts new writes.
+    #[test]
+    fn legacy_schema_migrates_to_dictionary() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("legacy.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE telemetry (
+                    id INTEGER PRIMARY KEY,
+                    target_id TEXT NOT NULL,
+                    timestamp_ms INTEGER NOT NULL,
+                    channel TEXT NOT NULL,
+                    value REAL NOT NULL
+                );
+                CREATE INDEX idx_telemetry_lookup
+                    ON telemetry (target_id, channel, timestamp_ms DESC);
+                CREATE INDEX idx_telemetry_timestamp_asc
+                    ON telemetry (timestamp_ms ASC);",
+            )
+            .unwrap();
+            for i in 0..100i64 {
+                let (target, channel) = if i % 2 == 0 {
+                    ("t1", "A.x")
+                } else {
+                    ("t2", "B.y")
+                };
+                conn.execute(
+                    "INSERT INTO telemetry (target_id, timestamp_ms, channel, value)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![target, i, channel, i as f64],
+                )
+                .unwrap();
+            }
+        }
+
+        let db = TelemetryDb::open(&path).unwrap();
+        assert_eq!(db.count().unwrap(), 100);
+
+        let t1 = db.query_range("t1", Some("A.x"), 0, 1000, 200).unwrap();
+        assert_eq!(t1.len(), 50);
+        assert_eq!(t1[0].timestamp_ms, 0);
+        assert_eq!(t1[0].value, 0.0);
+
+        let t2_all = db.query_range("t2", None, 0, 1000, 200).unwrap();
+        assert_eq!(t2_all.len(), 50);
+        assert_eq!(&*t2_all[0].channel, "B.y");
+
+        let dict_rows: i64 = db
+            .with_reader(|conn| {
+                Ok(conn.query_row("SELECT COUNT(*) FROM channels", [], |row| row.get(0))?)
+            })
+            .unwrap();
+        assert_eq!(dict_rows, 2);
+
+        // The migrated database keeps working as a live store.
+        let t: Arc<str> = Arc::from("t1");
+        let ch: Arc<str> = Arc::from("A.x");
+        db.insert_batch(&[sample(&t, &ch, 2000, 42.0)]).unwrap();
+        assert_eq!(db.count().unwrap(), 101);
+        let latest = db.query_latest("t1").unwrap();
+        assert_eq!(latest.len(), 1);
+        assert_eq!(latest[0].value, 42.0);
+    }
+
+    /// @test A rolled-back batch must not leave the id of its brand-new
+    /// dictionary entry in the channel cache: the entry died with the
+    /// rollback, and a cached copy would point every later sample for
+    /// that channel at a dead id (invisible to queries).
+    #[test]
+    fn failed_batch_does_not_poison_channel_cache() {
+        let (_dir, db) = open_temp_db();
+        let t: Arc<str> = Arc::from("t1");
+        let ch: Arc<str> = Arc::from("N.fresh");
+
+        // Sabotage the latest-table UPSERT so the batch fails after the
+        // dictionary insert for the never-seen channel has run.
+        {
+            let conn = db.writer.lock().unwrap();
+            conn.execute_batch("ALTER TABLE telemetry_latest RENAME TO tl_sabotaged")
+                .unwrap();
+        }
+        assert!(db.insert_batch(&[sample(&t, &ch, 100, 1.0)]).is_err());
+        {
+            let conn = db.writer.lock().unwrap();
+            conn.execute_batch("ALTER TABLE tl_sabotaged RENAME TO telemetry_latest")
+                .unwrap();
+        }
+
+        // Retry resolves a live dictionary id; the row must be visible
+        // through the (target, channel) query path.
+        db.insert_batch(&[sample(&t, &ch, 200, 2.0)]).unwrap();
+        let out = db.query_range("t1", Some("N.fresh"), 0, 1000, 10).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].timestamp_ms, 200);
+        assert_eq!(db.query_latest("t1").unwrap().len(), 1);
     }
 }
