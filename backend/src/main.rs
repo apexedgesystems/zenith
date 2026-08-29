@@ -30,7 +30,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
-use crate::config::ServerConfig;
+use crate::config::{FifoStrategy, ServerConfig};
 use crate::core::aproto_client::{AprotoClient, PushTelemetryPacket};
 use crate::core::config_manager::StructDictionary;
 use crate::core::metrics::TargetMetrics;
@@ -95,6 +95,20 @@ struct SharedState {
     /// Per-IP token bucket for command rate limiting. Engaged only when
     /// auth is enabled (so dev mode is unconstrained).
     rate_limiter: Arc<RateLimiter>,
+    /// Live storage-pressure numbers shared with /api/telemetry/stats.
+    storage_vitals: Arc<StorageVitals>,
+}
+
+/// Storage pressure measured by the maintenance loop: the configured
+/// cap and the net file growth per minute (signed -- FIFO eviction and
+/// vacuum legitimately shrink the file). Handlers project time-to-cap
+/// from these instead of guessing.
+struct StorageVitals {
+    cap_bytes: u64,
+    fill_bytes_per_min: std::sync::atomic::AtomicI64,
+    /// File size at the previous tick; 0 means "no tick yet", which
+    /// suppresses the rate until a real delta exists.
+    last_size: std::sync::atomic::AtomicU64,
 }
 
 type AppState = Arc<RwLock<SharedState>>;
@@ -1486,6 +1500,27 @@ fn default_limit() -> usize {
     10000
 }
 
+/// Run a blocking TelemetryDb operation on tokio's blocking pool.
+/// Range scans, CSV export, downsample, and trims touch disk for
+/// milliseconds (and a contended writer can hold SQLite's busy
+/// timeout for seconds); run inline they would stall the async
+/// worker that serves every other request in the meantime.
+async fn db_blocking<T, F>(db: Arc<TelemetryDb>, f: F) -> Result<T, (StatusCode, String)>
+where
+    T: Send + 'static,
+    F: FnOnce(&TelemetryDb) -> Result<T, crate::storage::telemetry_db::DbError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || f(&db))
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("blocking task: {e}"),
+            )
+        })?
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")))
+}
+
 async fn telemetry_history(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1498,15 +1533,17 @@ async fn telemetry_history(
     let db = st.db.clone();
     drop(st); // Release lock before DB query
 
-    let samples = db
-        .query_range(
+    let limit = query.clamped_limit();
+    let samples = db_blocking(db, move |db| {
+        db.query_range(
             &id,
             query.channel.as_deref(),
             query.start_ms,
             query.end_ms,
-            query.clamped_limit(),
+            limit,
         )
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+    })
+    .await?;
 
     Ok(Json(serde_json::json!({
         "count": samples.len(),
@@ -1723,22 +1760,27 @@ async fn telemetry_csv(
     let db = st.db.clone();
     drop(st);
 
-    let samples = db
-        .query_range(
-            &id,
+    // Query AND row formatting both belong on the blocking pool: at
+    // the 100k-row limit the string build alone is milliseconds.
+    let limit = query.clamped_limit();
+    let target = id.clone();
+    let csv = db_blocking(db, move |db| {
+        let samples = db.query_range(
+            &target,
             query.channel.as_deref(),
             query.start_ms,
             query.end_ms,
-            query.clamped_limit(),
-        )
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
-
-    // ~40 bytes/row; the clamp bounds worst case to a few MB.
-    let mut csv = String::with_capacity(32 + samples.len() * 40);
-    csv.push_str("timestamp_ms,channel,value\n");
-    for s in &samples {
-        csv.push_str(&format!("{},{},{}\n", s.timestamp_ms, s.channel, s.value));
-    }
+            limit,
+        )?;
+        // ~40 bytes/row; the clamp bounds worst case to a few MB.
+        let mut csv = String::with_capacity(32 + samples.len() * 40);
+        csv.push_str("timestamp_ms,channel,value\n");
+        for s in &samples {
+            csv.push_str(&format!("{},{},{}\n", s.timestamp_ms, s.channel, s.value));
+        }
+        Ok(csv)
+    })
+    .await?;
 
     Ok((
         StatusCode::OK,
@@ -1758,16 +1800,33 @@ async fn telemetry_stats(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let st = state.read().await;
     let db = st.db.clone();
+    let vitals = st.storage_vitals.clone();
     drop(st);
 
-    let count = db
-        .count()
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
     let size_bytes = db.db_size_bytes().unwrap_or(0);
+    let count = db_blocking(db, |db| db.count()).await?;
+
+    // Effective-retention picture: the cap, the measured net growth,
+    // and the projection they imply. fill <= 0 (empty DB, holding at
+    // the cap, or shrinking) yields no projection rather than a fake
+    // one.
+    let cap_bytes = vitals.cap_bytes;
+    let fill_per_min = vitals
+        .fill_bytes_per_min
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let projected_secs_to_cap = if fill_per_min > 0 && size_bytes < cap_bytes {
+        Some((cap_bytes - size_bytes) * 60 / fill_per_min as u64)
+    } else {
+        None
+    };
+
     Ok(Json(serde_json::json!({
         "total_samples": count,
         "db_size_bytes": size_bytes,
         "db_size_mb": format!("{:.2}", size_bytes as f64 / 1_048_576.0),
+        "cap_bytes": cap_bytes,
+        "fill_bytes_per_min": fill_per_min,
+        "projected_secs_to_cap": projected_secs_to_cap,
     })))
 }
 
@@ -1782,9 +1841,7 @@ async fn target_storage_stats(
     let db = st.db.clone();
     drop(st);
 
-    let stats = db
-        .target_stats(&id)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+    let stats = db_blocking(db, move |db| db.target_stats(&id)).await?;
     Ok(Json(serde_json::to_value(stats).unwrap_or_default()))
 }
 
@@ -1796,9 +1853,7 @@ async fn downsample_data(
     drop(st);
 
     // Keep last hour at full resolution, downsample older to 1-minute averages
-    let result = db
-        .downsample(3_600_000, 60_000)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+    let result = db_blocking(db, |db| db.downsample(3_600_000, 60_000)).await?;
     Ok(Json(serde_json::to_value(result).unwrap_or_default()))
 }
 
@@ -1815,7 +1870,18 @@ async fn delete_target_data(
     let db = st.db.clone();
     drop(st);
 
-    let result = db.delete_target(&id);
+    let result = {
+        let db = db.clone();
+        let id = id.clone();
+        tokio::task::spawn_blocking(move || db.delete_target(&id))
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("blocking task: {e}"),
+                )
+            })?
+    };
     let ip_str = addr.ip().to_string();
     match result {
         Ok(deleted) => {
@@ -1875,15 +1941,26 @@ async fn trim_target_data(
     let count = match body.count {
         Some(n) if n > 0 => n,
         _ => {
-            let stats = db
-                .target_stats(&id)
-                .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+            let db = db.clone();
+            let id = id.clone();
+            let stats = db_blocking(db, move |db| db.target_stats(&id)).await?;
             ((stats.sample_count / 4).max(1)) as usize
         }
     };
 
     let ip_str = addr.ip().to_string();
-    let result = db.delete_oldest_for_target(&id, count);
+    let result = {
+        let db = db.clone();
+        let id = id.clone();
+        tokio::task::spawn_blocking(move || db.delete_oldest_for_target(&id, count))
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("blocking task: {e}"),
+                )
+            })?
+    };
     match result {
         Ok(deleted) => {
             record_audit(
@@ -2522,9 +2599,9 @@ async fn list_audit(
     let st = state.read().await;
     let db = st.db.clone();
     drop(st);
-    let entries = db
-        .query_audit(query.limit.min(1000), query.offset)
-        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+    let limit = query.limit.min(1000);
+    let offset = query.offset;
+    let entries = db_blocking(db, move |db| db.query_audit(limit, offset)).await?;
     Ok(Json(serde_json::json!({ "entries": entries })))
 }
 
@@ -2881,14 +2958,19 @@ fn spawn_sample_writer(
         batch.clear();
     }
 
-    tokio::spawn(async move {
+    // A dedicated OS thread, not a tokio task: every iteration ends in
+    // a blocking SQLite write, and a contended writer (FIFO delete,
+    // vacuum, checkpoint) can hold it for the full busy_timeout. On a
+    // runtime worker that would stall unrelated request handling; on
+    // its own thread it stalls nothing but this target's ingest.
+    std::thread::spawn(move || {
         const LAG_WARN_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
         let mut batch: Vec<TelemetrySample> = Vec::with_capacity(64);
         let mut failed_batches: u64 = 0;
         let mut last_err_log: Option<std::time::Instant> = None;
         let mut last_lag_warn: Option<std::time::Instant> = None;
         loop {
-            match rx.recv().await {
+            match rx.blocking_recv() {
                 Ok(sample) => {
                     batch.push(sample);
                     // Flush in batches of 50 or when channel is empty
@@ -3167,12 +3249,16 @@ async fn main() {
         );
     }
 
-    // Spawn periodic maintenance (every 5 minutes)
+    // Spawn periodic maintenance (every 60 seconds)
+    // - Measure net fill rate for storage vitals
+    // - Size-based FIFO when the DB exceeds its cap (fair waterline
+    //   across targets by default; see storage.fifo_strategy)
     // - Prune samples older than retention
-    // - Downsample: keep last hour at full resolution, older at 1-minute averages
-    // - Size-based FIFO: when DB exceeds max size, delete oldest 10%
+    // - Prune audit rows beyond their retention
     // - Clean up stale telemetry_latest entries and old user layouts
     // - WAL checkpoint after large deletions
+    // Downsampling is operator-triggered only (POST /api/telemetry/
+    // downsample); nothing here rewrites history automatically.
     let db_maint = db.clone();
     let max_db_mb = config
         .storage
@@ -3187,52 +3273,128 @@ async fn main() {
     );
     let retention_ms = config.storage.retention_hours as u64 * 3600 * 1000;
     let audit_retention_days = config.storage.audit_retention_days;
+    let fifo_strategy = config.storage.fifo_strategy;
+    let storage_vitals = Arc::new(StorageVitals {
+        cap_bytes: max_db_bytes,
+        fill_bytes_per_min: std::sync::atomic::AtomicI64::new(0),
+        last_size: std::sync::atomic::AtomicU64::new(0),
+    });
+    let vitals_maint = storage_vitals.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
             interval.tick().await;
 
-            // Size-based FIFO: if DB exceeds max size, delete enough to free space
-            if let Ok(stats) = db_maint.global_stats() {
-                if stats.db_size_bytes > max_db_bytes && stats.total_samples > 0 {
-                    // Calculate bytes to free, estimate samples to delete
-                    let bytes_over = stats.db_size_bytes - max_db_bytes;
-                    let avg_bytes_per_sample = stats.db_size_bytes / stats.total_samples.max(1);
-                    // Delete 120% of estimated needed to account for index/overhead
-                    let to_delete = ((bytes_over / avg_bytes_per_sample.max(1)) * 6 / 5).max(100);
-                    if let Ok(n) = db_maint.delete_oldest(to_delete as usize) {
-                        tracing::info!(
-                            "DB size {:.0}MB > {:.0}MB limit, FIFO deleted {} oldest samples (~{:.0}MB)",
-                            stats.db_size_bytes as f64 / 1_048_576.0,
-                            max_db_bytes as f64 / 1_048_576.0,
-                            n,
-                            (n as u64 * avg_bytes_per_sample) as f64 / 1_048_576.0
-                        );
-                        // Reclaim freed pages immediately
-                        let _ = db_maint.incremental_vacuum();
+            // The whole tick is blocking DB work -- FIFO deletes and
+            // vacuum can hold the writer for seconds on a full table --
+            // so it runs on the blocking pool, never on a runtime worker.
+            let db = db_maint.clone();
+            let vitals = vitals_maint.clone();
+            let tick = tokio::task::spawn_blocking(move || {
+                // Net fill rate: delta of pre-eviction file size across
+                // ticks (the interval is 60s, so a delta IS per-minute).
+                // Signed on purpose: a capped database hovering at its
+                // limit reports ~0, which is the demo's success signal.
+                let size_now = db.db_size_bytes().unwrap_or(0);
+                let prev = vitals
+                    .last_size
+                    .swap(size_now, std::sync::atomic::Ordering::Relaxed);
+                if prev > 0 {
+                    vitals.fill_bytes_per_min.store(
+                        size_now as i64 - prev as i64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                }
+                // Size-based FIFO: if DB exceeds max size, delete enough to free space
+                if let Ok(stats) = db.global_stats() {
+                    if stats.db_size_bytes > max_db_bytes && stats.total_samples > 0 {
+                        // Calculate bytes to free, estimate samples to delete
+                        let bytes_over = stats.db_size_bytes - max_db_bytes;
+                        let avg_bytes_per_sample = stats.db_size_bytes / stats.total_samples.max(1);
+                        // Delete 120% of estimated needed to account for index/overhead
+                        let to_delete =
+                            ((bytes_over / avg_bytes_per_sample.max(1)) * 6 / 5).max(100);
+
+                        // Fair strategy waterlines the largest holders so
+                        // a chatty target cannot evict a quiet target's
+                        // only history; global deletes oldest regardless
+                        // of owner (config escape hatch).
+                        let deleted: usize = match fifo_strategy {
+                            FifoStrategy::Fair => match db.target_sample_counts() {
+                                Ok(per_target) => {
+                                    let allocs = crate::storage::telemetry_db::allocate_evictions(
+                                        &per_target,
+                                        to_delete,
+                                    );
+                                    let mut total = 0usize;
+                                    for (target, n) in &allocs {
+                                        match db.delete_oldest_for_target(target, *n as usize) {
+                                            Ok(d) => {
+                                                total += d;
+                                                tracing::info!(
+                                                    "FIFO(fair) evicted {} oldest samples from {}",
+                                                    d,
+                                                    target
+                                                );
+                                            }
+                                            Err(e) => tracing::warn!(
+                                                "FIFO(fair) eviction failed for {}: {}",
+                                                target,
+                                                e
+                                            ),
+                                        }
+                                    }
+                                    total
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "per-target counts unavailable ({}), falling back to global FIFO",
+                                        e
+                                    );
+                                    db.delete_oldest(to_delete as usize).unwrap_or(0)
+                                }
+                            },
+                            FifoStrategy::Global => db.delete_oldest(to_delete as usize).unwrap_or(0),
+                        };
+
+                        if deleted > 0 {
+                            tracing::info!(
+                                "DB size {:.0}MB > {:.0}MB limit, FIFO deleted {} oldest samples (~{:.0}MB)",
+                                stats.db_size_bytes as f64 / 1_048_576.0,
+                                max_db_bytes as f64 / 1_048_576.0,
+                                deleted,
+                                (deleted as u64 * avg_bytes_per_sample) as f64 / 1_048_576.0
+                            );
+                            // Reclaim freed pages immediately
+                            let _ = db.incremental_vacuum();
+                        }
                     }
                 }
-            }
 
-            // Time-based retention as a safety net
-            match db_maint.prune(retention_ms) {
-                Ok(n) if n > 0 => tracing::info!("Pruned {} samples beyond retention", n),
-                _ => {}
-            }
-
-            // Audit retention (0 = keep forever)
-            if audit_retention_days > 0 {
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
-                let cutoff = now_ms.saturating_sub(audit_retention_days as u64 * 86_400_000);
-                match db_maint.prune_audit(cutoff) {
-                    Ok(n) if n > 0 => {
-                        tracing::info!("Pruned {} audit rows beyond retention", n)
-                    }
+                // Time-based retention as a safety net
+                match db.prune(retention_ms) {
+                    Ok(n) if n > 0 => tracing::info!("Pruned {} samples beyond retention", n),
                     _ => {}
                 }
+
+                // Audit retention (0 = keep forever)
+                if audit_retention_days > 0 {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    let cutoff = now_ms.saturating_sub(audit_retention_days as u64 * 86_400_000);
+                    match db.prune_audit(cutoff) {
+                        Ok(n) if n > 0 => {
+                            tracing::info!("Pruned {} audit rows beyond retention", n)
+                        }
+                        _ => {}
+                    }
+                }
+            })
+            .await;
+            if let Err(e) = tick {
+                tracing::warn!("maintenance tick panicked: {}", e);
             }
         }
     });
@@ -3254,6 +3416,7 @@ async fn main() {
         db,
         struct_dicts: global_dicts,
         rate_limiter: Arc::new(RateLimiter::default()),
+        storage_vitals,
     }));
 
     // Honor `auto_connect = true` on each target. We dispatch the

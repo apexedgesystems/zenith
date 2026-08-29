@@ -15,6 +15,10 @@ secret = "change-me-in-production"
 # volume, so history would not survive container recreation.
 path = "/var/lib/zenith/zenith.db"
 retention_hours = 24
+# max_db_size_mb = 2048    # size cap before FIFO eviction (default 2048)
+# fifo_strategy = "fair"   # "fair" waterlines evictions across targets
+#                          # so a chatty target cannot evict a quiet
+#                          # one's history; "global" is owner-blind
 
 # Target: Local SIL ops demo (dev only; 172.21.0.1 is the compose
 # network gateway, i.e. this host as seen from the zenith container)

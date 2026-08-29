@@ -29,6 +29,8 @@ fn make_dict() -> StructDictionary {
                     category: "OUTPUT".to_string(),
                     size: 8,
                     opcode: None,
+                    layout_hash: None,
+                    canonical_spec: None,
                     fields: vec![
                         FieldDef {
                             name: "output".to_string(),
@@ -38,6 +40,7 @@ fn make_dict() -> StructDictionary {
                             value: serde_json::Value::Null,
                             element_type: None,
                             dims: None,
+                            constraints: None,
                         },
                         FieldDef {
                             name: "phase".to_string(),
@@ -47,6 +50,7 @@ fn make_dict() -> StructDictionary {
                             value: serde_json::Value::Null,
                             element_type: None,
                             dims: None,
+                            constraints: None,
                         },
                     ],
                 },
@@ -57,6 +61,8 @@ fn make_dict() -> StructDictionary {
                     category: "STATE".to_string(),
                     size: 48,
                     opcode: None,
+                    layout_hash: None,
+                    canonical_spec: None,
                     fields: vec![
                         FieldDef {
                             name: "output".to_string(),
@@ -66,6 +72,7 @@ fn make_dict() -> StructDictionary {
                             value: serde_json::Value::Null,
                             element_type: None,
                             dims: None,
+                            constraints: None,
                         },
                         FieldDef {
                             name: "phase".to_string(),
@@ -75,6 +82,7 @@ fn make_dict() -> StructDictionary {
                             value: serde_json::Value::Null,
                             element_type: None,
                             dims: None,
+                            constraints: None,
                         },
                         FieldDef {
                             name: "cycleCount".to_string(),
@@ -84,6 +92,7 @@ fn make_dict() -> StructDictionary {
                             value: serde_json::Value::Null,
                             element_type: None,
                             dims: None,
+                            constraints: None,
                         },
                         FieldDef {
                             name: "amplitude".to_string(),
@@ -93,6 +102,7 @@ fn make_dict() -> StructDictionary {
                             value: serde_json::Value::Null,
                             element_type: None,
                             dims: None,
+                            constraints: None,
                         },
                         FieldDef {
                             name: "frequency".to_string(),
@@ -102,6 +112,7 @@ fn make_dict() -> StructDictionary {
                             value: serde_json::Value::Null,
                             element_type: None,
                             dims: None,
+                            constraints: None,
                         },
                         FieldDef {
                             name: "offset".to_string(),
@@ -111,6 +122,7 @@ fn make_dict() -> StructDictionary {
                             value: serde_json::Value::Null,
                             element_type: None,
                             dims: None,
+                            constraints: None,
                         },
                         FieldDef {
                             name: "lastUpdateMs".to_string(),
@@ -120,6 +132,7 @@ fn make_dict() -> StructDictionary {
                             value: serde_json::Value::Null,
                             element_type: None,
                             dims: None,
+                            constraints: None,
                         },
                         FieldDef {
                             name: "errorCount".to_string(),
@@ -129,6 +142,7 @@ fn make_dict() -> StructDictionary {
                             value: serde_json::Value::Null,
                             element_type: None,
                             dims: None,
+                            constraints: None,
                         },
                         FieldDef {
                             name: "lastSampleNs".to_string(),
@@ -138,6 +152,7 @@ fn make_dict() -> StructDictionary {
                             value: serde_json::Value::Null,
                             element_type: None,
                             dims: None,
+                            constraints: None,
                         },
                         FieldDef {
                             name: "warmupRemain".to_string(),
@@ -147,6 +162,7 @@ fn make_dict() -> StructDictionary {
                             value: serde_json::Value::Null,
                             element_type: None,
                             dims: None,
+                            constraints: None,
                         },
                         FieldDef {
                             name: "padding".to_string(),
@@ -156,6 +172,7 @@ fn make_dict() -> StructDictionary {
                             value: serde_json::Value::Null,
                             element_type: None,
                             dims: None,
+                            constraints: None,
                         },
                     ],
                 },
@@ -172,6 +189,8 @@ fn make_dict() -> StructDictionary {
                 category: "OUTPUT".to_string(),
                 size: 24,
                 opcode: None,
+                layout_hash: None,
+                canonical_spec: None,
                 fields: vec![
                     FieldDef {
                         name: "cpuLoad".to_string(),
@@ -181,6 +200,7 @@ fn make_dict() -> StructDictionary {
                         value: serde_json::Value::Null,
                         element_type: None,
                         dims: None,
+                        constraints: None,
                     },
                     FieldDef {
                         name: "tempC".to_string(),
@@ -190,6 +210,7 @@ fn make_dict() -> StructDictionary {
                         value: serde_json::Value::Null,
                         element_type: None,
                         dims: None,
+                        constraints: None,
                     },
                     FieldDef {
                         name: "ramKb".to_string(),
@@ -199,6 +220,7 @@ fn make_dict() -> StructDictionary {
                         value: serde_json::Value::Null,
                         element_type: None,
                         dims: None,
+                        constraints: None,
                     },
                     FieldDef {
                         name: "fdCount".to_string(),
@@ -208,6 +230,7 @@ fn make_dict() -> StructDictionary {
                         value: serde_json::Value::Null,
                         element_type: None,
                         dims: None,
+                        constraints: None,
                     },
                     FieldDef {
                         name: "uptimeS".to_string(),
@@ -217,6 +240,7 @@ fn make_dict() -> StructDictionary {
                         value: serde_json::Value::Null,
                         element_type: None,
                         dims: None,
+                        constraints: None,
                     },
                 ],
             },
