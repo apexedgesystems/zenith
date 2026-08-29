@@ -783,7 +783,8 @@ mod tests {
     /// fields, the right number of FILE_CHUNKs in order, and FILE_END.
     #[tokio::test]
     async fn upload_file_chunks_and_crc_are_correct() {
-        let seen: Arc<Mutex<Vec<(u16, Vec<u8>)>>> = Arc::new(Mutex::new(Vec::new()));
+        type SeenPackets = Arc<Mutex<Vec<(u16, Vec<u8>)>>>;
+        let seen: SeenPackets = Arc::new(Mutex::new(Vec::new()));
         let seen_writer = seen.clone();
         let addr = spawn_fake_target(move |pkt| {
             seen_writer

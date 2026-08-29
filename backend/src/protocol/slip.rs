@@ -183,7 +183,7 @@ mod tests {
         // Build a frame larger than MAX_FRAME_SIZE; verify it's dropped
         // and the decoder recovers for the next valid frame.
         let mut stream = vec![END];
-        stream.extend(std::iter::repeat(0xAA).take(MAX_FRAME_SIZE + 100));
+        stream.extend(std::iter::repeat_n(0xAA, MAX_FRAME_SIZE + 100));
         stream.push(END);
         // Append a valid frame after
         stream.extend_from_slice(&encode(b"after"));
