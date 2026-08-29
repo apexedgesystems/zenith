@@ -109,6 +109,7 @@ export interface TargetStorage {
   byte_estimate: number;
   oldest_ms: number | null;
   newest_ms: number | null;
+  span_seconds: number | null;
 }
 
 const isStorage: Validator<TargetStorage> = (v) => {
@@ -146,6 +147,68 @@ export function useTargetStorage(targetId: string | null) {
     enabled: targetId !== null,
     refetchInterval: 10_000,
     queryFn: () => request(`/targets/${targetId}/storage`, isStorage),
+  });
+}
+
+/* ------------------------------ storage vitals ------------------------------ */
+
+export interface StorageVitals {
+  total_samples: number;
+  db_size_bytes: number;
+  wal_bytes: number;
+  audit_rows: number;
+  cap_bytes: number;
+  fill_bytes_per_min: number;
+  projected_secs_to_cap: number | null;
+  fifo_evicted_samples: number;
+  retention_pruned_samples: number;
+}
+
+const isStorageVitals: Validator<StorageVitals> = (v) => {
+  if (!isObject(v)) return "expected object";
+  for (const k of [
+    "total_samples",
+    "db_size_bytes",
+    "wal_bytes",
+    "audit_rows",
+    "cap_bytes",
+    "fill_bytes_per_min",
+    "fifo_evicted_samples",
+    "retention_pruned_samples",
+  ]) {
+    const p = field(v, k, "number");
+    if (p !== null) return p;
+  }
+  // projected_secs_to_cap is number | null by design.
+  const p = v.projected_secs_to_cap;
+  return p === null || typeof p === "number"
+    ? null
+    : "projected_secs_to_cap: expected number or null";
+};
+
+/** Global storage pressure for the Storage page: cap, fill rate,
+ *  projection, and cumulative eviction counters. */
+export function useStorageVitals() {
+  return useQuery({
+    queryKey: ["storage-vitals"],
+    refetchInterval: 5000,
+    queryFn: () => request("/telemetry/stats", isStorageVitals),
+  });
+}
+
+/** The whole per-target metrics map in one request -- the Storage
+ *  page's accounting strip needs every target at once, and /metrics
+ *  already returns them all. */
+export function useAllMetrics() {
+  return useQuery({
+    queryKey: ["metrics-all"],
+    refetchInterval: 5000,
+    queryFn: () =>
+      request(`/metrics`, (v) =>
+        isObject(v) && isObject(v.targets) ? null : "expected targets map",
+      ),
+    select: (d) =>
+      (d as { targets: Record<string, PipelineMetrics> }).targets ?? {},
   });
 }
 

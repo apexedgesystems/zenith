@@ -955,6 +955,12 @@ impl TelemetryDb {
     /// Get database file size in bytes (main file + WAL sidecar).
     /// Uses filesystem stat -- no DB lock taken, no checkpoint forced.
     pub fn db_size_bytes(&self) -> Result<u64, DbError> {
+        let (db, wal) = self.file_sizes();
+        Ok(db + wal)
+    }
+
+    /// (main file bytes, WAL sidecar bytes) via filesystem stat.
+    pub fn file_sizes(&self) -> (u64, u64) {
         let db_bytes = std::fs::metadata(&self.db_path)
             .map(|m| m.len())
             .unwrap_or(0);
@@ -964,7 +970,17 @@ impl TelemetryDb {
             PathBuf::from(p)
         };
         let wal_bytes = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
-        Ok(db_bytes + wal_bytes)
+        (db_bytes, wal_bytes)
+    }
+
+    /// Total audit rows (the audit log shares the size-capped file, so
+    /// its footprint belongs on the storage panel).
+    pub fn audit_count(&self) -> Result<u64, DbError> {
+        self.with_reader(|conn| {
+            let count: i64 =
+                conn.query_row("SELECT COUNT(*) FROM audit_log", [], |row| row.get(0))?;
+            Ok(count as u64)
+        })
     }
 }
 
@@ -2239,6 +2255,16 @@ mod tests {
         let mut out = db.target_sample_counts().unwrap();
         out.sort();
         assert_eq!(out, vec![("t1".to_string(), 30), ("t2".to_string(), 10)]);
+    }
+
+    /// @test audit_count reports the live number of audit rows.
+    #[test]
+    fn audit_count_reports_rows() {
+        let (_dir, db) = open_temp_db();
+        assert_eq!(db.audit_count().unwrap(), 0);
+        db.log_audit("op", "a", None, None, "ok", None).unwrap();
+        db.log_audit("op", "b", None, None, "ok", None).unwrap();
+        assert_eq!(db.audit_count().unwrap(), 2);
     }
 
     /// @test The channel dictionary stores one row per distinct
