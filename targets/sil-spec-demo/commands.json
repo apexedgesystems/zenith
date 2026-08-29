@@ -243,6 +243,42 @@
           "opcode": "0x0100",
           "desc": "Executive health (48B response)",
           "fields": []
+        },
+        {
+          "name": "GET_TASK_STATS",
+          "opcode": "0x0101",
+          "desc": "Get Task Stats",
+          "fields": []
+        },
+        {
+          "name": "RUN_TASK_CENSUS",
+          "opcode": "0x0102",
+          "desc": "Run Task Census",
+          "fields": []
+        },
+        {
+          "name": "GET_TASK_CENSUS",
+          "opcode": "0x0103",
+          "desc": "Get Task Census",
+          "fields": []
+        },
+        {
+          "name": "RUN_PREFLIGHT",
+          "opcode": "0x0104",
+          "desc": "Run Preflight",
+          "fields": []
+        },
+        {
+          "name": "GET_PREFLIGHT",
+          "opcode": "0x0105",
+          "desc": "Get Preflight",
+          "fields": []
+        },
+        {
+          "name": "GET_REQUIREMENTS",
+          "opcode": "0x0106",
+          "desc": "Get Requirements",
+          "fields": []
         }
       ]
     },
@@ -542,9 +578,9 @@
           "fields": []
         },
         {
-          "name": "HEALTH_SAMPLE",
+          "name": "GET_HEALTH",
           "opcode": "0x0100",
-          "desc": "Health Sample",
+          "desc": "Component health telemetry",
           "fields": []
         }
       ]

@@ -1,0 +1,121 @@
+{
+  "component": "DataTransform",
+  "structs": {
+    "DataTransformTlm": {
+      "category": "TELEMETRY",
+      "opcode": "0x0600",
+      "size": 20,
+      "fields": [
+        {
+          "name": "applyCycles",
+          "type": "uint",
+          "offset": 0,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "masksApplied",
+          "type": "uint",
+          "offset": 4,
+          "size": 4,
+          "value": 0,
+          "doc": "Successful mask applications."
+        },
+        {
+          "name": "resolveFailures",
+          "type": "uint",
+          "offset": 8,
+          "size": 4,
+          "value": 0,
+          "doc": "Target resolution failures."
+        },
+        {
+          "name": "applyFailures",
+          "type": "uint",
+          "offset": 12,
+          "size": 4,
+          "value": 0,
+          "doc": "Mask application failures."
+        },
+        {
+          "name": "entriesArmed",
+          "type": "uint",
+          "offset": 16,
+          "size": 4,
+          "value": 0,
+          "doc": "Currently armed entry count."
+        }
+      ],
+      "spec_defined": true,
+      "layout_hash": "0x70B4AF85",
+      "canonical_spec": "applyCycles:uint:4;masksApplied:uint:4;resolveFailures:uint:4;applyFailures:uint:4;entriesArmed:uint:4;"
+    },
+    "TransformStats": {
+      "category": "STATE",
+      "size": 20,
+      "fields": [
+        {
+          "name": "applyCycles",
+          "type": "uint",
+          "offset": 0,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "masksApplied",
+          "type": "uint",
+          "offset": 4,
+          "size": 4,
+          "value": 0,
+          "doc": "Successful mask applications."
+        },
+        {
+          "name": "resolveFailures",
+          "type": "uint",
+          "offset": 8,
+          "size": 4,
+          "value": 0,
+          "doc": "Target resolution failures."
+        },
+        {
+          "name": "applyFailures",
+          "type": "uint",
+          "offset": 12,
+          "size": 4,
+          "value": 0,
+          "doc": "Mask application failures."
+        },
+        {
+          "name": "entriesArmed",
+          "type": "uint",
+          "offset": 16,
+          "size": 4,
+          "value": 0,
+          "doc": "Currently armed entry count."
+        }
+      ],
+      "spec_defined": true,
+      "layout_hash": "0x70B4AF85",
+      "canonical_spec": "applyCycles:uint:4;masksApplied:uint:4;resolveFailures:uint:4;applyFailures:uint:4;entriesArmed:uint:4;"
+    }
+  },
+  "enums": {
+    "DataTransformOpcode": {
+      "underlying_type": "uint16_t",
+      "values": {
+        "APPLY_ALL": 1547,
+        "APPLY_ENTRY": 1546,
+        "ARM_ENTRY": 1537,
+        "CLEAR_ALL": 1544,
+        "CLEAR_MASKS": 1543,
+        "DISARM_ENTRY": 1538,
+        "GET_STATS": 1536,
+        "PUSH_CUSTOM_MASK": 1542,
+        "PUSH_FLIP_MASK": 1541,
+        "PUSH_HIGH_MASK": 1540,
+        "PUSH_ZERO_MASK": 1539,
+        "SET_TARGET": 1545
+      }
+    }
+  }
+}

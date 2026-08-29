@@ -10,30 +10,33 @@
           "type": "uint",
           "offset": 0,
           "size": 4,
-          "value": 0
+          "doc": "Valid VehicleState frames received."
         },
         {
           "name": "txCount",
           "type": "uint",
           "offset": 4,
           "size": 4,
-          "value": 0
+          "doc": "ControlCmd frames sent."
         },
         {
           "name": "crcErrors",
           "type": "uint",
           "offset": 8,
           "size": 4,
-          "value": 0
+          "doc": "CRC validation failures."
         },
         {
           "name": "pollCount",
           "type": "uint",
           "offset": 12,
           "size": 4,
-          "value": 0
+          "doc": "Transport poll iterations."
         }
-      ]
+      ],
+      "spec_defined": true,
+      "layout_hash": "0x5A9B1590",
+      "canonical_spec": "rxCount:uint:4;txCount:uint:4;crcErrors:uint:4;pollCount:uint:4;"
     }
   }
 }

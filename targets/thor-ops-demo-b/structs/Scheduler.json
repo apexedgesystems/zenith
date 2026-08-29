@@ -181,7 +181,13 @@
     "SchedulerTlmOpcode": {
       "underlying_type": "uint16_t",
       "values": {
-        "GET_HEALTH": 256
+        "GET_HEALTH": 256,
+        "GET_PREFLIGHT": 261,
+        "GET_REQUIREMENTS": 262,
+        "GET_TASK_CENSUS": 259,
+        "GET_TASK_STATS": 257,
+        "RUN_PREFLIGHT": 260,
+        "RUN_TASK_CENSUS": 258
       }
     }
   }

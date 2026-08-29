@@ -18,60 +18,70 @@
           "type": "uint",
           "offset": 4,
           "size": 4,
-          "value": 0
+          "value": 0,
+          "doc": "Cumulative warning threshold breaches."
         },
         {
           "name": "critCount",
           "type": "uint",
           "offset": 8,
           "size": 4,
-          "value": 0
+          "value": 0,
+          "doc": "Cumulative critical threshold breaches."
         },
         {
           "name": "monitoredCoreCount",
           "type": "uint",
           "offset": 12,
           "size": 1,
-          "value": 0
+          "value": 0,
+          "doc": "Number of valid entries in coreLoad[]."
         },
         {
           "name": "pad0",
           "type": "uint",
           "offset": 13,
           "size": 1,
-          "value": 0
+          "value": 0,
+          "doc": "Alignment padding."
         },
         {
           "name": "cpuTempC",
           "type": "int",
           "offset": 14,
           "size": 2,
-          "value": -1
+          "value": -1,
+          "doc": "CPU temperature (Celsius). -1 = unavailable."
         },
         {
           "name": "coreLoad",
           "type": "array",
+          "element_type": "float",
+          "dims": [16],
           "offset": 16,
           "size": 64,
-          "value": [],
-          "element_type": "float",
-          "dims": [16]
+          "value": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
         },
         {
           "name": "ramUsedPercent",
           "type": "float",
           "offset": 80,
           "size": 4,
-          "value": "0.0F"
+          "value": 0.0,
+          "doc": "RAM utilization (percent, 0-100)."
         },
         {
           "name": "fdCount",
           "type": "uint",
           "offset": 84,
           "size": 4,
-          "value": 0
+          "value": 0,
+          "doc": "Open file descriptor count."
         }
-      ]
+      ],
+      "spec_defined": true,
+      "layout_hash": "0xA3D00836",
+      "canonical_spec": "sampleCount:uint:4;warnCount:uint:4;critCount:uint:4;monitoredCoreCount:uint:1;pad0:uint:1;cpuTempC:int:2;coreLoad:array:64;[float:4x16]ramUsedPercent:float:4;fdCount:uint:4;"
     },
     "SystemMonitorTunableParams": {
       "category": "TUNABLE_PARAM",
@@ -291,10 +301,9 @@
   },
   "enums": {
     "SysMonTlmOpcode": {
-      "underlying_type": "uint16_t",
-      "values": {
-        "HEALTH_SAMPLE": 256
-      }
+      "underlying_type": "int",
+      "values": {},
+      "_warning": "Enum 'SysMonTlmOpcode' not found in headers"
     }
   }
 }

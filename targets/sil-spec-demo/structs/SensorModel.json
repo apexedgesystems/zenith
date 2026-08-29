@@ -10,47 +10,45 @@
           "name": "temperature",
           "type": "float",
           "offset": 0,
-          "size": 4,
-          "value": "0.0F"
+          "size": 4
         },
         {
           "name": "rampRate",
           "type": "float",
           "offset": 4,
-          "size": 4,
-          "value": "0.0F"
+          "size": 4
         },
         {
           "name": "stepCount",
           "type": "uint",
           "offset": 8,
-          "size": 4,
-          "value": 0
+          "size": 4
         },
         {
           "name": "wrapCount",
           "type": "uint",
           "offset": 12,
-          "size": 4,
-          "value": 0
+          "size": 4
         },
         {
           "name": "overtemp",
           "type": "uint",
           "offset": 16,
-          "size": 1,
-          "value": 0
+          "size": 1
         },
         {
           "name": "reserved",
           "type": "array",
+          "element_type": "uint",
+          "dims": [3],
           "offset": 17,
           "size": 3,
-          "value": [],
-          "element_type": "uint",
-          "dims": [3]
+          "value": [0, 0, 0]
         }
-      ]
+      ],
+      "spec_defined": true,
+      "layout_hash": "0x0911D5EE",
+      "canonical_spec": "temperature:float:4;rampRate:float:4;stepCount:uint:4;wrapCount:uint:4;overtemp:uint:1;reserved:array:3;[uint:1x3]"
     },
     "SensorOutput": {
       "category": "OUTPUT",
@@ -61,32 +59,38 @@
           "type": "float",
           "offset": 0,
           "size": 4,
-          "value": "0.0F"
+          "value": 0.0,
+          "doc": "Current temperature reading [deg]."
         },
         {
           "name": "temperatureRate",
           "type": "float",
           "offset": 4,
           "size": 4,
-          "value": "0.0F"
+          "value": 0.0,
+          "doc": "Rate of change [deg/step]."
         },
         {
           "name": "overtemp",
           "type": "uint",
           "offset": 8,
           "size": 1,
-          "value": 0
+          "doc": "1 if temperature > 100.0 (threshold)."
         },
         {
           "name": "reserved",
           "type": "array",
+          "element_type": "uint",
+          "dims": [3],
           "offset": 9,
           "size": 3,
-          "value": [],
-          "element_type": "uint",
-          "dims": [3]
+          "value": [0, 0, 0],
+          "doc": "Alignment padding."
         }
-      ]
+      ],
+      "spec_defined": true,
+      "layout_hash": "0x5F5A5996",
+      "canonical_spec": "temperature:float:4;temperatureRate:float:4;overtemp:uint:1;reserved:array:3;[uint:1x3]"
     },
     "SensorState": {
       "category": "STATE",
@@ -97,16 +101,19 @@
           "type": "uint",
           "offset": 0,
           "size": 4,
-          "value": 0
+          "doc": "Total step invocations."
         },
         {
           "name": "wrapCount",
           "type": "uint",
           "offset": 4,
           "size": 4,
-          "value": 0
+          "doc": "Number of temperature wrap-arounds."
         }
-      ]
+      ],
+      "spec_defined": true,
+      "layout_hash": "0x1F72C7BA",
+      "canonical_spec": "stepCount:uint:4;wrapCount:uint:4;"
     },
     "SensorTunableParams": {
       "category": "TUNABLE_PARAM",
@@ -117,23 +124,29 @@
           "type": "float",
           "offset": 0,
           "size": 4,
-          "value": "0.5F"
+          "value": 0.5,
+          "doc": "Temperature increase per step [deg/step]."
         },
         {
           "name": "initialTemp",
           "type": "float",
           "offset": 4,
           "size": 4,
-          "value": "20.0F"
+          "value": 20.0,
+          "doc": "Starting temperature [deg]."
         },
         {
           "name": "maxTemp",
           "type": "float",
           "offset": 8,
           "size": 4,
-          "value": "120.0F"
+          "value": 120.0,
+          "doc": "Wrap-around temperature (resets to initial)."
         }
-      ]
+      ],
+      "spec_defined": true,
+      "layout_hash": "0x9E0E8399",
+      "canonical_spec": "rampRate:float:4;initialTemp:float:4;maxTemp:float:4;"
     }
   }
 }

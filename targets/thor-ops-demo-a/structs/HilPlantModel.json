@@ -10,81 +10,85 @@
           "type": "float",
           "offset": 0,
           "size": 8,
-          "value": 0.0
+          "doc": "Elapsed simulation time [s]."
         },
         {
           "name": "lastAlt",
           "type": "float",
           "offset": 8,
           "size": 8,
-          "value": 0.0
+          "doc": "Last computed altitude [m]."
         },
         {
           "name": "lastVz",
           "type": "float",
           "offset": 16,
           "size": 8,
-          "value": 0.0
+          "doc": "Last vertical velocity [m/s]."
         },
         {
           "name": "stepCount",
           "type": "uint",
           "offset": 24,
           "size": 4,
-          "value": 0
+          "doc": "Plant steps executed."
         },
         {
           "name": "ctrlCount",
           "type": "uint",
           "offset": 28,
           "size": 4,
-          "value": 0
+          "doc": "Control updates executed."
         },
         {
           "name": "tlmCount",
           "type": "uint",
           "offset": 32,
           "size": 4,
-          "value": 0
+          "doc": "Telemetry reports sent."
         },
         {
           "name": "commLossCount",
           "type": "uint",
           "offset": 36,
           "size": 4,
-          "value": 0
+          "doc": "Comm loss events detected."
         },
         {
           "name": "staleCmdFrames",
           "type": "uint",
           "offset": 40,
           "size": 4,
-          "value": 0
+          "doc": "Consecutive control frames with no new command."
         },
         {
           "name": "lastSeenRxCount",
           "type": "uint",
           "offset": 44,
           "size": 4,
-          "value": 0
+          "doc": "Snapshot of driver rxCount for staleness detection."
         },
         {
           "name": "commLost",
           "type": "uint",
           "offset": 48,
           "size": 1,
-          "value": 0
+          "doc": "1 if currently in comm loss state."
         },
         {
           "name": "reserved",
           "type": "array",
+          "element_type": "uint",
+          "dims": [7],
           "offset": 49,
           "size": 7,
-          "value": [],
-          "element_type": "uint",
-          "dims": [7]
+          "value": [0, 0, 0, 0, 0, 0, 0],
+          "doc": "Padding for 8-byte alignment."
         }
-      ]
+      ],
+      "spec_defined": true,
+      "layout_hash": "0xCB1D5DFF",
+      "canonical_spec": "simTime:float:8;lastAlt:float:8;lastVz:float:8;stepCount:uint:4;ctrlCount:uint:4;tlmCount:uint:4;commLossCount:uint:4;staleCmdFrames:uint:4;lastSeenRxCount:uint:4;commLost:uint:1;reserved:array:7;[uint:1x7]"
     },
     "HilPlantTunableParams": {
       "category": "TUNABLE_PARAM",
@@ -95,58 +99,69 @@
           "type": "float",
           "offset": 0,
           "size": 8,
-          "value": 10.0
+          "value": 10.0,
+          "doc": "Vehicle mass [kg]."
         },
         {
           "name": "dragCd",
           "type": "float",
           "offset": 8,
           "size": 8,
-          "value": 0.5
+          "value": 0.5,
+          "doc": "Drag coefficient."
         },
         {
           "name": "dragArea",
           "type": "float",
           "offset": 16,
           "size": 8,
-          "value": 0.1
+          "value": 0.1,
+          "doc": "Reference area [m^2]."
         },
         {
           "name": "targetAlt",
           "type": "float",
           "offset": 24,
           "size": 8,
-          "value": 100.0
+          "value": 100.0,
+          "doc": "PD controller target altitude [m]."
         },
         {
           "name": "ctrlKp",
           "type": "float",
           "offset": 32,
           "size": 8,
-          "value": 2.0
+          "value": 2.0,
+          "doc": "Proportional gain [N/m]."
         },
         {
           "name": "ctrlKd",
           "type": "float",
           "offset": 40,
           "size": 8,
-          "value": 1.5
+          "value": 1.5,
+          "doc": "Derivative gain [N/(m/s)]."
         },
         {
           "name": "thrustMax",
           "type": "float",
           "offset": 48,
           "size": 8,
-          "value": 200.0
+          "value": 200.0,
+          "doc": "Maximum thrust magnitude [N]."
         },
         {
           "name": "commLossFrames",
           "type": "float",
           "offset": 56,
           "size": 8,
-          "value": 25.0
+          "value": 25.0,
+          "doc": "Control frames without new cmd before comm loss (0=disabled)."
         }
-      ]
+      ],
+      "spec_defined": true,
+      "layout_hash": "0x2D523611",
+      "canonical_spec": "mass:float:8;dragCd:float:8;dragArea:float:8;targetAlt:float:8;ctrlKp:float:8;ctrlKd:float:8;thrustMax:float:8;commLossFrames:float:8;"
     },
     "VehicleState": {
       "category": "OUTPUT",
