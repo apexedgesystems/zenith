@@ -65,8 +65,11 @@ pub struct TelemetryDb {
     /// back transaction would leave rows pointing at a dead id.
     /// Dictionary rows are never deleted (see delete_target), so a
     /// cached id can never go stale.
-    channel_ids: Mutex<HashMap<(Arc<str>, Arc<str>), i64>>,
+    channel_ids: Mutex<HashMap<ChannelKey, i64>>,
 }
+
+/// Insert-path cache key: (target_id, channel name).
+type ChannelKey = (Arc<str>, Arc<str>);
 
 /// Maximum number of concurrent reader connections in the pool.
 /// Connections beyond this are closed when returned to the pool.
@@ -717,6 +720,7 @@ impl TelemetryDb {
 
     /// Get per-target storage statistics.
     pub fn target_stats(&self, target_id: &str) -> Result<TargetStats, DbError> {
+        let file_bytes = self.db_size_bytes().unwrap_or(0);
         self.with_reader(|conn| {
             // One pass: per-channel COUNT/MIN/MAX ride the
             // (channel_id, timestamp_ms) index runs, then aggregate
@@ -744,6 +748,20 @@ impl TelemetryDb {
                 )
                 .unwrap_or(0);
 
+            // Live bytes/sample: this target's share of the real file
+            // size, prorated by row count. Below the threshold the file
+            // is dominated by fixed overhead (schema pages, WAL) and the
+            // ratio would wildly overstate, so a measured baseline for
+            // the dictionary schema is used instead.
+            let total_rows: i64 = conn
+                .query_row("SELECT COUNT(*) FROM telemetry", [], |row| row.get(0))
+                .unwrap_or(0);
+            let avg_bytes = if total_rows >= LIVE_AVG_MIN_ROWS {
+                file_bytes / total_rows as u64
+            } else {
+                BASELINE_BYTES_PER_SAMPLE
+            };
+
             Ok(TargetStats {
                 sample_count: sample_count as u64,
                 channel_count: channel_count as u64,
@@ -753,7 +771,7 @@ impl TelemetryDb {
                     (Some(o), Some(n)) => Some(((n - o) / 1000) as u64),
                     _ => None,
                 },
-                byte_estimate: (sample_count as u64) * AVG_BYTES_PER_SAMPLE,
+                byte_estimate: (sample_count as u64) * avg_bytes,
             })
         })
     }
@@ -950,19 +968,24 @@ pub struct TargetStats {
     pub oldest_ms: Option<u64>,
     pub newest_ms: Option<u64>,
     pub span_seconds: Option<u64>,
-    /// Rough estimate of disk bytes occupied by this target's samples.
-    /// Computed as sample_count * AVG_BYTES_PER_SAMPLE so it doesn't
-    /// require an expensive per-target page-size scan. Treat as
-    /// approximate -- the actual on-disk usage is shared across the
-    /// whole telemetry table because of WAL/auto_vacuum.
+    /// Rough estimate of disk bytes occupied by this target's samples:
+    /// the target's row count times the database's live bytes/sample
+    /// ratio (real file size / real row count), so it tracks the true
+    /// footprint instead of a guessed constant. Treat as approximate --
+    /// the actual on-disk usage is shared across the whole telemetry
+    /// table because of WAL/auto_vacuum.
     pub byte_estimate: u64,
 }
 
-/// Average per-row footprint of a telemetry sample on disk:
-/// 4-byte target_id varint + 8-byte timestamp + ~16-byte channel string +
-/// 8-byte float + index entries + page overhead ~= 70 bytes.
-/// Tuned empirically against the global_stats output for a 100K-row DB.
-const AVG_BYTES_PER_SAMPLE: u64 = 70;
+/// Measured per-row footprint of the dictionary schema (1M-row
+/// experiment: 76.2 B/row including indexes). Only used below
+/// LIVE_AVG_MIN_ROWS, where fixed overhead dominates the file and the
+/// live ratio would overstate by orders of magnitude.
+const BASELINE_BYTES_PER_SAMPLE: u64 = 76;
+
+/// Row count above which the live file-size/row-count ratio is a
+/// better bytes/sample estimate than the measured baseline.
+const LIVE_AVG_MIN_ROWS: i64 = 10_000;
 
 /// Result of a downsample operation.
 #[derive(Debug, serde::Serialize)]
@@ -1518,20 +1541,39 @@ mod tests {
         assert_eq!(t1_remaining[0].timestamp_ms, 20);
     }
 
-    /// @test target_stats.byte_estimate scales linearly with the
-    /// sample count via the AVG_BYTES_PER_SAMPLE constant.
+    /// @test target_stats.byte_estimate uses the measured baseline on a
+    /// young database (fixed overhead would swamp the live ratio) and
+    /// switches to the live file-size/row-count ratio once the table is
+    /// large enough -- where a single-target DB's estimate equals the
+    /// real file size by construction.
     #[test]
-    fn target_stats_byte_estimate_scales_with_samples() {
+    fn target_stats_byte_estimate_tracks_real_footprint() {
         let (_dir, db) = open_temp_db();
         let t: Arc<str> = Arc::from("t1");
         let ch: Arc<str> = Arc::from("X");
+
+        // Young DB: baseline path.
         let samples: Vec<TelemetrySample> =
             (0..100).map(|i| sample(&t, &ch, i, i as f64)).collect();
         db.insert_batch(&samples).unwrap();
         let stats = db.target_stats("t1").unwrap();
         assert_eq!(stats.sample_count, 100);
+        assert_eq!(stats.byte_estimate, 100 * BASELINE_BYTES_PER_SAMPLE);
+
+        // Past the threshold: live ratio. All rows belong to t1, so the
+        // estimate must equal the whole measured file size exactly.
+        let more: Vec<TelemetrySample> = (100..LIVE_AVG_MIN_ROWS as u64)
+            .map(|i| sample(&t, &ch, i, i as f64))
+            .collect();
+        for chunk in more.chunks(1000) {
+            db.insert_batch(chunk).unwrap();
+        }
+        let stats = db.target_stats("t1").unwrap();
+        assert_eq!(stats.sample_count, LIVE_AVG_MIN_ROWS as u64);
+        let file_bytes = db.db_size_bytes().unwrap();
+        let expected = (file_bytes / LIVE_AVG_MIN_ROWS as u64) * LIVE_AVG_MIN_ROWS as u64;
+        assert_eq!(stats.byte_estimate, expected);
         assert!(stats.byte_estimate > 0);
-        assert_eq!(stats.byte_estimate, 100 * AVG_BYTES_PER_SAMPLE);
     }
 
     /// @test delete_target removes all samples for the given target
