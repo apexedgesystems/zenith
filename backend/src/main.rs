@@ -109,6 +109,10 @@ struct StorageVitals {
     /// File size at the previous tick; 0 means "no tick yet", which
     /// suppresses the rate until a real delta exists.
     last_size: std::sync::atomic::AtomicU64,
+    /// Cumulative rows removed by the size-cap FIFO since boot.
+    fifo_evicted_samples: std::sync::atomic::AtomicU64,
+    /// Cumulative rows removed by time-based retention since boot.
+    retention_pruned_samples: std::sync::atomic::AtomicU64,
 }
 
 type AppState = Arc<RwLock<SharedState>>;
@@ -1803,8 +1807,9 @@ async fn telemetry_stats(
     let vitals = st.storage_vitals.clone();
     drop(st);
 
-    let size_bytes = db.db_size_bytes().unwrap_or(0);
-    let count = db_blocking(db, |db| db.count()).await?;
+    let (main_bytes, wal_bytes) = db.file_sizes();
+    let size_bytes = main_bytes + wal_bytes;
+    let (count, audit_rows) = db_blocking(db, |db| Ok((db.count()?, db.audit_count()?))).await?;
 
     // Effective-retention picture: the cap, the measured net growth,
     // and the projection they imply. fill <= 0 (empty DB, holding at
@@ -1824,9 +1829,17 @@ async fn telemetry_stats(
         "total_samples": count,
         "db_size_bytes": size_bytes,
         "db_size_mb": format!("{:.2}", size_bytes as f64 / 1_048_576.0),
+        "wal_bytes": wal_bytes,
+        "audit_rows": audit_rows,
         "cap_bytes": cap_bytes,
         "fill_bytes_per_min": fill_per_min,
         "projected_secs_to_cap": projected_secs_to_cap,
+        "fifo_evicted_samples": vitals
+            .fifo_evicted_samples
+            .load(std::sync::atomic::Ordering::Relaxed),
+        "retention_pruned_samples": vitals
+            .retention_pruned_samples
+            .load(std::sync::atomic::Ordering::Relaxed),
     })))
 }
 
@@ -3278,6 +3291,8 @@ async fn main() {
         cap_bytes: max_db_bytes,
         fill_bytes_per_min: std::sync::atomic::AtomicI64::new(0),
         last_size: std::sync::atomic::AtomicU64::new(0),
+        fifo_evicted_samples: std::sync::atomic::AtomicU64::new(0),
+        retention_pruned_samples: std::sync::atomic::AtomicU64::new(0),
     });
     let vitals_maint = storage_vitals.clone();
     tokio::spawn(async move {
@@ -3358,6 +3373,9 @@ async fn main() {
                         };
 
                         if deleted > 0 {
+                            vitals
+                                .fifo_evicted_samples
+                                .fetch_add(deleted as u64, std::sync::atomic::Ordering::Relaxed);
                             tracing::info!(
                                 "DB size {:.0}MB > {:.0}MB limit, FIFO deleted {} oldest samples (~{:.0}MB)",
                                 stats.db_size_bytes as f64 / 1_048_576.0,
@@ -3373,7 +3391,12 @@ async fn main() {
 
                 // Time-based retention as a safety net
                 match db.prune(retention_ms) {
-                    Ok(n) if n > 0 => tracing::info!("Pruned {} samples beyond retention", n),
+                    Ok(n) if n > 0 => {
+                        vitals
+                            .retention_pruned_samples
+                            .fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                        tracing::info!("Pruned {} samples beyond retention", n)
+                    }
                     _ => {}
                 }
 
