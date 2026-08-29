@@ -71,6 +71,7 @@ directory.
 | **Tunables**      | Edit TUNABLE_PARAM blocks for any component (auto-discovered). Decoded field table with editable values per the struct dict types. Apply button does TPRM upload + RELOAD_TPRM. Variable-length TPRM support for Scheduler-style header + entries layouts. |
 | **INSPECT**       | Browse any registered data block on any component for any category (STATIC_PARAM / TUNABLE_PARAM / STATE / INPUT / OUTPUT). Decoded field table with type info. Auto-refresh toggle (1 Hz) for live state debugging.                                       |
 | **File Transfer** | Drag-and-drop file upload to any path on the target via APROTO. Single-file with size cap. Per-target export of telemetry as CSV.                                                                                                                          |
+| **Storage**       | Live capacity gauge against the configured cap with fill rate and time-to-cap projection, per-target usage bars with trim/delete controls, the pipeline accounting table (decoded = written + counted drops), FIFO/retention counters, manual downsample.  |
 | **Audit Log**     | Append-only log of operator actions: every command, file upload, target connect/disconnect/add/remove, library swap, storage trim. Filterable by actor / target / IP / status. Auto-refresh option.                                                        |
 
 ## Sidebar Features
