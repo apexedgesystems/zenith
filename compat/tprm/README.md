@@ -39,7 +39,10 @@ failure distinctly -- an unstamped or mis-stamped upload never
 reaches a component.
 
 The payload uids are part of the contract: `scalar_types` targets
-0x000000, `strings_arrays` 0x00D001, `nested_enum` 0x00CA00.
+0x000000, `strings_arrays` 0x00D001, `nested_enum` 0x00CA00,
+`scheduler_shape` 0x000100 (the variable-length header + task-entry
+shape; its hash covers header leaves then each entry's leaves in
+order, no container markers, so it is entry-count dependent).
 
 ## Refreshing this copy
 

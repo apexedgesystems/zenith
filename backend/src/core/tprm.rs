@@ -206,12 +206,26 @@ mod tests {
     /// order is part of the contract, and a map-based toml parse would
     /// lose it. Skips the [__enums__] section and struct containers
     /// (their nested leaves carry the layout).
+    ///
+    /// Two section styles appear in the contract: fixed-shape vectors
+    /// declare one `[Section.leaf]` per leaf with key = value lines,
+    /// and the variable-length scheduler vector declares inline-table
+    /// leaves (`name = { type = ..., size = ... }`) under plain
+    /// `[Header]` / `[[entry]]` sections. Array-of-tables sections
+    /// contribute no container marker -- the variable-length recipe is
+    /// flat by contract -- and a section header that turns out to hold
+    /// inline tables (no type of its own) is dropped at the end.
     fn parse_vector_toml(name: &str) -> Vec<TomlLeaf> {
         let text = std::fs::read_to_string(contract_dir().join("toml").join(name)).unwrap();
         let mut leaves: Vec<TomlLeaf> = Vec::new();
         let mut in_leaf = false;
         for line in text.lines() {
             let line = line.trim();
+            if line.starts_with("[[") {
+                // Array-of-tables entry: its inline leaves follow.
+                in_leaf = true;
+                continue;
+            }
             if let Some(header) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
                 in_leaf = header != "__enums__";
                 if in_leaf {
@@ -223,6 +237,31 @@ mod tests {
                     });
                 }
             } else if in_leaf {
+                if let Some((key, inline)) = line.split_once(" = {") {
+                    // Inline-table leaf. `type` is the first key in the
+                    // authoring template, so the first "type = " match
+                    // is the field type (never element_type); the
+                    // byte-identity assertion would catch any drift in
+                    // that layout.
+                    let field = |tag: &str| {
+                        inline.split_once(tag).map(|(_, rest)| {
+                            rest.split([',', '}'])
+                                .next()
+                                .unwrap()
+                                .trim()
+                                .trim_matches('"')
+                                .to_string()
+                        })
+                    };
+                    leaves.push(TomlLeaf {
+                        name: key.trim().to_string(),
+                        field_type: field("type = ").unwrap_or_default(),
+                        size: field("size = ").and_then(|s| s.parse().ok()).unwrap_or(0),
+                        element_type: field("element_type = "),
+                        element_count: 0,
+                    });
+                    continue;
+                }
                 let entry = leaves.last_mut().unwrap();
                 if let Some(v) = line.strip_prefix("type = ") {
                     entry.field_type = v.trim_matches('"').to_string();
@@ -237,9 +276,10 @@ mod tests {
                 }
             }
         }
-        // Struct containers stay in the list: they carry no bytes but
-        // contribute `name:struct:0;` to the canonical spec, followed
-        // by their nested leaves.
+        // Struct containers stay in the list (they contribute
+        // `name:struct:0;`); section headers that only held inline
+        // tables have no type and are dropped.
+        leaves.retain(|l| !l.field_type.is_empty());
         leaves
     }
 
@@ -281,6 +321,9 @@ mod tests {
             ("scalar_types.toml", "scalar_types.bin", 0x000000u32),
             ("strings_arrays.toml", "strings_arrays.bin", 0x00D001),
             ("nested_enum.toml", "nested_enum.bin", 0x00CA00),
+            // Variable-length shape: flat header + entry leaves, so the
+            // toml's declaration order IS the recipe's expansion order.
+            ("scheduler_shape.toml", "scheduler_shape.bin", 0x000100),
         ] {
             let vector = read_vector(bin_name);
             let leaves = parse_vector_toml(toml_name);
@@ -346,14 +389,16 @@ mod tests {
         assert_eq!(parse_v3(&bad), Err(TprmError::BadCrc));
     }
 
-    /// @test Variable-length (header + entries) layout hashing follows
-    /// the producer-confirmed recipe: header leaves then each entry's
-    /// leaves in order, no container markers, hash entry-count-
-    /// dependent. Pins the worked evidence from the apex relay answer
-    /// of 2026-08-16 (3-task scheduler hash and the differing 2-task
-    /// hash) until a contract vector covers the shape.
+    /// @test Variable-length (header + entries) layout hashing is
+    /// entry-count dependent: header leaves then each entry's leaves
+    /// in order, no container markers. The 2-task hash is anchored to
+    /// the contract vector's own prelude (not a transcribed constant),
+    /// and the 3-task hash pins the producer's worked evidence from
+    /// the 2026-08-16 relay answer -- together they prove the count
+    /// changes the hash, which is what makes a stale task list
+    /// un-uploadable.
     #[test]
-    fn variable_length_recipe_matches_producer_evidence() {
+    fn variable_length_hash_is_entry_count_dependent() {
         let hdr = [
             ("numPools", "uint", 1usize),
             ("workersPerPool", "uint", 1),
@@ -382,8 +427,9 @@ mod tests {
                     }),
             )
         };
+        let (vector_prelude, _) = parse_v3(&read_vector("scheduler_shape.bin")).unwrap();
+        assert_eq!(hash_for(2), vector_prelude.layout_hash);
         assert_eq!(hash_for(3), 0xFEF9_BC60);
-        assert_eq!(hash_for(2), 0x4A80_07C5);
         assert_ne!(hash_for(2), hash_for(3));
     }
 
