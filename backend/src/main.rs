@@ -95,6 +95,20 @@ struct SharedState {
     /// Per-IP token bucket for command rate limiting. Engaged only when
     /// auth is enabled (so dev mode is unconstrained).
     rate_limiter: Arc<RateLimiter>,
+    /// Live storage-pressure numbers shared with /api/telemetry/stats.
+    storage_vitals: Arc<StorageVitals>,
+}
+
+/// Storage pressure measured by the maintenance loop: the configured
+/// cap and the net file growth per minute (signed -- FIFO eviction and
+/// vacuum legitimately shrink the file). Handlers project time-to-cap
+/// from these instead of guessing.
+struct StorageVitals {
+    cap_bytes: u64,
+    fill_bytes_per_min: std::sync::atomic::AtomicI64,
+    /// File size at the previous tick; 0 means "no tick yet", which
+    /// suppresses the rate until a real delta exists.
+    last_size: std::sync::atomic::AtomicU64,
 }
 
 type AppState = Arc<RwLock<SharedState>>;
@@ -1786,14 +1800,33 @@ async fn telemetry_stats(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let st = state.read().await;
     let db = st.db.clone();
+    let vitals = st.storage_vitals.clone();
     drop(st);
 
     let size_bytes = db.db_size_bytes().unwrap_or(0);
     let count = db_blocking(db, |db| db.count()).await?;
+
+    // Effective-retention picture: the cap, the measured net growth,
+    // and the projection they imply. fill <= 0 (empty DB, holding at
+    // the cap, or shrinking) yields no projection rather than a fake
+    // one.
+    let cap_bytes = vitals.cap_bytes;
+    let fill_per_min = vitals
+        .fill_bytes_per_min
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let projected_secs_to_cap = if fill_per_min > 0 && size_bytes < cap_bytes {
+        Some((cap_bytes - size_bytes) * 60 / fill_per_min as u64)
+    } else {
+        None
+    };
+
     Ok(Json(serde_json::json!({
         "total_samples": count,
         "db_size_bytes": size_bytes,
         "db_size_mb": format!("{:.2}", size_bytes as f64 / 1_048_576.0),
+        "cap_bytes": cap_bytes,
+        "fill_bytes_per_min": fill_per_min,
+        "projected_secs_to_cap": projected_secs_to_cap,
     })))
 }
 
@@ -3216,12 +3249,16 @@ async fn main() {
         );
     }
 
-    // Spawn periodic maintenance (every 5 minutes)
+    // Spawn periodic maintenance (every 60 seconds)
+    // - Measure net fill rate for storage vitals
+    // - Size-based FIFO when the DB exceeds its cap (fair waterline
+    //   across targets by default; see storage.fifo_strategy)
     // - Prune samples older than retention
-    // - Downsample: keep last hour at full resolution, older at 1-minute averages
-    // - Size-based FIFO: when DB exceeds max size, delete oldest 10%
+    // - Prune audit rows beyond their retention
     // - Clean up stale telemetry_latest entries and old user layouts
     // - WAL checkpoint after large deletions
+    // Downsampling is operator-triggered only (POST /api/telemetry/
+    // downsample); nothing here rewrites history automatically.
     let db_maint = db.clone();
     let max_db_mb = config
         .storage
@@ -3237,6 +3274,12 @@ async fn main() {
     let retention_ms = config.storage.retention_hours as u64 * 3600 * 1000;
     let audit_retention_days = config.storage.audit_retention_days;
     let fifo_strategy = config.storage.fifo_strategy;
+    let storage_vitals = Arc::new(StorageVitals {
+        cap_bytes: max_db_bytes,
+        fill_bytes_per_min: std::sync::atomic::AtomicI64::new(0),
+        last_size: std::sync::atomic::AtomicU64::new(0),
+    });
+    let vitals_maint = storage_vitals.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
@@ -3246,7 +3289,22 @@ async fn main() {
             // vacuum can hold the writer for seconds on a full table --
             // so it runs on the blocking pool, never on a runtime worker.
             let db = db_maint.clone();
+            let vitals = vitals_maint.clone();
             let tick = tokio::task::spawn_blocking(move || {
+                // Net fill rate: delta of pre-eviction file size across
+                // ticks (the interval is 60s, so a delta IS per-minute).
+                // Signed on purpose: a capped database hovering at its
+                // limit reports ~0, which is the demo's success signal.
+                let size_now = db.db_size_bytes().unwrap_or(0);
+                let prev = vitals
+                    .last_size
+                    .swap(size_now, std::sync::atomic::Ordering::Relaxed);
+                if prev > 0 {
+                    vitals.fill_bytes_per_min.store(
+                        size_now as i64 - prev as i64,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
+                }
                 // Size-based FIFO: if DB exceeds max size, delete enough to free space
                 if let Ok(stats) = db.global_stats() {
                     if stats.db_size_bytes > max_db_bytes && stats.total_samples > 0 {
@@ -3358,6 +3416,7 @@ async fn main() {
         db,
         struct_dicts: global_dicts,
         rate_limiter: Arc::new(RateLimiter::default()),
+        storage_vitals,
     }));
 
     // Honor `auto_connect = true` on each target. We dispatch the

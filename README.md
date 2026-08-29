@@ -291,7 +291,7 @@ WS     /api/targets/{id}/telemetry/live
 GET    /api/targets/{id}/telemetry/latest
 GET    /api/targets/{id}/telemetry/history?channel=&start_ms=&end_ms=&limit=
 GET    /api/targets/{id}/telemetry/csv
-GET    /api/telemetry/stats
+GET    /api/telemetry/stats                      # totals, cap, net fill rate, time-to-cap projection
 POST   /api/telemetry/downsample
 
 # Telemetry Layouts
