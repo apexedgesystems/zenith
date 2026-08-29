@@ -49,11 +49,11 @@ pub enum DbError {
 ///   connection, run their query, return it. Multiple read methods can
 ///   run truly concurrently because WAL mode supports concurrent readers.
 /// - The mutex around the pool is held only for the borrow/return -- the
-///   query itself runs without any zenith-side lock contention.
-///
-/// This replaces the previous single-Mutex<Connection> design which
-/// serialized all reads behind writes. With 4 targets x 50 channel polls
-/// per cycle that was 200 serial round trips per cycle.
+///   query itself runs without any zenith-side lock contention. A
+///   single shared connection would serialize every read behind every
+///   write (with 4 targets x 50 channel polls per cycle, that is 200
+///   serial round trips per cycle), which is why reads never touch the
+///   writer connection.
 pub struct TelemetryDb {
     writer: Mutex<Connection>,
     readers: Mutex<Vec<Connection>>,
@@ -598,10 +598,9 @@ impl TelemetryDb {
     /// Global stats for size-based FIFO.
     ///
     /// Reports total disk usage = main db file bytes + WAL file bytes,
-    /// obtained via filesystem `stat` (no checkpoint, no lock contention).
-    /// Previously this issued `PRAGMA wal_checkpoint(PASSIVE)` on every
-    /// call, which turned a stats query into a write-side fsync; that's
-    /// gone now. WAL checkpointing happens on its own schedule from the
+    /// obtained via filesystem `stat`. Deliberately no checkpoint here:
+    /// forcing one would turn a stats query into a write-side fsync.
+    /// WAL checkpointing happens on its own schedule from the
     /// maintenance loop and after large deletions.
     pub fn global_stats(&self) -> Result<GlobalStats, DbError> {
         // Must be a real row count, not MAX(ROWID): rowids keep climbing
