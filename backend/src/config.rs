@@ -79,8 +79,23 @@ pub struct StorageSection {
     /// Max DB size in MB before FIFO kicks in (default 2048 = 2GB)
     #[serde(default)]
     pub max_db_size_mb: Option<u32>,
+    /// How the size-cap FIFO distributes evictions across targets.
+    #[serde(default)]
+    pub fifo_strategy: FifoStrategy,
     #[serde(default)]
     pub structs_dir: Option<String>,
+}
+
+/// Eviction distribution for the size-cap FIFO.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FifoStrategy {
+    /// Waterline the largest holders down to a common level so one
+    /// chatty target cannot evict a quiet target's history.
+    #[default]
+    Fair,
+    /// Oldest rows go first regardless of owner.
+    Global,
 }
 
 /// One target's connection details and per-target config artifact paths.
@@ -148,6 +163,7 @@ impl Default for ServerConfig {
                 retention_hours: default_retention(),
                 audit_retention_days: default_audit_retention_days(),
                 max_db_size_mb: None,
+                fifo_strategy: FifoStrategy::default(),
                 structs_dir: None,
             },
             targets: Vec::new(),
@@ -184,6 +200,7 @@ impl Default for StorageSection {
             retention_hours: default_retention(),
             audit_retention_days: default_audit_retention_days(),
             max_db_size_mb: None,
+            fifo_strategy: FifoStrategy::default(),
             structs_dir: None,
         }
     }

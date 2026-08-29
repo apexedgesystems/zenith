@@ -711,6 +711,25 @@ impl TelemetryDb {
         Ok(deleted)
     }
 
+    /// Per-target live row counts, for fair FIFO eviction sizing.
+    pub fn target_sample_counts(&self) -> Result<Vec<(String, u64)>, DbError> {
+        self.with_reader(|conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT c.target_id, COUNT(*)
+                 FROM telemetry t JOIN channels c ON c.id = t.channel_id
+                 GROUP BY c.target_id",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? as u64))
+            })?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            Ok(out)
+        })
+    }
+
     /// Reclaim freed pages (works with auto_vacuum=INCREMENTAL).
     pub fn incremental_vacuum(&self) -> Result<(), DbError> {
         let conn = self.writer.lock().map_err(|_| DbError::Lock)?;
@@ -948,6 +967,71 @@ impl TelemetryDb {
         let wal_bytes = std::fs::metadata(&wal_path).map(|m| m.len()).unwrap_or(0);
         Ok(db_bytes + wal_bytes)
     }
+}
+
+/* ----------------------------- FIFO Fairness ----------------------------- */
+
+/// Split a FIFO eviction volume across targets by lowering a common
+/// waterline: the targets holding the most rows are trimmed down to a
+/// shared level until `to_delete` rows are freed, and any target
+/// already below that level loses nothing. This is what keeps one
+/// chatty target from evicting a quiet target's history -- a global
+/// oldest-first delete removes whatever happens to be oldest, which
+/// under mixed rates is almost always the quiet target's only copy.
+///
+/// Returns (target_id, rows_to_delete) pairs; targets with a zero
+/// allocation are omitted. Allocations sum to exactly `to_delete`
+/// (or to the total row count when `to_delete` exceeds it).
+pub fn allocate_evictions(counts: &[(String, u64)], to_delete: u64) -> Vec<(String, u64)> {
+    let total: u64 = counts.iter().map(|(_, c)| c).sum();
+    if to_delete == 0 || total == 0 {
+        return Vec::new();
+    }
+    if to_delete >= total {
+        return counts.iter().filter(|(_, c)| *c > 0).cloned().collect();
+    }
+
+    // Largest first; name tiebreak keeps the result deterministic.
+    let mut sorted: Vec<(String, u64)> = counts.to_vec();
+    sorted.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+
+    // Find the waterline L and the k targets above it such that
+    // sum(c_i - L) over those k equals to_delete.
+    let n = sorted.len();
+    let mut prefix = 0u64;
+    let mut k = n;
+    let mut level = 0u64;
+    for (i, (_, c)) in sorted.iter().enumerate() {
+        prefix += c;
+        let next = if i + 1 < n { sorted[i + 1].1 } else { 0 };
+        if prefix >= to_delete {
+            let l = (prefix - to_delete) / (i as u64 + 1);
+            if l >= next {
+                k = i + 1;
+                level = l;
+                break;
+            }
+        }
+    }
+
+    let mut allocs: Vec<(String, u64)> = sorted[..k]
+        .iter()
+        .map(|(t, c)| (t.clone(), c - level))
+        .collect();
+
+    // Integer division leaves up to k-1 rows over-allocated; shave
+    // them off the smallest allocations so the sum lands exactly.
+    let mut over = allocs.iter().map(|(_, d)| d).sum::<u64>() - to_delete;
+    for a in allocs.iter_mut().rev() {
+        if over == 0 {
+            break;
+        }
+        let cut = a.1.min(1).min(over);
+        a.1 -= cut;
+        over -= cut;
+    }
+    allocs.retain(|(_, d)| *d > 0);
+    allocs
 }
 
 /* ----------------------------- Stats Types ----------------------------- */
@@ -2078,6 +2162,84 @@ mod tests {
             .with_reader(|conn| Ok(conn.query_row("PRAGMA busy_timeout", [], |row| row.get(0))?))
             .unwrap();
         assert!(reader_timeout >= 1000, "reader busy_timeout too low");
+    }
+
+    fn counts(v: &[(&str, u64)]) -> Vec<(String, u64)> {
+        v.iter().map(|(t, c)| (t.to_string(), *c)).collect()
+    }
+
+    /// @test Fair eviction trims only the largest holder when its
+    /// excess covers the whole volume; the quiet target loses nothing.
+    #[test]
+    fn allocate_evictions_spares_quiet_targets() {
+        let out = allocate_evictions(&counts(&[("big", 80), ("small", 20)]), 40);
+        assert_eq!(out, vec![("big".to_string(), 40)]);
+        let out = allocate_evictions(&counts(&[("big", 100), ("small", 5)]), 50);
+        assert_eq!(out, vec![("big".to_string(), 50)]);
+    }
+
+    /// @test Equal holders split the eviction volume equally, and the
+    /// integer remainder is shaved so allocations sum exactly.
+    #[test]
+    fn allocate_evictions_splits_equals_and_sums_exactly() {
+        let out = allocate_evictions(&counts(&[("a", 50), ("b", 50)]), 20);
+        assert_eq!(out.iter().map(|(_, d)| d).sum::<u64>(), 20);
+        assert!(out.iter().all(|(_, d)| *d == 10));
+
+        let out = allocate_evictions(&counts(&[("a", 50), ("b", 50)]), 21);
+        assert_eq!(out.iter().map(|(_, d)| d).sum::<u64>(), 21);
+
+        let out = allocate_evictions(&counts(&[("a", 5), ("b", 5), ("c", 5)]), 1);
+        assert_eq!(out.iter().map(|(_, d)| d).sum::<u64>(), 1);
+    }
+
+    /// @test A waterline between targets trims each proportionally to
+    /// its excess: mixed sizes converge to a common survivor level.
+    #[test]
+    fn allocate_evictions_waterlines_mixed_sizes() {
+        // 7/3/3 evicting 6: waterline 2 -> allocations 5/1/1 minus one
+        // shaved row = exactly 6, and every survivor holds >= 2.
+        let out = allocate_evictions(&counts(&[("a", 7), ("b", 3), ("c", 3)]), 6);
+        assert_eq!(out.iter().map(|(_, d)| d).sum::<u64>(), 6);
+        let get = |t: &str| {
+            out.iter()
+                .find(|(n, _)| n == t)
+                .map(|(_, d)| *d)
+                .unwrap_or(0)
+        };
+        assert!(get("a") >= 4);
+        assert!(get("b") <= 1 && get("c") <= 1);
+    }
+
+    /// @test Requesting at least the total row count returns every
+    /// nonzero target in full; zero requests return nothing.
+    #[test]
+    fn allocate_evictions_edges() {
+        let all = allocate_evictions(&counts(&[("a", 10), ("b", 0), ("c", 3)]), 999);
+        assert_eq!(all.len(), 2);
+        assert_eq!(all.iter().map(|(_, d)| d).sum::<u64>(), 13);
+        assert!(allocate_evictions(&counts(&[("a", 10)]), 0).is_empty());
+        assert!(allocate_evictions(&[], 5).is_empty());
+    }
+
+    /// @test target_sample_counts reports live per-target row counts.
+    #[test]
+    fn target_sample_counts_reports_live_rows() {
+        let (_dir, db) = open_temp_db();
+        let t1: Arc<str> = Arc::from("t1");
+        let t2: Arc<str> = Arc::from("t2");
+        let ch: Arc<str> = Arc::from("X");
+        let mut samples = Vec::new();
+        for i in 0..30u64 {
+            samples.push(sample(&t1, &ch, i, 1.0));
+        }
+        for i in 0..10u64 {
+            samples.push(sample(&t2, &ch, i, 2.0));
+        }
+        db.insert_batch(&samples).unwrap();
+        let mut out = db.target_sample_counts().unwrap();
+        out.sort();
+        assert_eq!(out, vec![("t1".to_string(), 30), ("t2".to_string(), 10)]);
     }
 
     /// @test The channel dictionary stores one row per distinct

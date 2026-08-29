@@ -30,7 +30,7 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
-use crate::config::ServerConfig;
+use crate::config::{FifoStrategy, ServerConfig};
 use crate::core::aproto_client::{AprotoClient, PushTelemetryPacket};
 use crate::core::config_manager::StructDictionary;
 use crate::core::metrics::TargetMetrics;
@@ -3236,6 +3236,7 @@ async fn main() {
     );
     let retention_ms = config.storage.retention_hours as u64 * 3600 * 1000;
     let audit_retention_days = config.storage.audit_retention_days;
+    let fifo_strategy = config.storage.fifo_strategy;
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
@@ -3255,13 +3256,56 @@ async fn main() {
                         // Delete 120% of estimated needed to account for index/overhead
                         let to_delete =
                             ((bytes_over / avg_bytes_per_sample.max(1)) * 6 / 5).max(100);
-                        if let Ok(n) = db.delete_oldest(to_delete as usize) {
+
+                        // Fair strategy waterlines the largest holders so
+                        // a chatty target cannot evict a quiet target's
+                        // only history; global deletes oldest regardless
+                        // of owner (config escape hatch).
+                        let deleted: usize = match fifo_strategy {
+                            FifoStrategy::Fair => match db.target_sample_counts() {
+                                Ok(per_target) => {
+                                    let allocs = crate::storage::telemetry_db::allocate_evictions(
+                                        &per_target,
+                                        to_delete,
+                                    );
+                                    let mut total = 0usize;
+                                    for (target, n) in &allocs {
+                                        match db.delete_oldest_for_target(target, *n as usize) {
+                                            Ok(d) => {
+                                                total += d;
+                                                tracing::info!(
+                                                    "FIFO(fair) evicted {} oldest samples from {}",
+                                                    d,
+                                                    target
+                                                );
+                                            }
+                                            Err(e) => tracing::warn!(
+                                                "FIFO(fair) eviction failed for {}: {}",
+                                                target,
+                                                e
+                                            ),
+                                        }
+                                    }
+                                    total
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "per-target counts unavailable ({}), falling back to global FIFO",
+                                        e
+                                    );
+                                    db.delete_oldest(to_delete as usize).unwrap_or(0)
+                                }
+                            },
+                            FifoStrategy::Global => db.delete_oldest(to_delete as usize).unwrap_or(0),
+                        };
+
+                        if deleted > 0 {
                             tracing::info!(
                                 "DB size {:.0}MB > {:.0}MB limit, FIFO deleted {} oldest samples (~{:.0}MB)",
                                 stats.db_size_bytes as f64 / 1_048_576.0,
                                 max_db_bytes as f64 / 1_048_576.0,
-                                n,
-                                (n as u64 * avg_bytes_per_sample) as f64 / 1_048_576.0
+                                deleted,
+                                (deleted as u64 * avg_bytes_per_sample) as f64 / 1_048_576.0
                             );
                             // Reclaim freed pages immediately
                             let _ = db.incremental_vacuum();
