@@ -18,30 +18,37 @@
           "type": "uint",
           "offset": 4,
           "size": 4,
-          "value": 0
+          "value": 0,
+          "doc": "Total telemetry packets pushed to bus."
         },
         {
           "name": "sendFailures",
           "type": "uint",
           "offset": 8,
           "size": 4,
-          "value": 0
+          "value": 0,
+          "doc": "Failed pushes (queue full or registry miss)."
         },
         {
           "name": "activeCount",
           "type": "uint",
           "offset": 12,
           "size": 2,
-          "value": 0
+          "value": 0,
+          "doc": "Number of active subscriptions."
         },
         {
           "name": "reserved",
           "type": "uint",
           "offset": 14,
           "size": 2,
-          "value": 0
+          "value": 0,
+          "doc": "Alignment padding."
         }
-      ]
+      ],
+      "spec_defined": true,
+      "layout_hash": "0x307F7315",
+      "canonical_spec": "collectCount:uint:4;packetsSent:uint:4;sendFailures:uint:4;activeCount:uint:2;reserved:uint:2;"
     },
     "TelemetryManagerState": {
       "category": "STATE",
@@ -59,30 +66,37 @@
           "type": "uint",
           "offset": 4,
           "size": 4,
-          "value": 0
+          "value": 0,
+          "doc": "Total telemetry packets pushed to bus."
         },
         {
           "name": "sendFailures",
           "type": "uint",
           "offset": 8,
           "size": 4,
-          "value": 0
+          "value": 0,
+          "doc": "Failed pushes (queue full or registry miss)."
         },
         {
           "name": "activeCount",
           "type": "uint",
           "offset": 12,
           "size": 2,
-          "value": 0
+          "value": 0,
+          "doc": "Number of active subscriptions."
         },
         {
           "name": "reserved",
           "type": "uint",
           "offset": 14,
           "size": 2,
-          "value": 0
+          "value": 0,
+          "doc": "Alignment padding."
         }
-      ]
+      ],
+      "spec_defined": true,
+      "layout_hash": "0x307F7315",
+      "canonical_spec": "collectCount:uint:4;packetsSent:uint:4;sendFailures:uint:4;activeCount:uint:2;reserved:uint:2;"
     },
     "TelemetryManagerTprm": {
       "category": "TUNABLE_PARAM",

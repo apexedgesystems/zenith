@@ -10,30 +10,33 @@
           "type": "float",
           "offset": 0,
           "size": 4,
-          "value": "0.0F"
+          "doc": "Maximum observed divergence [N]."
         },
         {
           "name": "compareCount",
           "type": "uint",
           "offset": 4,
           "size": 4,
-          "value": 0
+          "doc": "Total comparisons executed."
         },
         {
           "name": "warnCount",
           "type": "uint",
           "offset": 8,
           "size": 4,
-          "value": 0
+          "doc": "Threshold warnings issued."
         },
         {
           "name": "reserved",
           "type": "uint",
           "offset": 12,
           "size": 4,
-          "value": 0
+          "doc": "Reserved for alignment."
         }
-      ]
+      ],
+      "spec_defined": true,
+      "layout_hash": "0xD4D4498E",
+      "canonical_spec": "maxDivergence:float:4;compareCount:uint:4;warnCount:uint:4;reserved:uint:4;"
     },
     "ComparatorTunableParams": {
       "category": "TUNABLE_PARAM",
@@ -44,16 +47,21 @@
           "type": "float",
           "offset": 0,
           "size": 4,
-          "value": "0.1F"
+          "value": 0.1,
+          "doc": "Divergence magnitude warning threshold [N]."
         },
         {
           "name": "reserved",
           "type": "float",
           "offset": 4,
           "size": 4,
-          "value": "0.0F"
+          "value": 0.0,
+          "doc": "Reserved for alignment."
         }
-      ]
+      ],
+      "spec_defined": true,
+      "layout_hash": "0xCE8CD128",
+      "canonical_spec": "warnThreshold:float:4;reserved:float:4;"
     }
   }
 }
