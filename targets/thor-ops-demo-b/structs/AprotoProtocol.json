@@ -27,13 +27,20 @@
           "value": null
         },
         {
+          "name": "stage",
+          "type": "uint",
+          "offset": 5,
+          "size": 1,
+          "value": null
+        },
+        {
           "name": "reserved",
           "type": "array",
-          "offset": 5,
-          "size": 3,
+          "offset": 6,
+          "size": 2,
           "value": [],
           "element_type": "uint",
-          "dims": [3]
+          "dims": [2]
         }
       ]
     },

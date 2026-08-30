@@ -160,13 +160,40 @@ export default function TunablesPage({
       );
       if (r.ok) {
         const result = await r.json();
+        const staged = result.staged as
+          | {
+              step: string;
+              outcome?: string;
+              verify?: string;
+              verdict?: { verdict_name?: string } | null;
+            }
+          | undefined;
         if (result.status === 0) {
+          // A readback-capable target ran the full staged pipeline;
+          // say so -- "verified on vehicle" is a stronger claim than
+          // "uploaded" and the operator should know which they got.
           setMessage(
-            `Parameters updated and reloaded (${result.uploaded_bytes} bytes uploaded)`,
+            staged?.step === "applied"
+              ? `Verified on vehicle (readback match, VERIFY OK) and applied` +
+                  ` (${result.uploaded_bytes} bytes${
+                    result.queued ? ", completed deferred" : ""
+                  })`
+              : `Parameters updated and reloaded (${result.uploaded_bytes} bytes uploaded)`,
           );
           setTimeout(loadParams, 500);
+        } else if (staged && staged.step !== "applied") {
+          // The pipeline refused before apply: active bytes untouched.
+          const verdict =
+            staged.verdict?.verdict_name ?? result.status_name ?? "refused";
+          setError(
+            `Not applied -- ${staged.step} step refused (${verdict}). ` +
+              `Active configuration untouched.`,
+          );
         } else {
-          setError(`Upload failed: ${result.status_name}`);
+          const verdict = result.reload_verdict
+            ? ` (verdict: ${result.reload_verdict})`
+            : "";
+          setError(`Upload failed: ${result.status_name}${verdict}`);
         }
       } else {
         setError(await r.text());

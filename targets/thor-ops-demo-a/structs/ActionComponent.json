@@ -173,7 +173,7 @@
     },
     "EngineStats": {
       "category": "STATE",
-      "size": 64,
+      "size": 68,
       "fields": [
         {
           "name": "totalCycles",
@@ -286,6 +286,27 @@
           "offset": 60,
           "size": 4,
           "value": 0
+        },
+        {
+          "name": "lastTimeoutSeqId",
+          "type": "uint",
+          "offset": 64,
+          "size": 2,
+          "value": 0
+        },
+        {
+          "name": "lastTimeoutStep",
+          "type": "uint",
+          "offset": 66,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "lastTimeoutPolicy",
+          "type": "uint",
+          "offset": 67,
+          "size": 1,
+          "value": 0
         }
       ]
     },
@@ -387,11 +408,12 @@
     "Status": {
       "underlying_type": "uint8_t",
       "values": {
-        "EOE_ACTION": 4,
+        "EOE_ACTION": 5,
         "ERROR_NO_RESOLVER": 1,
         "ERROR_QUEUE_FULL": 2,
         "SUCCESS": 0,
-        "WARN_RESOLVE_FAILURES": 3
+        "WARN_RESOLVE_FAILURES": 3,
+        "WARN_STEP_TIMEOUT": 4
       }
     }
   }

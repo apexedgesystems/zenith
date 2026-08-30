@@ -119,6 +119,11 @@ pub struct ComponentDict {
     pub structs: HashMap<String, StructDef>,
     #[serde(default)]
     pub enums: HashMap<String, serde_json::Value>,
+    /// Optional command-surface capabilities the producer declares
+    /// for this component (e.g. "readback" on the executive). Absent
+    /// on older dictionaries; treated as empty.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 /// All loaded struct dictionaries keyed by component name.
@@ -130,6 +135,29 @@ pub struct StructDictionary {
 /* ----------------------------- Loading ----------------------------- */
 
 impl StructDictionary {
+    /// True when any component in this dictionary set declares the
+    /// named command-surface capability. Capabilities are per-target
+    /// facts (the executive declares them for the vehicle), so the
+    /// union across components is the right read.
+    pub fn has_capability(&self, name: &str) -> bool {
+        self.components
+            .values()
+            .any(|c| c.capabilities.iter().any(|cap| cap == name))
+    }
+
+    /// All capabilities declared across this dictionary set, sorted
+    /// and deduplicated -- the target's capability list for the API.
+    pub fn capabilities(&self) -> Vec<String> {
+        let mut caps: Vec<String> = self
+            .components
+            .values()
+            .flat_map(|c| c.capabilities.iter().cloned())
+            .collect();
+        caps.sort();
+        caps.dedup();
+        caps
+    }
+
     /// Load all JSON struct dictionaries from a directory.
     pub fn load_dir(dir: &Path) -> Result<Self, String> {
         let mut components = HashMap::new();

@@ -39,6 +39,9 @@ interface QuickCommand {
 interface CommandResult {
   status: number;
   status_name: string;
+  // Present and true when the command ran deferred (QUEUED interim
+  // before the COMPLETION terminal this result reports).
+  queued?: boolean;
   extra_hex?: string;
   extra_length?: number;
 }
@@ -684,6 +687,18 @@ export default function CommandingPage({
                     }}
                   >
                     {isErr ? "ERROR" : entry.result?.status_name}
+                    {entry.result?.queued && (
+                      <span
+                        title="Executed deferred: the vehicle queued the command and this is its COMPLETION outcome"
+                        style={{
+                          marginLeft: "6px",
+                          color: "var(--color-text-muted)",
+                          fontWeight: "normal",
+                        }}
+                      >
+                        (deferred)
+                      </span>
+                    )}
                   </span>
                 </div>
                 {entry.result?.extra_hex &&
