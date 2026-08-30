@@ -290,7 +290,9 @@ GET    /api/targets/{id}/commands
 # Parameters (TUNABLE_PARAM)
 GET    /api/targets/{id}/params
 GET    /api/targets/{id}/params/{uid}
-POST   /api/targets/{id}/params/{uid}/update     # v3-stamped TPRM upload + RELOAD_TPRM
+POST   /api/targets/{id}/params/{uid}/update     # v3-stamped upload; verify-before-apply on readback-capable targets
+POST   /api/targets/{id}/params/{uid}/verify     # vehicle-side VERIFY of the staged payload, no apply
+GET    /api/targets/{id}/tprm/staged             # staged-bank digest (declared identity + verdict per file)
 
 # Telemetry
 WS     /api/targets/{id}/telemetry/live
