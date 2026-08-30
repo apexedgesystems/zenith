@@ -37,6 +37,7 @@ retention_hours = 24
 name = "Local SIL - Ops Demo"
 host = "172.21.0.1"
 port = 9000
+# protocol = "aproto-slip"   # wire protocol (default; validated at boot)
 auto_connect = false
 manifest = "/data/targets/sil-ops-demo/app_manifest.json"
 structs_dir = "/data/targets/sil-ops-demo/structs"

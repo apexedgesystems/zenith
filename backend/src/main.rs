@@ -36,6 +36,7 @@ use crate::core::config_manager::StructDictionary;
 use crate::core::metrics::TargetMetrics;
 use crate::core::telemetry::{self, TelemetrySample};
 use crate::core::tprm;
+use crate::core::transport::{unsupported_op, Protocol, ProtocolLink};
 use crate::storage::telemetry_db::TelemetryDb;
 
 /* ----------------------------- CLI ----------------------------- */
@@ -63,7 +64,7 @@ struct Actor(Arc<str>);
 
 struct TargetState {
     config: config::TargetSection,
-    client: Arc<Mutex<AprotoClient>>,
+    client: Arc<Mutex<ProtocolLink>>,
     /// Lock-free view of the client's connection flag. Status endpoints
     /// read this instead of locking `client`, which a file transfer can
     /// hold for the duration of an upload.
@@ -249,10 +250,20 @@ async fn server_version() -> Json<serde_json::Value> {
 /// RwLock is writer-preferring, so a guard held across an APROTO round
 /// trip (worst case a multi-thousand-RTT file upload) parks the next
 /// writer and stalls every request behind it.
+/// Build the link a target's declared protocol asks for.
+fn build_link(
+    protocol: Protocol,
+    push_tlm_tx: broadcast::Sender<PushTelemetryPacket>,
+) -> ProtocolLink {
+    match protocol {
+        Protocol::AprotoSlip => ProtocolLink::Aproto(AprotoClient::new(push_tlm_tx)),
+    }
+}
+
 async fn target_client(
     state: &AppState,
     id: &str,
-) -> Result<(Arc<Mutex<AprotoClient>>, Arc<TelemetryDb>), (StatusCode, String)> {
+) -> Result<(Arc<Mutex<ProtocolLink>>, Arc<TelemetryDb>), (StatusCode, String)> {
     let st = state.read().await;
     let target = st
         .targets
@@ -431,7 +442,11 @@ async fn target_noop(
     Path(id): Path<String>,
 ) -> Result<Json<CommandResponse>, (StatusCode, String)> {
     let (client, _) = target_client(&state, &id).await?;
-    let mut cli = client.lock().await;
+    let mut link = client.lock().await;
+    let proto = link.protocol();
+    let Some(cli) = link.aproto() else {
+        return Err((StatusCode::NOT_IMPLEMENTED, unsupported_op("noop", proto)));
+    };
     let resp = cli
         .noop()
         .await
@@ -444,7 +459,14 @@ async fn target_health(
     Path(id): Path<String>,
 ) -> Result<Json<CommandResponse>, (StatusCode, String)> {
     let (client, _) = target_client(&state, &id).await?;
-    let mut cli = client.lock().await;
+    let mut link = client.lock().await;
+    let proto = link.protocol();
+    let Some(cli) = link.aproto() else {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            unsupported_op("health command", proto),
+        ));
+    };
     let resp = cli
         .get_health()
         .await
@@ -466,7 +488,14 @@ async fn target_inspect(
     })?;
 
     let (client, _) = target_client(&state, &id).await?;
-    let mut cli = client.lock().await;
+    let mut link = client.lock().await;
+    let proto = link.protocol();
+    let Some(cli) = link.aproto() else {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            unsupported_op("inspect", proto),
+        ));
+    };
     let resp = cli
         .inspect(full_uid, query.category, query.offset, query.length)
         .await
@@ -518,9 +547,16 @@ async fn upload_file(
     let detail = format!("path={} bytes={}", body.remote_path, data.len());
     let ip_str = addr.ip().to_string();
 
-    let mut cli = client.lock().await;
+    let mut link = client.lock().await;
+    let proto = link.protocol();
+    let Some(cli) = link.aproto() else {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            unsupported_op("file upload", proto),
+        ));
+    };
     let result = cli.upload_file(&body.remote_path, &data).await;
-    drop(cli);
+    drop(link);
 
     match result {
         Ok(resp) => {
@@ -598,9 +634,16 @@ async fn restart_target(
     let (client, db_for_audit) = target_client(&state, &id).await?;
     let ip_str = addr.ip().to_string();
 
-    let mut cli = client.lock().await;
+    let mut link = client.lock().await;
+    let proto = link.protocol();
+    let Some(cli) = link.aproto() else {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            unsupported_op("executive restart", proto),
+        ));
+    };
     let result = cli.restart_executive().await;
-    drop(cli);
+    drop(link);
 
     match result {
         Ok(resp) => {
@@ -693,7 +736,14 @@ async fn swap_library(
     );
     let ip_str = addr.ip().to_string();
 
-    let mut cli = client.lock().await;
+    let mut link = client.lock().await;
+    let proto = link.protocol();
+    let Some(cli) = link.aproto() else {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            unsupported_op("library swap", proto),
+        ));
+    };
     let result = cli
         .swap_library(
             full_uid,
@@ -703,7 +753,7 @@ async fn swap_library(
             &data,
         )
         .await;
-    drop(cli);
+    drop(link);
 
     match result {
         Ok(resp) => {
@@ -818,9 +868,16 @@ async fn send_command(
     );
     let ip_str = addr.ip().to_string();
 
-    let mut cli = client.lock().await;
+    let mut link = client.lock().await;
+    let proto = link.protocol();
+    let Some(cli) = link.aproto() else {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            unsupported_op("raw command", proto),
+        ));
+    };
     let result = cli.send_command(full_uid, opcode, &payload).await;
-    drop(cli);
+    drop(link);
 
     match result {
         Ok(resp) => {
@@ -982,7 +1039,14 @@ async fn get_params(
     })?;
 
     // INSPECT TUNABLE_PARAM (category=1)
-    let mut cli = client.lock().await;
+    let mut link = client.lock().await;
+    let proto = link.protocol();
+    let Some(cli) = link.aproto() else {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            unsupported_op("tunable inspect", proto),
+        ));
+    };
     let resp = cli
         .inspect(full_uid, 1, 0, 0)
         .await
@@ -1301,14 +1365,22 @@ async fn update_params(
     // short of a verified payload never reaches RELOAD. Capability-off
     // targets keep the classic upload+reload path byte-for-byte.
     let readback = dicts.has_capability("readback");
-    let result = if readback {
-        staged_update_flow(&client, full_uid, &stamped).await
-    } else {
-        let mut cli = client.lock().await;
-        let r = cli.update_tprm(full_uid, &stamped).await;
-        drop(cli);
-        r.map(|resp| (resp, serde_json::Value::Null))
+    let mut link = client.lock().await;
+    let proto = link.protocol();
+    let Some(cli) = link.aproto() else {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            unsupported_op("tprm update", proto),
+        ));
     };
+    let result = if readback {
+        staged_update_flow(cli, full_uid, &stamped).await
+    } else {
+        cli.update_tprm(full_uid, &stamped)
+            .await
+            .map(|resp| (resp, serde_json::Value::Null))
+    };
+    drop(link);
 
     match result {
         Ok((resp, staged_report)) => {
@@ -1369,7 +1441,7 @@ async fn update_params(
 /// or the failing step's response with the report explaining where
 /// and why the pipeline stopped (active bytes untouched).
 async fn staged_update_flow(
-    client: &Arc<Mutex<AprotoClient>>,
+    cli: &mut AprotoClient,
     full_uid: u32,
     stamped: &[u8],
 ) -> Result<
@@ -1378,10 +1450,9 @@ async fn staged_update_flow(
 > {
     use crate::protocol::aproto;
 
-    // Our own prelude is the intent the vehicle must echo back.
+    // Our own prelude is the intent the vehicle must echo back. The
+    // caller guarded the protocol: only the APROTO family stages TPRM.
     let (sent_prelude, _) = tprm::parse_v3(stamped).expect("stamp_v3 output always parses");
-
-    let mut cli = client.lock().await;
 
     // 1. Stage (no reload).
     let up = cli.stage_tprm(full_uid, stamped).await?;
@@ -1450,7 +1521,6 @@ async fn staged_update_flow(
 
     // 4. Apply.
     let resp = cli.reload_tprm(full_uid).await?;
-    drop(cli);
     let report = serde_json::json!({
         "step": "applied",
         "readback": "match",
@@ -1467,12 +1537,19 @@ async fn tprm_staged_digest(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let (client, _db) = target_client(&state, &id).await?;
-    let mut cli = client.lock().await;
+    let mut link = client.lock().await;
+    let proto = link.protocol();
+    let Some(cli) = link.aproto() else {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            unsupported_op("tprm readback", proto),
+        ));
+    };
     let resp = cli
         .send_command(0x000000, tprm::OP_READBACK_TPRM, &[])
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{}", e)))?;
-    drop(cli);
+    drop(link);
     if resp.status != 0 {
         return Err((
             StatusCode::BAD_GATEWAY,
@@ -1507,12 +1584,19 @@ async fn tprm_verify_staged(
         )
     })?;
     let (client, _db) = target_client(&state, &id).await?;
-    let mut cli = client.lock().await;
+    let mut link = client.lock().await;
+    let proto = link.protocol();
+    let Some(cli) = link.aproto() else {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            unsupported_op("tprm verify", proto),
+        ));
+    };
     let resp = cli
         .send_command(0x000000, tprm::OP_VERIFY_TPRM, &full_uid.to_le_bytes())
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{}", e)))?;
-    drop(cli);
+    drop(link);
     if resp.status != 0 {
         return Ok(Json(serde_json::json!({
             "fullUid": format!("0x{:06X}", full_uid),
@@ -2294,6 +2378,11 @@ async fn add_target(
         structs_dir: body.structs_dir,
         telemetry_config: None,
         commands_config: None,
+        // UI-added targets speak the default protocol; config.toml is
+        // where other protocols are declared.
+        protocol: crate::core::transport::Protocol::AprotoSlip
+            .name()
+            .to_string(),
         auto_connect: false,
     };
 
@@ -2307,7 +2396,7 @@ async fn add_target(
         metrics.clone(),
     );
 
-    let mut new_client = AprotoClient::new(push_tlm_tx.clone());
+    let mut new_client = build_link(Protocol::AprotoSlip, push_tlm_tx.clone());
     new_client.set_metrics(metrics.clone());
     let connected = new_client.connected_handle();
     st.targets.insert(
@@ -2420,8 +2509,11 @@ async fn target_registry(
         }
     };
 
-    let mut cli = client.lock().await;
-    let connected = cli.is_connected();
+    let mut link = client.lock().await;
+    let connected = link.is_connected();
+    // Reachability probes are an APROTO-family operation; on other
+    // protocols the manifest listing still serves, unprobed.
+    let mut cli = link.aproto();
 
     let mut components = Vec::new();
     for comp in &manifest_components {
@@ -2433,9 +2525,12 @@ async fn target_registry(
 
         // Probe reachability only if connected
         let reachable = if connected {
-            match cli.send_command(uid, 0x0000, &[]).await {
-                Ok(r) => r.status == 0,
-                Err(_) => false,
+            match cli.as_deref_mut() {
+                Some(c) => match c.send_command(uid, 0x0000, &[]).await {
+                    Ok(r) => r.status == 0,
+                    Err(_) => false,
+                },
+                None => false,
             }
         } else {
             false
@@ -2463,10 +2558,17 @@ async fn target_schedule(
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let (client, _) = target_client(&state, &id).await?;
-    let mut cli = client.lock().await;
-    if !cli.is_connected() {
+    let mut link = client.lock().await;
+    if !link.is_connected() {
         return Err((StatusCode::BAD_GATEWAY, "Not connected".to_string()));
     }
+    let proto = link.protocol();
+    let Some(cli) = link.aproto() else {
+        return Err((
+            StatusCode::NOT_IMPLEMENTED,
+            unsupported_op("schedule query", proto),
+        ));
+    };
 
     // Query scheduler health (fullUid=0x000100, opcode=0x0100)
     let sched = match cli.send_command(0x000100, 0x0100, &[]).await {
@@ -3444,7 +3546,13 @@ async fn main() {
         });
 
         let metrics = TargetMetrics::new();
-        let mut new_client = AprotoClient::new(push_tlm_tx.clone());
+        // Boot refusal on an unknown protocol: a typo in config.toml
+        // must never silently become the default transport.
+        let protocol = Protocol::from_config(&tc.protocol).unwrap_or_else(|e| {
+            eprintln!("FATAL: target '{}': {}", tc.name, e);
+            std::process::exit(1);
+        });
+        let mut new_client = build_link(protocol, push_tlm_tx.clone());
         new_client.set_metrics(metrics.clone());
         let connected = new_client.connected_handle();
         targets.insert(

@@ -157,6 +157,11 @@ pub struct TargetSection {
     pub host: String,
     #[serde(default = "default_target_port")]
     pub port: u16,
+    /// Wire protocol this target speaks. Validated at boot against
+    /// the registered transports; a typo refuses to boot rather than
+    /// silently defaulting.
+    #[serde(default = "default_protocol")]
+    pub protocol: String,
     #[serde(default)]
     pub manifest: Option<String>,
     #[serde(default)]
@@ -192,6 +197,9 @@ fn default_retention() -> u32 {
 }
 fn default_target_port() -> u16 {
     9000
+}
+fn default_protocol() -> String {
+    "aproto-slip".to_string()
 }
 
 impl Default for ServerConfig {
