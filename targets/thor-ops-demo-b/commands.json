@@ -216,6 +216,18 @@
           ]
         },
         {
+          "name": "READBACK_TPRM",
+          "opcode": "0x0131",
+          "desc": "Readback Tprm",
+          "fields": []
+        },
+        {
+          "name": "VERIFY_TPRM",
+          "opcode": "0x0132",
+          "desc": "Verify Tprm",
+          "fields": []
+        },
+        {
           "name": "GET_REGISTRY",
           "opcode": "0x0140",
           "desc": "Dump component registry (44B/entry)",

@@ -521,11 +521,14 @@
         "GET_REGISTRY": 320,
         "GET_RT_MODE": 259,
         "INSPECT": 304,
+        "READBACK_TPRM": 305,
         "RELOAD_EXECUTIVE": 295,
         "RELOAD_LIBRARY": 294,
         "RELOAD_TPRM": 293,
-        "SET_VERBOSITY": 289
+        "SET_VERBOSITY": 289,
+        "VERIFY_TPRM": 306
       }
     }
-  }
+  },
+  "capabilities": ["readback"]
 }
