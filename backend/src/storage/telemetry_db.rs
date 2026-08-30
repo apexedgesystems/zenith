@@ -111,19 +111,44 @@ impl TelemetryDb {
         // table -- the legacy layout is detected by its 'channel' column.
         Self::migrate_legacy_telemetry(&writer)?;
 
-        // Main telemetry table
+        // Main telemetry table. tier 0 = full resolution; higher tiers
+        // are age-downsampled envelope buckets where value is the mean
+        // and v_min/v_max/agg_count carry the spread. On full-res rows
+        // the extra columns cost one record-header byte each (NULL and
+        // the integer 0 store no data bytes).
         writer.execute_batch(
             "CREATE TABLE IF NOT EXISTS telemetry (
                 id INTEGER PRIMARY KEY,
                 channel_id INTEGER NOT NULL,
                 timestamp_ms INTEGER NOT NULL,
-                value REAL NOT NULL
+                value REAL NOT NULL,
+                tier INTEGER NOT NULL DEFAULT 0,
+                v_min REAL,
+                v_max REAL,
+                agg_count INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_telemetry_chan_ts
                 ON telemetry (channel_id, timestamp_ms DESC);
             CREATE INDEX IF NOT EXISTS idx_telemetry_ts
                 ON telemetry (timestamp_ms ASC);",
         )?;
+
+        // A dictionary-schema table from before the tier columns gets
+        // them added in place (cheap: no rebuild, existing rows read
+        // as tier 0 with NULL envelope).
+        let has_tier: i64 = writer.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('telemetry') WHERE name = 'tier'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_tier == 0 {
+            writer.execute_batch(
+                "ALTER TABLE telemetry ADD COLUMN tier INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE telemetry ADD COLUMN v_min REAL;
+                 ALTER TABLE telemetry ADD COLUMN v_max REAL;
+                 ALTER TABLE telemetry ADD COLUMN agg_count INTEGER;",
+            )?;
+        }
 
         // Separate table for latest values per channel (fast O(1) lookup).
         // Updated on each insert batch via UPSERT.
@@ -407,7 +432,7 @@ impl TelemetryDb {
                 };
                 let ch_arc: Arc<str> = Arc::from(ch);
                 let mut stmt = conn.prepare_cached(
-                    "SELECT timestamp_ms, value FROM telemetry \
+                    "SELECT timestamp_ms, value, v_min, v_max, agg_count FROM telemetry \
                      WHERE channel_id = ?1 \
                        AND timestamp_ms >= ?2 AND timestamp_ms <= ?3 \
                      ORDER BY timestamp_ms ASC LIMIT ?4",
@@ -420,6 +445,7 @@ impl TelemetryDb {
                             timestamp_ms: row.get::<_, i64>(0)? as u64,
                             channel: Arc::clone(&ch_arc),
                             value: row.get(1)?,
+                            envelope: envelope_from_row(row.get(2)?, row.get(3)?, row.get(4)?),
                         })
                     },
                 )?;
@@ -436,7 +462,7 @@ impl TelemetryDb {
                 // scans and sorts the whole range (measured ~5.8 ms for
                 // LIMIT 100 over 100k rows, scaling with table size).
                 let mut stmt = conn.prepare_cached(
-                    "SELECT c.name, t.timestamp_ms, t.value \
+                    "SELECT c.name, t.timestamp_ms, t.value, t.v_min, t.v_max, t.agg_count \
                      FROM telemetry t INDEXED BY idx_telemetry_ts \
                      JOIN channels c ON c.id = t.channel_id \
                      WHERE c.target_id = ?1 \
@@ -452,12 +478,13 @@ impl TelemetryDb {
                             row.get::<_, String>(0)?,
                             row.get::<_, i64>(1)? as u64,
                             row.get::<_, f64>(2)?,
+                            envelope_from_row(row.get(3)?, row.get(4)?, row.get(5)?),
                         ))
                     },
                 )?;
                 let mut samples = Vec::new();
                 for row in rows {
-                    let (name, timestamp_ms, value) = row?;
+                    let (name, timestamp_ms, value, envelope) = row?;
                     let channel = Arc::clone(
                         name_arcs
                             .entry(name)
@@ -468,6 +495,7 @@ impl TelemetryDb {
                         timestamp_ms,
                         channel,
                         value,
+                        envelope,
                     });
                 }
                 Ok(samples)
@@ -492,6 +520,7 @@ impl TelemetryDb {
                     timestamp_ms: row.get::<_, i64>(1)? as u64,
                     channel: std::sync::Arc::from(channel),
                     value: row.get(3)?,
+                    envelope: None,
                 })
             })?;
 
@@ -794,88 +823,147 @@ impl TelemetryDb {
         })
     }
 
-    /// Downsample old data: replace detailed samples with averaged values.
+    /// One bounded step of the retention ladder: rows below `to_tier`
+    /// older than `cutoff_ms` are aggregated into `bucket_ms`-wide
+    /// envelope buckets at `to_tier` -- value becomes the (weighted)
+    /// mean, v_min/v_max keep the spread, agg_count the source-sample
+    /// total. Weighting by agg_count makes re-tiering exact: a tier-1
+    /// bucket of 9 samples pulls a tier-2 mean 9x harder than a
+    /// bucket of 1.
     ///
-    /// For data older than `age_ms`, groups samples into `bucket_ms`-wide
-    /// buckets and replaces them with averaged values. This reduces storage
-    /// while preserving trends.
-    ///
-    /// Example: downsample(3600000, 60000) keeps last hour at full resolution,
-    /// then averages into 1-minute buckets for everything older.
-    pub fn downsample(&self, age_ms: u64, bucket_ms: u64) -> Result<DownsampleResult, DbError> {
+    /// Processes at most `slice_ms` of source data per call, starting
+    /// at the oldest eligible row, so a large backlog converges over
+    /// successive maintenance ticks instead of one full-history
+    /// rewrite under the writer lock. Returns zeros when nothing is
+    /// eligible (converged).
+    pub fn tier_pass(
+        &self,
+        to_tier: u32,
+        cutoff_ms: u64,
+        bucket_ms: u64,
+        slice_ms: u64,
+    ) -> Result<TierPassResult, DbError> {
         let mut conn = self.writer.lock().map_err(|_| DbError::Lock)?;
+        let bucket = bucket_ms.max(1) as i64;
+        let cutoff = cutoff_ms as i64;
+
+        let oldest: Option<i64> = conn
+            .query_row(
+                "SELECT MIN(timestamp_ms) FROM telemetry
+                 WHERE tier < ?1 AND timestamp_ms < ?2",
+                params![to_tier, cutoff],
+                |row| row.get(0),
+            )
+            .optional()?
+            .flatten();
+        let Some(oldest) = oldest else {
+            return Ok(TierPassResult {
+                source_rows: 0,
+                bucket_rows: 0,
+            });
+        };
+
+        // Bucket-align the window so every bucket this pass writes is
+        // complete; the window never crosses the cutoff.
+        let window_start = (oldest / bucket) * bucket;
+        let window_end = window_start
+            .saturating_add(slice_ms.min(i64::MAX as u64) as i64)
+            .max(window_start + bucket)
+            .min(cutoff);
+
+        // RAII transaction: an error between DELETE and re-INSERT must
+        // roll back atomically, never leave history deleted without its
+        // envelope replacement (or an open transaction on the writer).
+        let tx = conn.transaction()?;
+        tx.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS tier_temp ( \
+                 channel_id INTEGER, timestamp_ms INTEGER, value REAL, \
+                 v_min REAL, v_max REAL, agg_count INTEGER \
+             )",
+        )?;
+        tx.execute("DELETE FROM tier_temp", [])?;
+
+        tx.execute(
+            "INSERT INTO tier_temp (channel_id, timestamp_ms, value, v_min, v_max, agg_count) \
+             SELECT channel_id, \
+                    (timestamp_ms / ?1) * ?1 + (?1 / 2), \
+                    SUM(value * COALESCE(agg_count, 1)) / SUM(COALESCE(agg_count, 1)), \
+                    MIN(COALESCE(v_min, value)), \
+                    MAX(COALESCE(v_max, value)), \
+                    SUM(COALESCE(agg_count, 1)) \
+             FROM telemetry \
+             WHERE tier < ?2 AND timestamp_ms >= ?3 AND timestamp_ms < ?4 \
+             GROUP BY channel_id, timestamp_ms / ?1",
+            params![bucket, to_tier, window_start, window_end],
+        )?;
+
+        let source_rows = tx.execute(
+            "DELETE FROM telemetry \
+             WHERE tier < ?1 AND timestamp_ms >= ?2 AND timestamp_ms < ?3",
+            params![to_tier, window_start, window_end],
+        )?;
+        let bucket_rows = tx.execute(
+            "INSERT INTO telemetry (channel_id, timestamp_ms, value, tier, v_min, v_max, agg_count) \
+             SELECT channel_id, timestamp_ms, value, ?1, v_min, v_max, agg_count FROM tier_temp",
+            params![to_tier],
+        )?;
+        tx.execute("DELETE FROM tier_temp", [])?;
+        tx.commit()?;
+
+        Ok(TierPassResult {
+            source_rows: source_rows as u64,
+            bucket_rows: bucket_rows as u64,
+        })
+    }
+
+    /// Rows in a timestamp range (index-only count). The maintenance
+    /// loop uses this to report per-tier populations by age band
+    /// without scanning row data.
+    pub fn count_range(&self, start_ms: u64, end_ms: u64) -> Result<u64, DbError> {
+        self.with_reader(|conn| {
+            let count: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM telemetry \
+                 WHERE timestamp_ms >= ?1 AND timestamp_ms < ?2",
+                params![start_ms as i64, end_ms as i64],
+                |row| row.get(0),
+            )?;
+            Ok(count as u64)
+        })
+    }
+
+    /// Downsample old data: replace detailed samples with envelope
+    /// buckets (operator-triggered; the scheduled ladder in the
+    /// maintenance loop uses the same tier_pass machinery).
+    ///
+    /// Example: downsample(3600000, 60000) keeps the last hour at full
+    /// resolution and averages everything older into 1-minute envelope
+    /// buckets at the coarse tier.
+    pub fn downsample(&self, age_ms: u64, bucket_ms: u64) -> Result<DownsampleResult, DbError> {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-        let cutoff = now_ms.saturating_sub(age_ms) as i64;
-        let bucket = bucket_ms as i64;
+        let cutoff = now_ms.saturating_sub(age_ms);
 
-        // Count samples that will be affected
-        let before_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM telemetry WHERE timestamp_ms < ?1",
-                params![cutoff],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-
-        if before_count == 0 {
-            return Ok(DownsampleResult {
-                samples_before: 0,
-                samples_after: 0,
-                removed: 0,
-            });
+        // Loop bounded passes until converged: same incremental unit
+        // the maintenance ladder uses, so the writer is never held for
+        // one full-history rewrite even on the manual path.
+        const SLICE_MS: u64 = 3_600_000;
+        let mut source_total = 0u64;
+        let mut bucket_total = 0u64;
+        loop {
+            let pass = self.tier_pass(COARSE_TIER, cutoff, bucket_ms, SLICE_MS)?;
+            if pass.source_rows == 0 {
+                break;
+            }
+            source_total += pass.source_rows;
+            bucket_total += pass.bucket_rows;
         }
 
-        // RAII transaction for the same reason as insert_batch: an error
-        // between DELETE and re-INSERT must roll back atomically, never
-        // leave an open transaction on the writer connection (or worse,
-        // history deleted without the averaged replacement).
-        let tx = conn.transaction()?;
-
-        // Create averaged samples in a temp table
-        tx.execute_batch(
-            "CREATE TEMP TABLE IF NOT EXISTS ds_temp ( \
-                 channel_id INTEGER, timestamp_ms INTEGER, value REAL \
-             )",
-        )?;
-        tx.execute("DELETE FROM ds_temp", [])?;
-
-        tx.execute(
-            "INSERT INTO ds_temp (channel_id, timestamp_ms, value) \
-             SELECT channel_id, \
-                    (timestamp_ms / ?1) * ?1 + (?1 / 2), \
-                    AVG(value) \
-             FROM telemetry \
-             WHERE timestamp_ms < ?2 \
-             GROUP BY channel_id, timestamp_ms / ?1",
-            params![bucket, cutoff],
-        )?;
-
-        let after_count: i64 = tx
-            .query_row("SELECT COUNT(*) FROM ds_temp", [], |row| row.get(0))
-            .unwrap_or(0);
-
-        // Replace old detailed data with averaged data
-        tx.execute(
-            "DELETE FROM telemetry WHERE timestamp_ms < ?1",
-            params![cutoff],
-        )?;
-
-        tx.execute(
-            "INSERT INTO telemetry (channel_id, timestamp_ms, value) \
-             SELECT channel_id, timestamp_ms, value FROM ds_temp",
-            [],
-        )?;
-
-        tx.execute("DROP TABLE IF EXISTS ds_temp", [])?;
-        tx.commit()?;
-
         Ok(DownsampleResult {
-            samples_before: before_count as u64,
-            samples_after: after_count as u64,
-            removed: (before_count - after_count) as u64,
+            samples_before: source_total,
+            samples_after: bucket_total,
+            removed: source_total.saturating_sub(bucket_total),
         })
     }
 
@@ -981,6 +1069,23 @@ impl TelemetryDb {
                 conn.query_row("SELECT COUNT(*) FROM audit_log", [], |row| row.get(0))?;
             Ok(count as u64)
         })
+    }
+}
+
+/// Build an Envelope from a row's nullable tier columns: present only
+/// when the row was written by the tier ladder (all three non-null).
+fn envelope_from_row(
+    v_min: Option<f64>,
+    v_max: Option<f64>,
+    agg_count: Option<i64>,
+) -> Option<crate::core::telemetry::Envelope> {
+    match (v_min, v_max, agg_count) {
+        (Some(min), Some(max), Some(count)) => Some(crate::core::telemetry::Envelope {
+            min,
+            max,
+            count: count.max(0) as u32,
+        }),
+        _ => None,
     }
 }
 
@@ -1093,6 +1198,20 @@ pub struct DownsampleResult {
     pub samples_after: u64,
     pub removed: u64,
 }
+
+/// One tier_pass step's accounting.
+#[derive(Debug, Clone, Copy)]
+pub struct TierPassResult {
+    /// Rows consumed from lower tiers in this pass's window.
+    pub source_rows: u64,
+    /// Envelope bucket rows written in their place.
+    pub bucket_rows: u64,
+}
+
+/// Tier levels of the retention ladder. Full resolution is 0; the
+/// ladder's names match the config keys.
+pub const MID_TIER: u32 = 1;
+pub const COARSE_TIER: u32 = 2;
 
 /// One entry in the audit log.
 #[derive(Debug, serde::Serialize)]
@@ -1428,6 +1547,7 @@ mod tests {
             timestamp_ms: ts,
             channel: Arc::clone(channel),
             value: v,
+            envelope: None,
         }
     }
 
@@ -2255,6 +2375,152 @@ mod tests {
         let mut out = db.target_sample_counts().unwrap();
         out.sort();
         assert_eq!(out, vec![("t1".to_string(), 30), ("t2".to_string(), 10)]);
+    }
+
+    /// @test A transient spike survives both ladder transitions as a
+    /// min/max excursion: the tier-1 bucket keeps max=spike, and
+    /// re-tiering to the coarse tier keeps it again while the mean
+    /// dampens. This is the ticket's core acceptance.
+    #[test]
+    fn spike_survives_both_tier_transitions() {
+        let (_dir, db) = open_temp_db();
+        let t: Arc<str> = Arc::from("t1");
+        let ch: Arc<str> = Arc::from("X");
+        // 100 samples at 1.0, one spike of 100.0 in the middle,
+        // 100 ms apart starting at t=0.
+        let mut samples: Vec<TelemetrySample> =
+            (0..100u64).map(|i| sample(&t, &ch, i * 100, 1.0)).collect();
+        samples[50].value = 100.0;
+        db.insert_batch(&samples).unwrap();
+
+        // Tier 1: 1 s buckets over everything.
+        let pass = db.tier_pass(MID_TIER, 20_000, 1_000, u64::MAX).unwrap();
+        assert_eq!(pass.source_rows, 100);
+        assert_eq!(pass.bucket_rows, 10);
+
+        let mid = db.query_range("t1", Some("X"), 0, 20_000, 100).unwrap();
+        assert_eq!(mid.len(), 10);
+        let spike_bucket = mid.iter().find(|s| s.timestamp_ms == 5_500).unwrap();
+        let env = spike_bucket.envelope.unwrap();
+        assert_eq!(env.max, 100.0);
+        assert_eq!(env.min, 1.0);
+        assert_eq!(env.count, 10);
+        // Mean dampened: (9*1 + 100)/10 = 10.9
+        assert!((spike_bucket.value - 10.9).abs() < 1e-9);
+
+        // Tier 2: 10 s buckets over the tier-1 rows.
+        let pass = db.tier_pass(COARSE_TIER, 20_000, 10_000, u64::MAX).unwrap();
+        assert_eq!(pass.source_rows, 10);
+        assert_eq!(pass.bucket_rows, 1);
+
+        let coarse = db.query_range("t1", Some("X"), 0, 20_000, 100).unwrap();
+        assert_eq!(coarse.len(), 1);
+        let env = coarse[0].envelope.unwrap();
+        assert_eq!(env.max, 100.0, "spike must survive the second hop");
+        assert_eq!(env.min, 1.0);
+        assert_eq!(env.count, 100);
+        // Weighted mean over all 100 source samples: (99 + 100)/100.
+        assert!((coarse[0].value - 1.99).abs() < 1e-9);
+    }
+
+    /// @test Re-tiering weights bucket means by their source counts:
+    /// a 9-sample bucket pulls the coarse mean 9x harder than a
+    /// 1-sample bucket.
+    #[test]
+    fn tier_pass_weights_means_by_count() {
+        let (_dir, db) = open_temp_db();
+        let t: Arc<str> = Arc::from("t1");
+        let ch: Arc<str> = Arc::from("X");
+        // Bucket A (0..1s): nine samples at 10.0. Bucket B (1..2s):
+        // one sample at 20.0.
+        let mut samples: Vec<TelemetrySample> =
+            (0..9u64).map(|i| sample(&t, &ch, i * 100, 10.0)).collect();
+        samples.push(sample(&t, &ch, 1_500, 20.0));
+        db.insert_batch(&samples).unwrap();
+
+        db.tier_pass(MID_TIER, 10_000, 1_000, u64::MAX).unwrap();
+        db.tier_pass(COARSE_TIER, 10_000, 10_000, u64::MAX).unwrap();
+
+        let out = db.query_range("t1", Some("X"), 0, 10_000, 10).unwrap();
+        assert_eq!(out.len(), 1);
+        // Weighted: (9*10 + 1*20)/10 = 11.0 -- NOT (10+20)/2.
+        assert!((out[0].value - 11.0).abs() < 1e-9);
+        assert_eq!(out[0].envelope.unwrap().count, 10);
+    }
+
+    /// @test tier_pass processes a bounded window per call and leaves
+    /// rows newer than the cutoff untouched, converging over repeated
+    /// calls -- the property that keeps one tick from rewriting a full
+    /// backlog under the writer lock.
+    #[test]
+    fn tier_pass_is_bounded_and_respects_cutoff() {
+        let (_dir, db) = open_temp_db();
+        let t: Arc<str> = Arc::from("t1");
+        let ch: Arc<str> = Arc::from("X");
+        // 30 minutes of 1 Hz data; cutoff protects the newest 10 min.
+        let samples: Vec<TelemetrySample> = (0..1800u64)
+            .map(|i| sample(&t, &ch, i * 1_000, i as f64))
+            .collect();
+        db.insert_batch(&samples).unwrap();
+        let cutoff = 20 * 60 * 1_000;
+
+        // Slice of 10 min: first pass consumes exactly that window.
+        let p1 = db.tier_pass(MID_TIER, cutoff, 60_000, 600_000).unwrap();
+        assert_eq!(p1.source_rows, 600);
+        assert_eq!(p1.bucket_rows, 10);
+
+        let p2 = db.tier_pass(MID_TIER, cutoff, 60_000, 600_000).unwrap();
+        assert_eq!(p2.source_rows, 600);
+
+        // Converged: everything below the cutoff is tiered.
+        let p3 = db.tier_pass(MID_TIER, cutoff, 60_000, 600_000).unwrap();
+        assert_eq!(p3.source_rows, 0);
+
+        // The protected window is untouched full-res.
+        let recent = db
+            .query_range("t1", Some("X"), cutoff, 3_600_000, 2000)
+            .unwrap();
+        assert_eq!(recent.len(), 600);
+        assert!(recent.iter().all(|s| s.envelope.is_none()));
+    }
+
+    /// @test A dictionary-schema database from before the tier columns
+    /// opens cleanly, gains them in place, and its old rows read as
+    /// full-resolution samples with no envelope.
+    #[test]
+    fn pre_tier_schema_gains_columns_in_place() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("v2.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE channels (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    target_id TEXT NOT NULL, name TEXT NOT NULL,
+                    UNIQUE(target_id, name));
+                 CREATE TABLE telemetry (
+                    id INTEGER PRIMARY KEY,
+                    channel_id INTEGER NOT NULL,
+                    timestamp_ms INTEGER NOT NULL,
+                    value REAL NOT NULL);
+                 CREATE INDEX idx_telemetry_chan_ts
+                    ON telemetry (channel_id, timestamp_ms DESC);
+                 CREATE INDEX idx_telemetry_ts
+                    ON telemetry (timestamp_ms ASC);
+                 INSERT INTO channels (target_id, name) VALUES ('t1', 'X');
+                 INSERT INTO telemetry (channel_id, timestamp_ms, value)
+                    VALUES (1, 100, 42.0);",
+            )
+            .unwrap();
+        }
+        let db = TelemetryDb::open(&path).unwrap();
+        let out = db.query_range("t1", Some("X"), 0, 1_000, 10).unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].value, 42.0);
+        assert!(out[0].envelope.is_none());
+        // And the ladder can process the migrated rows.
+        let pass = db.tier_pass(COARSE_TIER, 1_000, 1_000, u64::MAX).unwrap();
+        assert_eq!(pass.source_rows, 1);
     }
 
     /// @test audit_count reports the live number of audit rows.

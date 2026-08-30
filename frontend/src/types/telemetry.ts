@@ -59,7 +59,13 @@ export const TIME_WINDOWS = [
   { label: "1h", ms: 3600000 },
 ];
 
-export type ChannelData = Record<string, { t: number; v: number }[]>;
+/** One plotted point. `v` is the sample value -- or, for a tiered
+ *  (downsampled) bucket, the bucket mean, with `lo`/`hi` carrying the
+ *  bucket's min/max envelope so spikes stay visible at any age. */
+export type ChannelData = Record<
+  string,
+  { t: number; v: number; lo?: number; hi?: number }[]
+>;
 
 export function fieldName(ch: string): string {
   const dot = ch.indexOf(".");

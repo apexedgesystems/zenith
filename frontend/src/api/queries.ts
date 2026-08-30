@@ -162,6 +162,20 @@ export interface StorageVitals {
   projected_secs_to_cap: number | null;
   fifo_evicted_samples: number;
   retention_pruned_samples: number;
+  tiers: TierVitals;
+}
+
+/** Retention-ladder state: config echo plus live band populations
+ *  ([full-res window, mid horizon, older]) and the cumulative rows
+ *  converted to envelope buckets. */
+export interface TierVitals {
+  enabled: boolean;
+  full_resolution_minutes: number;
+  mid_bucket_seconds: number;
+  mid_horizon_hours: number;
+  coarse_bucket_seconds: number;
+  converted_rows: number;
+  band_rows: number[];
 }
 
 const isStorageVitals: Validator<StorageVitals> = (v) => {
@@ -181,9 +195,19 @@ const isStorageVitals: Validator<StorageVitals> = (v) => {
   }
   // projected_secs_to_cap is number | null by design.
   const p = v.projected_secs_to_cap;
-  return p === null || typeof p === "number"
+  if (p !== null && typeof p !== "number") {
+    return "projected_secs_to_cap: expected number or null";
+  }
+  if (!isObject(v.tiers)) return "tiers: expected object";
+  const t = v.tiers;
+  for (const k of ["full_resolution_minutes", "converted_rows"]) {
+    const problem = field(t, k, "number");
+    if (problem !== null) return `tiers.${problem}`;
+  }
+  if (!Array.isArray(t.band_rows)) return "tiers.band_rows: expected array";
+  return field(t, "enabled", "boolean") === null
     ? null
-    : "projected_secs_to_cap: expected number or null";
+    : "tiers.enabled: expected boolean";
 };
 
 /** Global storage pressure for the Storage page: cap, fill rate,

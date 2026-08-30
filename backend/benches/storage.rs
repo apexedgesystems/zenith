@@ -18,6 +18,7 @@ fn make_samples(n: usize) -> Vec<TelemetrySample> {
             timestamp_ms: 1700000000000 + i as u64,
             channel: channel.clone(),
             value: (i as f64 * 0.01).sin(),
+            envelope: None,
         })
         .collect()
 }
@@ -42,6 +43,7 @@ fn make_realistic_batch(n: usize, channels: usize) -> Vec<TelemetrySample> {
                 timestamp_ms: 1700000000000 + (i as u64),
                 channel: channel_arcs[ch_idx].clone(),
                 value: (i as f64 * 0.01).sin(),
+                envelope: None,
             }
         })
         .collect()

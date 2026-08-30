@@ -105,6 +105,8 @@ struct SharedState {
 /// from these instead of guessing.
 struct StorageVitals {
     cap_bytes: u64,
+    /// Retention-ladder config, echoed to the storage panel.
+    tiers: crate::config::TiersSection,
     fill_bytes_per_min: std::sync::atomic::AtomicI64,
     /// File size at the previous tick; 0 means "no tick yet", which
     /// suppresses the rate until a real delta exists.
@@ -113,6 +115,13 @@ struct StorageVitals {
     fifo_evicted_samples: std::sync::atomic::AtomicU64,
     /// Cumulative rows removed by time-based retention since boot.
     retention_pruned_samples: std::sync::atomic::AtomicU64,
+    /// Cumulative source rows the tier ladder has converted to
+    /// envelope buckets since boot.
+    tiered_source_rows: std::sync::atomic::AtomicU64,
+    /// Rows per age band as of the last tick: [full-res window,
+    /// mid horizon, older]. Exact once the ladder has converged;
+    /// briefly approximate while a backlog is still processing.
+    tier_band_rows: [std::sync::atomic::AtomicU64; 3],
 }
 
 type AppState = Arc<RwLock<SharedState>>;
@@ -1840,6 +1849,21 @@ async fn telemetry_stats(
         "retention_pruned_samples": vitals
             .retention_pruned_samples
             .load(std::sync::atomic::Ordering::Relaxed),
+        "tiers": {
+            "enabled": vitals.tiers.enabled,
+            "full_resolution_minutes": vitals.tiers.full_resolution_minutes,
+            "mid_bucket_seconds": vitals.tiers.mid_bucket_seconds,
+            "mid_horizon_hours": vitals.tiers.mid_horizon_hours,
+            "coarse_bucket_seconds": vitals.tiers.coarse_bucket_seconds,
+            "converted_rows": vitals
+                .tiered_source_rows
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "band_rows": vitals
+                .tier_band_rows
+                .iter()
+                .map(|a| a.load(std::sync::atomic::Ordering::Relaxed))
+                .collect::<Vec<_>>(),
+        },
     })))
 }
 
@@ -3289,11 +3313,15 @@ async fn main() {
     let fifo_strategy = config.storage.fifo_strategy;
     let storage_vitals = Arc::new(StorageVitals {
         cap_bytes: max_db_bytes,
+        tiers: config.storage.tiers,
         fill_bytes_per_min: std::sync::atomic::AtomicI64::new(0),
         last_size: std::sync::atomic::AtomicU64::new(0),
         fifo_evicted_samples: std::sync::atomic::AtomicU64::new(0),
         retention_pruned_samples: std::sync::atomic::AtomicU64::new(0),
+        tiered_source_rows: std::sync::atomic::AtomicU64::new(0),
+        tier_band_rows: Default::default(),
     });
+    let tiers = config.storage.tiers;
     let vitals_maint = storage_vitals.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
@@ -3386,6 +3414,61 @@ async fn main() {
                             // Reclaim freed pages immediately
                             let _ = db.incremental_vacuum();
                         }
+                    }
+                }
+
+                // Retention ladder: convert aged rows to envelope
+                // buckets, one bounded slice per tier per tick. The
+                // FIFO above stays the size backstop and naturally
+                // evicts the oldest (coarsest) rows first.
+                if tiers.enabled {
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    const SLICE_MS: u64 = 600_000;
+                    let full_cutoff =
+                        now_ms.saturating_sub(tiers.full_resolution_minutes as u64 * 60_000);
+                    let mid_cutoff =
+                        now_ms.saturating_sub(tiers.mid_horizon_hours as u64 * 3_600_000);
+                    for (tier, cutoff, bucket_ms) in [
+                        (
+                            crate::storage::telemetry_db::MID_TIER,
+                            full_cutoff,
+                            tiers.mid_bucket_seconds as u64 * 1_000,
+                        ),
+                        (
+                            crate::storage::telemetry_db::COARSE_TIER,
+                            mid_cutoff,
+                            tiers.coarse_bucket_seconds as u64 * 1_000,
+                        ),
+                    ] {
+                        match db.tier_pass(tier, cutoff, bucket_ms, SLICE_MS) {
+                            Ok(pass) if pass.source_rows > 0 => {
+                                vitals.tiered_source_rows.fetch_add(
+                                    pass.source_rows,
+                                    std::sync::atomic::Ordering::Relaxed,
+                                );
+                                tracing::info!(
+                                    "tier {}: {} rows -> {} envelope buckets",
+                                    tier,
+                                    pass.source_rows,
+                                    pass.bucket_rows
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => tracing::warn!("tier {} pass failed: {}", tier, e),
+                        }
+                    }
+                    // Age-band populations for the storage panel
+                    // (index-only range counts).
+                    let bands = [
+                        db.count_range(full_cutoff, i64::MAX as u64).unwrap_or(0),
+                        db.count_range(mid_cutoff, full_cutoff).unwrap_or(0),
+                        db.count_range(0, mid_cutoff).unwrap_or(0),
+                    ];
+                    for (slot, count) in vitals.tier_band_rows.iter().zip(bands) {
+                        slot.store(count, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
 
