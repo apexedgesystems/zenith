@@ -7,6 +7,7 @@ export interface Target {
   host: string;
   port: number;
   connected: boolean;
+  capabilities?: string[];
 }
 
 /** Format a byte count as a short human-readable string (e.g. "1.2 MB"). */

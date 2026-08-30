@@ -144,6 +144,10 @@ struct TargetInfo {
 struct CommandResponse {
     status: u8,
     status_name: String,
+    /// True when the command ran deferred: a QUEUED interim preceded
+    /// this terminal COMPLETION frame.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    queued: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     extra_hex: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -174,6 +178,7 @@ fn to_cmd_response(resp: crate::protocol::aproto::AckResponse) -> CommandRespons
     CommandResponse {
         status: resp.status,
         status_name: resp.status_name,
+        queued: resp.queued,
         extra_hex: if resp.extra.is_empty() {
             None
         } else {

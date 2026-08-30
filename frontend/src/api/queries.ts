@@ -18,6 +18,9 @@ export interface Target {
   host: string;
   port: number;
   connected: boolean;
+  /** Command-surface capabilities the target's dictionaries declare
+   *  (e.g. "readback"). Absent on older backends. */
+  capabilities?: string[];
 }
 
 const isTarget: Validator<Target> = (v) => {
