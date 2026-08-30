@@ -142,9 +142,23 @@ pub struct AckResponse {
     pub cmd_sequence: u16,
     pub status: u8,
     pub status_name: String,
+    /// Command lifecycle stage (ACK byte 5): RESULT is the classic
+    /// immediate terminal (legacy vehicles zero this byte, so they
+    /// parse as RESULT and nothing changes for them), QUEUED is an
+    /// interim frame for a deferred command, COMPLETION is the
+    /// deferred terminal carrying the handler's real status + extra.
+    pub stage: u8,
+    /// True when a QUEUED interim preceded this terminal frame --
+    /// the command executed deferred, not inline.
+    pub queued: bool,
     /// Extra data after the 8-byte ACK header (response payload from handleCommand).
     pub extra: Vec<u8>,
 }
+
+/// ACK stage values (AckPayload byte 5).
+pub const STAGE_RESULT: u8 = 0;
+pub const STAGE_QUEUED: u8 = 1;
+pub const STAGE_COMPLETION: u8 = 2;
 
 /* ----------------------------- Encoding ----------------------------- */
 
@@ -214,6 +228,7 @@ pub fn parse_ack(payload: &[u8]) -> Option<AckResponse> {
     let cmd_opcode = u16::from_le_bytes([payload[0], payload[1]]);
     let cmd_sequence = u16::from_le_bytes([payload[2], payload[3]]);
     let status = payload[4];
+    let stage = payload[5];
     let extra = if payload.len() > 8 {
         payload[8..].to_vec()
     } else {
@@ -236,6 +251,8 @@ pub fn parse_ack(payload: &[u8]) -> Option<AckResponse> {
         cmd_sequence,
         status,
         status_name,
+        stage,
+        queued: false,
         extra,
     })
 }

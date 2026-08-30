@@ -179,6 +179,7 @@ fn make_dict() -> StructDictionary {
             ),
         ]),
         enums: HashMap::new(),
+        capabilities: Vec::new(),
     };
 
     let sysmon = ComponentDict {
@@ -246,6 +247,7 @@ fn make_dict() -> StructDictionary {
             },
         )]),
         enums: HashMap::new(),
+        capabilities: Vec::new(),
     };
 
     StructDictionary {

@@ -135,6 +135,9 @@ struct TargetInfo {
     host: String,
     port: u16,
     connected: bool,
+    /// Command-surface capabilities the target's dictionaries declare
+    /// (e.g. "readback"). Empty for older dictionary sets.
+    capabilities: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -318,6 +321,7 @@ async fn list_targets(State(state): State<AppState>) -> Json<serde_json::Value> 
             host: t.config.host.clone(),
             port: t.config.port,
             connected,
+            capabilities: t.struct_dicts.capabilities(),
         });
     }
     // Sort by ID to preserve config.toml order (target-0, target-1, ...)
@@ -1286,12 +1290,23 @@ async fn update_params(
     );
     let ip_str = addr.ip().to_string();
 
-    let mut cli = client.lock().await;
-    let result = cli.update_tprm(full_uid, &stamped).await;
-    drop(cli);
+    // Readback-capable vehicles get the staged flow: upload, cross-
+    // check the staged bank's declared identity against what we sent,
+    // run the vehicle's full verify, and only then apply. Anything
+    // short of a verified payload never reaches RELOAD. Capability-off
+    // targets keep the classic upload+reload path byte-for-byte.
+    let readback = dicts.has_capability("readback");
+    let result = if readback {
+        staged_update_flow(&client, full_uid, &stamped).await
+    } else {
+        let mut cli = client.lock().await;
+        let r = cli.update_tprm(full_uid, &stamped).await;
+        drop(cli);
+        r.map(|resp| (resp, serde_json::Value::Null))
+    };
 
     match result {
-        Ok(resp) => {
+        Ok((resp, staged_report)) => {
             let status = if resp.status == 0 {
                 "ok".to_string()
             } else {
@@ -1302,16 +1317,31 @@ async fn update_params(
                 &actor.0,
                 "update_tprm",
                 Some(&id),
-                Some(&detail),
+                Some(&if readback {
+                    format!("{} flow=staged-verify", detail)
+                } else {
+                    detail.clone()
+                }),
                 &status,
                 Some(&ip_str),
             );
-            Ok(Json(serde_json::json!({
+            let mut out = serde_json::json!({
                 "status": resp.status,
                 "status_name": resp.status_name,
                 "fullUid": format!("0x{:06X}", full_uid),
                 "uploaded_bytes": binary.len(),
-            })))
+                "queued": resp.queued,
+            });
+            if !staged_report.is_null() {
+                out["staged"] = staged_report;
+            }
+            // A RELOAD refusal carries the TprmPayloadCheck verdict in
+            // the extra: decode it so the operator reads a named
+            // reason, never a bare status number.
+            if resp.status == 5 && !resp.extra.is_empty() {
+                out["reload_verdict"] = serde_json::json!(tprm::payload_check_name(resp.extra[0]));
+            }
+            Ok(Json(out))
         }
         Err(e) => {
             let err_msg = format!("{}", e);
@@ -1327,6 +1357,175 @@ async fn update_params(
             Err((StatusCode::BAD_GATEWAY, err_msg))
         }
     }
+}
+
+/// The verify-before-apply pipeline for readback-capable targets.
+/// Returns the terminal RELOAD response plus a step-by-step report,
+/// or the failing step's response with the report explaining where
+/// and why the pipeline stopped (active bytes untouched).
+async fn staged_update_flow(
+    client: &Arc<Mutex<AprotoClient>>,
+    full_uid: u32,
+    stamped: &[u8],
+) -> Result<
+    (crate::protocol::aproto::AckResponse, serde_json::Value),
+    crate::core::aproto_client::ClientError,
+> {
+    use crate::protocol::aproto;
+
+    // Our own prelude is the intent the vehicle must echo back.
+    let (sent_prelude, _) = tprm::parse_v3(stamped).expect("stamp_v3 output always parses");
+
+    let mut cli = client.lock().await;
+
+    // 1. Stage (no reload).
+    let up = cli.stage_tprm(full_uid, stamped).await?;
+    if up.status != 0 {
+        return Ok((
+            up,
+            serde_json::json!({ "step": "stage", "outcome": "upload refused" }),
+        ));
+    }
+
+    // 2. Digest cross-check: the staged bank must declare exactly the
+    // identity we sent (uid, layout hash, payload CRC).
+    let rb = cli
+        .send_command(0x000000, tprm::OP_READBACK_TPRM, &[])
+        .await?;
+    let row = match tprm::parse_readback_page(&rb.extra) {
+        Ok(page) => page.rows.into_iter().find(|r| r.full_uid == full_uid),
+        Err(_) => None,
+    };
+    let row_ok = row.as_ref().is_some_and(|r| {
+        r.layout_hash == sent_prelude.layout_hash
+            && r.payload_crc == sent_prelude.payload_crc
+            && r.verdict == 0
+    });
+    if !row_ok {
+        let report = serde_json::json!({
+            "step": "readback",
+            "outcome": "staged bytes do not match intent",
+            "sent_layout_hash": format!("0x{:08X}", sent_prelude.layout_hash),
+            "sent_payload_crc": format!("0x{:08X}", sent_prelude.payload_crc),
+            "staged_row": row,
+        });
+        // Shape the refusal as a NAK-like response so callers get one
+        // uniform (response, report) surface for every stop point.
+        let refused = aproto::AckResponse {
+            cmd_opcode: tprm::OP_READBACK_TPRM,
+            cmd_sequence: rb.cmd_sequence,
+            status: rb.status,
+            status_name: "READBACK_MISMATCH".to_string(),
+            stage: rb.stage,
+            queued: rb.queued,
+            extra: Vec::new(),
+        };
+        return Ok((refused, report));
+    }
+
+    // 3. Vehicle-side verify (full ingest checks, no apply).
+    let vr = cli
+        .send_command(0x000000, tprm::OP_VERIFY_TPRM, &full_uid.to_le_bytes())
+        .await?;
+    let verdict = tprm::parse_verify_verdict(&vr.extra).ok();
+    let verdict_ok = vr.status == 0 && verdict.as_ref().is_some_and(|v| v.ok);
+    if !verdict_ok {
+        let report = serde_json::json!({
+            "step": "verify",
+            "outcome": "vehicle verify refused",
+            "verdict": verdict,
+        });
+        let mut refused = vr;
+        refused.status_name = verdict
+            .as_ref()
+            .map(|v| v.verdict_name.to_string())
+            .unwrap_or_else(|| refused.status_name.clone());
+        return Ok((refused, report));
+    }
+
+    // 4. Apply.
+    let resp = cli.reload_tprm(full_uid).await?;
+    drop(cli);
+    let report = serde_json::json!({
+        "step": "applied",
+        "readback": "match",
+        "verify": "OK",
+    });
+    Ok((resp, report))
+}
+
+/// Staged-bank digest: what the vehicle's inactive TPRM bank declares
+/// (identity + header verdict per file), for the verify-before-apply
+/// UI and for diffing staged state against intent.
+async fn tprm_staged_digest(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let (client, _db) = target_client(&state, &id).await?;
+    let mut cli = client.lock().await;
+    let resp = cli
+        .send_command(0x000000, tprm::OP_READBACK_TPRM, &[])
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{}", e)))?;
+    drop(cli);
+    if resp.status != 0 {
+        return Err((
+            StatusCode::BAD_GATEWAY,
+            format!("READBACK_TPRM refused: {}", resp.status_name),
+        ));
+    }
+    let page = tprm::parse_readback_page(&resp.extra)
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("digest parse: {}", e)))?;
+    Ok(Json(serde_json::json!({
+        "total": page.total,
+        "first": page.first,
+        "rows": page.rows.iter().map(|r| serde_json::json!({
+            "fullUid": format!("0x{:06X}", r.full_uid),
+            "layout_hash": format!("0x{:08X}", r.layout_hash),
+            "payload_crc": format!("0x{:08X}", r.payload_crc),
+            "verdict": r.verdict,
+            "verdict_name": r.verdict_name,
+        })).collect::<Vec<_>>(),
+    })))
+}
+
+/// Vehicle-side verify of one component's staged payload, no apply.
+async fn tprm_verify_staged(
+    State(state): State<AppState>,
+    Path((id, uid_str)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let uid_clean = uid_str.trim_start_matches("0x").trim_start_matches("0X");
+    let full_uid = u32::from_str_radix(uid_clean, 16).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid fullUid: {}", uid_str),
+        )
+    })?;
+    let (client, _db) = target_client(&state, &id).await?;
+    let mut cli = client.lock().await;
+    let resp = cli
+        .send_command(0x000000, tprm::OP_VERIFY_TPRM, &full_uid.to_le_bytes())
+        .await
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("{}", e)))?;
+    drop(cli);
+    if resp.status != 0 {
+        return Ok(Json(serde_json::json!({
+            "fullUid": format!("0x{:06X}", full_uid),
+            "ok": false,
+            "status": resp.status,
+            "status_name": resp.status_name,
+        })));
+    }
+    let v = tprm::parse_verify_verdict(&resp.extra)
+        .map_err(|e| (StatusCode::BAD_GATEWAY, format!("verdict parse: {}", e)))?;
+    Ok(Json(serde_json::json!({
+        "fullUid": format!("0x{:06X}", full_uid),
+        "ok": v.ok,
+        "verdict": v.verdict,
+        "verdict_name": v.verdict_name,
+        "declared_layout_hash": format!("0x{:08X}", v.declared_layout_hash),
+        "declared_payload_crc": format!("0x{:08X}", v.declared_payload_crc),
+    })))
 }
 
 /// Validate edited values against the dictionary's constraint rails
@@ -2853,6 +3052,11 @@ fn build_router(state: AppState, cors_origins: &[String], upload_max_mb: u32) ->
         .route("/targets/{id}/params", get(list_tunable_components))
         .route("/targets/{id}/params/{uid}", get(get_params))
         .route("/targets/{id}/params/{uid}/update", post(update_params))
+        .route(
+            "/targets/{id}/params/{uid}/verify",
+            post(tprm_verify_staged),
+        )
+        .route("/targets/{id}/tprm/staged", get(tprm_staged_digest))
         .route("/targets/{id}/registry", get(target_registry))
         .route("/targets/{id}/schedule", get(target_schedule))
         .route("/targets/{id}/telemetry/live", get(telemetry_ws))

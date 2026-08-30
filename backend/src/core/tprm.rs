@@ -179,6 +179,104 @@ pub fn parse_v3(data: &[u8]) -> Result<(PreludeFields, &[u8]), TprmError> {
     Ok((fields, body))
 }
 
+/* ----------------------------- READBACK / VERIFY ----------------------------- */
+
+/// Executive opcodes for the staged-verify surface (apex #137).
+pub const OP_READBACK_TPRM: u16 = 0x0131;
+pub const OP_VERIFY_TPRM: u16 = 0x0132;
+
+/// TprmPayloadCheck fault-code names (apex TprmPayload.hpp). The
+/// vocabulary the vehicle speaks for both VERIFY verdicts and
+/// RELOAD-refusal extra bytes; hash-mismatch and constraint-violation
+/// are distinct codes by ground contract.
+pub fn payload_check_name(code: u8) -> &'static str {
+    match code {
+        0 => "OK",
+        1 => "FILE_ERROR",
+        2 => "TOO_SMALL",
+        3 => "BAD_MAGIC",
+        4 => "BAD_VERSION",
+        5 => "SIZE_MISMATCH",
+        6 => "UID_MISMATCH",
+        7 => "CRC_MISMATCH",
+        8 => "BODY_SIZE_MISMATCH",
+        9 => "CONSTRAINT_VIOLATION",
+        10 => "LAYOUT_MISMATCH",
+        _ => "UNKNOWN",
+    }
+}
+
+/// One staged-bank digest row: the identity a staged payload's prelude
+/// declares, plus the vehicle's header verdict for the file. Corrupt
+/// files are rows with non-OK verdicts, never skipped.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ReadbackRow {
+    pub full_uid: u32,
+    pub layout_hash: u32,
+    pub payload_crc: u32,
+    pub verdict: u8,
+    pub verdict_name: &'static str,
+}
+
+/// One READBACK_TPRM page: 8-byte header (total u16, first u16,
+/// count u8, reserved[3]) + 16-byte rows.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ReadbackPage {
+    pub total: u16,
+    pub first: u16,
+    pub rows: Vec<ReadbackRow>,
+}
+
+pub fn parse_readback_page(extra: &[u8]) -> Result<ReadbackPage, TprmError> {
+    if extra.len() < 8 {
+        return Err(TprmError::Truncated);
+    }
+    let total = u16::from_le_bytes([extra[0], extra[1]]);
+    let first = u16::from_le_bytes([extra[2], extra[3]]);
+    let count = extra[4] as usize;
+    if extra.len() < 8 + count * 16 {
+        return Err(TprmError::Truncated);
+    }
+    let mut rows = Vec::with_capacity(count);
+    for i in 0..count {
+        let b = &extra[8 + i * 16..8 + (i + 1) * 16];
+        let verdict = b[12];
+        rows.push(ReadbackRow {
+            full_uid: u32::from_le_bytes([b[0], b[1], b[2], b[3]]),
+            layout_hash: u32::from_le_bytes([b[4], b[5], b[6], b[7]]),
+            payload_crc: u32::from_le_bytes([b[8], b[9], b[10], b[11]]),
+            verdict,
+            verdict_name: payload_check_name(verdict),
+        });
+    }
+    Ok(ReadbackPage { total, first, rows })
+}
+
+/// A VERIFY_TPRM verdict block: verdict u8, reserved[3], then the
+/// declared layoutHash and payloadCrc from the staged prelude.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct VerifyVerdict {
+    pub verdict: u8,
+    pub verdict_name: &'static str,
+    pub ok: bool,
+    pub declared_layout_hash: u32,
+    pub declared_payload_crc: u32,
+}
+
+pub fn parse_verify_verdict(extra: &[u8]) -> Result<VerifyVerdict, TprmError> {
+    if extra.len() < 12 {
+        return Err(TprmError::Truncated);
+    }
+    let verdict = extra[0];
+    Ok(VerifyVerdict {
+        verdict,
+        verdict_name: payload_check_name(verdict),
+        ok: verdict == 0,
+        declared_layout_hash: u32::from_le_bytes([extra[4], extra[5], extra[6], extra[7]]),
+        declared_payload_crc: u32::from_le_bytes([extra[8], extra[9], extra[10], extra[11]]),
+    })
+}
+
 /* ----------------------------- Tests ----------------------------- */
 
 #[cfg(test)]
@@ -439,5 +537,67 @@ mod tests {
     fn stamp_rejects_oversized_body() {
         let big = vec![0u8; 70_000];
         assert_eq!(stamp_v3(0, 0, &big), Err(TprmError::TooLarge));
+    }
+
+    /// @test A READBACK page parses per the vehicle's emit layout
+    /// (8-byte header + 16-byte rows, little-endian), including a
+    /// corrupt file surfacing as a row with a non-OK verdict; short
+    /// buffers are Truncated, never a partial parse.
+    #[test]
+    fn readback_page_round_trip() {
+        let mut page = Vec::new();
+        page.extend_from_slice(&3u16.to_le_bytes()); // total
+        page.extend_from_slice(&1u16.to_le_bytes()); // first
+        page.push(2); // count
+        page.extend_from_slice(&[0; 3]);
+        for (uid, hash, crc, verdict) in [
+            (0x00D000u32, 0xAABBCCDD_u32, 0x11223344_u32, 0u8),
+            (0x00D001, 0, 0, 7),
+        ] {
+            page.extend_from_slice(&uid.to_le_bytes());
+            page.extend_from_slice(&hash.to_le_bytes());
+            page.extend_from_slice(&crc.to_le_bytes());
+            page.push(verdict);
+            page.extend_from_slice(&[0; 3]);
+        }
+
+        let parsed = parse_readback_page(&page).unwrap();
+        assert_eq!(parsed.total, 3);
+        assert_eq!(parsed.first, 1);
+        assert_eq!(parsed.rows.len(), 2);
+        assert_eq!(parsed.rows[0].full_uid, 0x00D000);
+        assert_eq!(parsed.rows[0].layout_hash, 0xAABBCCDD);
+        assert_eq!(parsed.rows[0].verdict_name, "OK");
+        assert_eq!(parsed.rows[1].verdict, 7);
+        assert_eq!(parsed.rows[1].verdict_name, "CRC_MISMATCH");
+
+        assert_eq!(parse_readback_page(&page[..7]), err_truncated());
+        assert_eq!(parse_readback_page(&page[..20]), err_truncated());
+    }
+
+    fn err_truncated() -> Result<ReadbackPage, TprmError> {
+        Err(TprmError::Truncated)
+    }
+
+    /// @test A VERIFY verdict block parses its 12-byte layout with the
+    /// TprmPayloadCheck vocabulary; OK maps to ok=true and the two
+    /// declared hashes come through little-endian.
+    #[test]
+    fn verify_verdict_round_trip() {
+        let mut block = vec![9u8, 0, 0, 0]; // CONSTRAINT_VIOLATION
+        block.extend_from_slice(&0xFEF9BC60u32.to_le_bytes());
+        block.extend_from_slice(&0x600DF00Du32.to_le_bytes());
+        let v = parse_verify_verdict(&block).unwrap();
+        assert!(!v.ok);
+        assert_eq!(v.verdict_name, "CONSTRAINT_VIOLATION");
+        assert_eq!(v.declared_layout_hash, 0xFEF9BC60);
+        assert_eq!(v.declared_payload_crc, 0x600DF00D);
+
+        block[0] = 0;
+        assert!(parse_verify_verdict(&block).unwrap().ok);
+        assert!(matches!(
+            parse_verify_verdict(&block[..11]),
+            Err(TprmError::Truncated)
+        ));
     }
 }

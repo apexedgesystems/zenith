@@ -486,6 +486,7 @@ mod tests {
                 ),
             ]),
             enums: HashMap::new(),
+            capabilities: Vec::new(),
         };
         StructDictionary {
             components: HashMap::from([("WaveGenerator".to_string(), comp)]),
@@ -611,6 +612,7 @@ mod tests {
                 },
             )]),
             enums: HashMap::new(),
+            capabilities: Vec::new(),
         };
         let dict = StructDictionary {
             components: HashMap::from([("X".to_string(), comp)]),

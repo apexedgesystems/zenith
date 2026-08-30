@@ -222,10 +222,24 @@ impl AprotoClient {
                     break;
                 }
                 let deadline = tokio::time::Instant::now() + ack_timeout;
+                let mut saw_queued = false;
                 let result = loop {
                     match tokio::time::timeout_at(deadline, ack_rx.recv()).await {
                         Ok(Some(Ok(ack))) => {
                             if ack.cmd_sequence == req.seq {
+                                // A QUEUED frame is an interim receipt for
+                                // a deferred command: the COMPLETION frame
+                                // that follows carries the handler's real
+                                // status and extra, so keep waiting on the
+                                // same deadline. Legacy vehicles zero the
+                                // stage byte and always break here as
+                                // RESULT terminals.
+                                if ack.stage == aproto::STAGE_QUEUED {
+                                    saw_queued = true;
+                                    continue;
+                                }
+                                let mut ack = ack;
+                                ack.queued = saw_queued;
                                 break Ok(ack);
                             }
                             tracing::warn!(
@@ -393,6 +407,21 @@ impl AprotoClient {
         full_uid: u32,
         data: &[u8],
     ) -> Result<aproto::AckResponse, ClientError> {
+        let staged = self.stage_tprm(full_uid, data).await?;
+        if staged.status != 0 {
+            return Ok(staged);
+        }
+        self.reload_tprm(full_uid).await
+    }
+
+    /// Upload a stamped TPRM payload to the staged bank WITHOUT
+    /// reloading -- the first step of the verify-before-apply flow.
+    /// Returns the FILE_END response (or the first failing step's).
+    pub async fn stage_tprm(
+        &mut self,
+        full_uid: u32,
+        data: &[u8],
+    ) -> Result<aproto::AckResponse, ClientError> {
         let chunk_size: usize = 4096;
         let total_chunks = data.len().div_ceil(chunk_size);
 
@@ -439,13 +468,15 @@ impl AprotoClient {
             }
         }
 
-        // FILE_END
-        let resp = self.send_command(0, aproto::FILE_END, &[]).await?;
-        if resp.status != 0 {
-            return Ok(resp);
-        }
+        // FILE_END completes the staged upload; RELOAD is the
+        // caller's decision.
+        self.send_command(0, aproto::FILE_END, &[]).await
+    }
 
-        // RELOAD_TPRM
+    /// Apply the staged TPRM for a component (RELOAD_TPRM). On a
+    /// readback-capable vehicle a failed verify refuses here with
+    /// status 5 and the TprmPayloadCheck verdict in the extra.
+    pub async fn reload_tprm(&mut self, full_uid: u32) -> Result<aproto::AckResponse, ClientError> {
         let mut reload_payload = Vec::with_capacity(4);
         reload_payload.extend_from_slice(&full_uid.to_le_bytes());
         self.send_command(0x000000, 0x0125, &reload_payload).await
@@ -598,11 +629,16 @@ mod tests {
 
     /// Build a SLIP-encoded ACK response packet as a target would send it.
     fn ack_packet(cmd_opcode: u16, cmd_seq: u16, status: u8) -> Vec<u8> {
+        staged_ack_packet(cmd_opcode, cmd_seq, status, aproto::STAGE_RESULT)
+    }
+
+    fn staged_ack_packet(cmd_opcode: u16, cmd_seq: u16, status: u8, stage: u8) -> Vec<u8> {
         let mut ack_payload = Vec::with_capacity(8);
         ack_payload.extend_from_slice(&cmd_opcode.to_le_bytes());
         ack_payload.extend_from_slice(&cmd_seq.to_le_bytes());
         ack_payload.push(status);
-        ack_payload.extend_from_slice(&[0u8; 3]);
+        ack_payload.push(stage);
+        ack_payload.extend_from_slice(&[0u8; 2]);
 
         let mut pkt = Vec::with_capacity(aproto::HEADER_SIZE + ack_payload.len());
         pkt.extend_from_slice(&aproto::MAGIC.to_le_bytes());
@@ -665,7 +701,8 @@ mod tests {
     }
 
     /// @test A command round-trips against a well-behaved target: the
-    /// ACK is matched by sequence and carries the status through.
+    /// ACK is matched by sequence and carries the status through, and
+    /// a legacy zeroed stage byte reads as an immediate RESULT.
     #[tokio::test]
     async fn command_round_trip_success() {
         let addr =
@@ -675,6 +712,62 @@ mod tests {
         let resp = client.noop().await.unwrap();
         assert_eq!(resp.status, 0);
         assert_eq!(resp.cmd_sequence, 0);
+        assert_eq!(resp.stage, aproto::STAGE_RESULT);
+        assert!(!resp.queued);
+        assert!(client.is_connected());
+    }
+
+    /// @test A deferred command's QUEUED interim frame is not returned
+    /// to the caller: the client waits through it and delivers the
+    /// COMPLETION terminal carrying the handler's real status, with
+    /// the queued flag set so the UI can show the lifecycle.
+    #[tokio::test]
+    async fn queued_command_waits_for_completion_frame() {
+        let addr = spawn_fake_target(|pkt| {
+            let mut reply = staged_ack_packet(
+                pkt.header.opcode,
+                pkt.header.sequence,
+                0,
+                aproto::STAGE_QUEUED,
+            );
+            reply.extend(staged_ack_packet(
+                pkt.header.opcode,
+                pkt.header.sequence,
+                5,
+                aproto::STAGE_COMPLETION,
+            ));
+            reply
+        })
+        .await;
+        let (mut client, _rx) = connected_client(addr, 1000).await;
+
+        let resp = client.noop().await.unwrap();
+        assert_eq!(resp.stage, aproto::STAGE_COMPLETION);
+        assert!(resp.queued, "interim QUEUED frame must set the flag");
+        assert_eq!(resp.status, 5, "terminal status comes from COMPLETION");
+        assert!(client.is_connected());
+    }
+
+    /// @test A QUEUED interim with no COMPLETION inside the deadline is
+    /// a Timeout -- the interim receipt alone is never presented as an
+    /// outcome, and the client stays usable afterward.
+    #[tokio::test]
+    async fn queued_without_completion_times_out() {
+        let addr = spawn_fake_target(|pkt| {
+            if pkt.header.sequence == 0 {
+                staged_ack_packet(pkt.header.opcode, 0, 0, aproto::STAGE_QUEUED)
+            } else {
+                ack_packet(pkt.header.opcode, pkt.header.sequence, 0)
+            }
+        })
+        .await;
+        let (mut client, _rx) = connected_client(addr, 300).await;
+
+        let first = client.noop().await;
+        assert!(matches!(first, Err(ClientError::Timeout)));
+
+        let second = client.noop().await.unwrap();
+        assert_eq!(second.status, 0);
         assert!(client.is_connected());
     }
 
