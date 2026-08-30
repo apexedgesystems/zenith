@@ -62,17 +62,17 @@ directory.
 
 ## Pages
 
-| Page              | Purpose                                                                                                                                                                                                                                                    |
-| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Dashboard**     | Per-target health cards auto-discovered from struct dicts. Executive summary banner. Component registry with reachability dots. Connect / disconnect / add target.                                                                                         |
-| **Telemetry**     | Multi-signal strip charts with hover crosshair, per-plot time windows, threshold lines, drag-to-reorder, layout presets from `telemetry.json`, user-saved layouts in DB, pause/resume, 2-column grid, PNG/CSV export, historical data backfill.            |
-| **Operations**    | System controls: Sleep/Wake, Pause/Resume, Set Verbosity, Restart Executive (with auto-reconnect). Per-component Lock/Unlock with visual lock state. Library hot-swap (lock + upload .so + reload + auto-unlock). In-page audit feed of issued commands.   |
-| **Command**       | Generic APROTO command console: pick a component from the catalog, fill typed fields, send. Quick command presets. Response display with "Interpret as..." dropdown that decodes the raw bytes against any per-target struct of matching size.             |
-| **Tunables**      | Edit TUNABLE_PARAM blocks for any component (auto-discovered). Decoded field table with editable values per the struct dict types. Apply button does TPRM upload + RELOAD_TPRM. Variable-length TPRM support for Scheduler-style header + entries layouts. |
-| **INSPECT**       | Browse any registered data block on any component for any category (STATIC_PARAM / TUNABLE_PARAM / STATE / INPUT / OUTPUT). Decoded field table with type info. Auto-refresh toggle (1 Hz) for live state debugging.                                       |
-| **File Transfer** | Drag-and-drop file upload to any path on the target via APROTO. Single-file with size cap. Per-target export of telemetry as CSV.                                                                                                                          |
-| **Storage**       | Live capacity gauge against the configured cap with fill rate and time-to-cap projection, per-target usage bars with trim/delete controls, the pipeline accounting table (decoded = written + counted drops), FIFO/retention counters, manual downsample.  |
-| **Audit Log**     | Append-only log of operator actions: every command, file upload, target connect/disconnect/add/remove, library swap, storage trim. Filterable by actor / target / IP / status. Auto-refresh option.                                                        |
+| Page              | Purpose                                                                                                                                                                                                                                                                                                                                                 |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Dashboard**     | Per-target health cards auto-discovered from struct dicts. Executive summary banner. Component registry with reachability dots. Connect / disconnect / add target.                                                                                                                                                                                      |
+| **Telemetry**     | Multi-signal strip charts with hover crosshair, per-plot time windows, threshold lines, drag-to-reorder, layout presets from `telemetry.json`, user-saved layouts in DB, pause/resume, 2-column grid, PNG/CSV export, historical data backfill. Tiered (downsampled) history renders as min/max envelope bands with mean [min..max] crosshair readouts. |
+| **Operations**    | System controls: Sleep/Wake, Pause/Resume, Set Verbosity, Restart Executive (with auto-reconnect). Per-component Lock/Unlock with visual lock state. Library hot-swap (lock + upload .so + reload + auto-unlock). In-page audit feed of issued commands.                                                                                                |
+| **Command**       | Generic APROTO command console: pick a component from the catalog, fill typed fields, send. Quick command presets. Response display with "Interpret as..." dropdown that decodes the raw bytes against any per-target struct of matching size.                                                                                                          |
+| **Tunables**      | Edit TUNABLE_PARAM blocks for any component (auto-discovered). Decoded field table with editable values per the struct dict types. Apply button does TPRM upload + RELOAD_TPRM. Variable-length TPRM support for Scheduler-style header + entries layouts.                                                                                              |
+| **INSPECT**       | Browse any registered data block on any component for any category (STATIC_PARAM / TUNABLE_PARAM / STATE / INPUT / OUTPUT). Decoded field table with type info. Auto-refresh toggle (1 Hz) for live state debugging.                                                                                                                                    |
+| **File Transfer** | Drag-and-drop file upload to any path on the target via APROTO. Single-file with size cap. Per-target export of telemetry as CSV.                                                                                                                                                                                                                       |
+| **Storage**       | Live capacity gauge against the configured cap with fill rate and time-to-cap projection, per-target usage bars with trim/delete controls, the pipeline accounting table (decoded = written + counted drops), FIFO/retention counters, retention-ladder card (per-band populations), manual downsample.                                                 |
+| **Audit Log**     | Append-only log of operator actions: every command, file upload, target connect/disconnect/add/remove, library swap, storage trim. Filterable by actor / target / IP / status. Auto-refresh option.                                                                                                                                                     |
 
 ## Sidebar Features
 
@@ -158,6 +158,11 @@ port = 8080
 path = "./data/zenith.db"
 retention_hours = 24
 max_db_size_mb = 2048
+
+# Optional age-based retention ladder: newest window at full
+# resolution, older data as envelope buckets (mean + min/max +
+# count) so spikes stay visible while the cap holds far more
+# history. See config.toml for the [storage.tiers] keys.
 
 [[targets]]
 name = "My Target"
