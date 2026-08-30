@@ -263,12 +263,17 @@ export default function TelemetryPage({
             const samples = (resp.samples || []) as {
               timestamp_ms: number;
               value: number;
+              envelope?: { min: number; max: number; count: number };
             }[];
             if (samples.length > 0) {
-              // Only update if data arrived
+              // Only update if data arrived. Tiered rows carry an
+              // envelope; the chart renders it as the point's spread.
               newData[ch] = samples.map((s) => ({
                 t: s.timestamp_ms,
                 v: s.value,
+                ...(s.envelope
+                  ? { lo: s.envelope.min, hi: s.envelope.max }
+                  : {}),
               }));
             }
           } catch {

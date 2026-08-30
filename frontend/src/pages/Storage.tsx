@@ -335,6 +335,92 @@ export default function StoragePage() {
         )}
       </Card>
 
+      {/* Retention ladder */}
+      <Card title="Retention ladder">
+        {v ? (
+          v.tiers.enabled ? (
+            <>
+              <div className="flex flex-col gap-2 mb-3">
+                {[
+                  {
+                    label: `Full resolution (newest ${formatDuration(
+                      v.tiers.full_resolution_minutes * 60,
+                    )})`,
+                    rows: v.tiers.band_rows[0] ?? 0,
+                  },
+                  {
+                    label: `${
+                      v.tiers.mid_bucket_seconds
+                    }s envelope buckets (to ${formatDuration(
+                      v.tiers.mid_horizon_hours * 3600,
+                    )})`,
+                    rows: v.tiers.band_rows[1] ?? 0,
+                  },
+                  {
+                    label: `${v.tiers.coarse_bucket_seconds}s envelope buckets (older)`,
+                    rows: v.tiers.band_rows[2] ?? 0,
+                  },
+                ].map((band) => {
+                  const total = v.tiers.band_rows.reduce((a, b) => a + b, 0);
+                  const share = total > 0 ? (band.rows / total) * 100 : 0;
+                  return (
+                    <div key={band.label}>
+                      <div className="flex items-baseline justify-between mb-0.5">
+                        <span
+                          className="text-xs"
+                          style={{ color: "var(--color-text-secondary)" }}
+                        >
+                          {band.label}
+                        </span>
+                        <span
+                          className="mono text-xs"
+                          style={{ color: "var(--color-text-muted)" }}
+                        >
+                          {formatCount(band.rows)} rows
+                        </span>
+                      </div>
+                      <div
+                        className="rounded h-1.5 overflow-hidden"
+                        style={{ backgroundColor: "var(--color-elevated)" }}
+                      >
+                        <div
+                          className="h-full rounded"
+                          style={{
+                            width: `${share}%`,
+                            backgroundColor: "var(--color-accent)",
+                          }}
+                        />
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+              <div
+                className="text-xs"
+                style={{ color: "var(--color-text-muted)" }}
+              >
+                {formatCount(v.tiers.converted_rows)} rows converted to envelope
+                buckets since start. Buckets keep min/max/count, so spikes stay
+                visible as excursions on the charts.
+              </div>
+            </>
+          ) : (
+            <div
+              className="text-sm"
+              style={{ color: "var(--color-text-muted)" }}
+            >
+              Disabled. Enable [storage.tiers] in config.toml to keep the newest
+              window at full resolution and age older data into envelope buckets
+              (mean + min/max), multiplying how much history fits under the cap.
+            </div>
+          )
+        ) : (
+          <div className="text-sm" style={{ color: "var(--color-text-muted)" }}>
+            Loading...
+          </div>
+        )}
+      </Card>
+
       {/* Pipeline accounting */}
       <Card title="Pipeline accounting (since connect)">
         <div className="overflow-x-auto">

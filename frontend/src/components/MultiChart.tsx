@@ -36,7 +36,13 @@ const MultiChart = memo(function MultiChart({
   const containerRef = useRef<HTMLDivElement>(null);
   const [crosshair, setCrosshair] = useState<{
     x: number;
-    values: { ch: string; v: number; color: string }[];
+    values: {
+      ch: string;
+      v: number;
+      color: string;
+      // Present when the reading comes from a tiered envelope bucket.
+      range?: [number, number];
+    }[];
   } | null>(null);
   const rafRef = useRef(0);
   // The renderer's actual left pad, for pixel->time mapping in the
@@ -95,8 +101,10 @@ const MultiChart = memo(function MultiChart({
       if (!pts) continue;
       for (const p of pts) {
         if (p.t < globalMinT) continue;
-        if (p.v < minV) minV = p.v;
-        if (p.v > maxV) maxV = p.v;
+        // Envelope points scale by their full spread so a spike
+        // preserved by tiering is never clipped out of view.
+        if ((p.lo ?? p.v) < minV) minV = p.lo ?? p.v;
+        if ((p.hi ?? p.v) > maxV) maxV = p.hi ?? p.v;
       }
     }
     if (!isFinite(minV)) {
@@ -206,16 +214,21 @@ const MultiChart = memo(function MultiChart({
       for (const p of pts) {
         if (p.t < globalMinT - 1000) continue;
         const x = Math.round(PAD_L + ((p.t - globalMinT) / rangeT) * plotW);
+        // Envelope points contribute their bucket spread -- the same
+        // min/max machinery that preserves dense raw signals renders
+        // tiered history as its excursion band.
+        const lo = p.lo ?? p.v;
+        const hi = p.hi ?? p.v;
         if (x === lastPixelX) {
           // Same pixel column: accumulate min/max
-          if (p.v < pixelMinV) pixelMinV = p.v;
-          if (p.v > pixelMaxV) pixelMaxV = p.v;
+          if (lo < pixelMinV) pixelMinV = lo;
+          if (hi > pixelMaxV) pixelMaxV = hi;
         } else {
           // New pixel column: emit previous, start new
           emitPixel(lastPixelX);
           lastPixelX = x;
-          pixelMinV = p.v;
-          pixelMaxV = p.v;
+          pixelMinV = lo;
+          pixelMaxV = hi;
         }
       }
       emitPixel(lastPixelX); // emit last pixel
@@ -305,7 +318,11 @@ const MultiChart = memo(function MultiChart({
       ctx.fillStyle = cv.color;
       ctx.font = "bold 10px monospace";
       ctx.textAlign = "left";
-      const lbl = `${fieldName(cv.ch)}: ${cv.v.toFixed(4)}`;
+      const lbl = cv.range
+        ? `${fieldName(cv.ch)}: ${cv.v.toFixed(4)} [${cv.range[0].toFixed(
+            2,
+          )}..${cv.range[1].toFixed(2)}]`
+        : `${fieldName(cv.ch)}: ${cv.v.toFixed(4)}`;
       const textX =
         crosshair.x + 8 > rect.width - 120
           ? crosshair.x - 8 - ctx.measureText(lbl).width
@@ -359,7 +376,12 @@ const MultiChart = memo(function MultiChart({
         return;
       }
 
-      const values: { ch: string; v: number; color: string }[] = [];
+      const values: {
+        ch: string;
+        v: number;
+        color: string;
+        range?: [number, number];
+      }[] = [];
       visibleChannels.forEach((ch, ci) => {
         const pts = data[ch];
         if (!pts || pts.length === 0) return;
@@ -373,10 +395,17 @@ const MultiChart = memo(function MultiChart({
         const p0 = pts[lo],
           p1 = pts[hi];
         const frac = p1.t === p0.t ? 0 : (tAtMouse - p0.t) / (p1.t - p0.t);
+        // Envelope readout comes from the nearer point: it makes the
+        // resolution explicit -- an operator reading a tiered bucket
+        // sees mean plus spread, not a false point sample.
+        const near = frac < 0.5 ? p0 : p1;
         values.push({
           ch,
           v: p0.v + frac * (p1.v - p0.v),
           color: COLORS[ci % COLORS.length],
+          ...(near.lo !== undefined && near.hi !== undefined
+            ? { range: [near.lo, near.hi] as [number, number] }
+            : {}),
         });
       });
       setCrosshair({ x: mx, values });
