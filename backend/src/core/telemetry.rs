@@ -29,6 +29,22 @@ pub struct TelemetrySample {
     pub timestamp_ms: u64,
     pub channel: Arc<str>,
     pub value: f64,
+    /// Envelope carried by tiered (downsampled) rows: the value is the
+    /// bucket mean and this holds the bucket's min/max/source-count.
+    /// None on full-resolution samples -- live decode always emits
+    /// None, and the field vanishes from JSON so WebSocket payloads
+    /// are unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub envelope: Option<Envelope>,
+}
+
+/// The spread a tiered bucket preserves: a transient spike survives
+/// downsampling as a min/max excursion even though the mean dampens.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct Envelope {
+    pub min: f64,
+    pub max: f64,
+    pub count: u32,
 }
 
 /* ----------------------------- Struct-Aware Decoder ----------------------------- */
@@ -189,6 +205,7 @@ impl TelemetryDecoder {
                     timestamp_ms,
                     channel: Arc::clone(&cf.channel),
                     value: v,
+                    envelope: None,
                 });
             }
         }
@@ -229,6 +246,7 @@ impl TelemetryDecoder {
                     timestamp_ms,
                     channel,
                     value: value as f64,
+                    envelope: None,
                 });
             }
 

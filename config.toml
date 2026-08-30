@@ -20,6 +20,17 @@ retention_hours = 24
 #                          # so a chatty target cannot evict a quiet
 #                          # one's history; "global" is owner-blind
 
+# Age-based retention ladder: newest window at full resolution, older
+# data as envelope buckets (mean + min/max + count -- spikes survive
+# as excursions). Off by default; the size-cap FIFO stays the final
+# backstop either way.
+# [storage.tiers]
+# enabled = true
+# full_resolution_minutes = 60   # newest window kept at full res
+# mid_bucket_seconds = 1         # then 1s envelope buckets...
+# mid_horizon_hours = 24         # ...until this age...
+# coarse_bucket_seconds = 60     # ...then 1min envelope buckets
+
 # Target: Local SIL ops demo (dev only; 172.21.0.1 is the compose
 # network gateway, i.e. this host as seen from the zenith container)
 [[targets]]

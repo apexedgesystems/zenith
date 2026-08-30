@@ -82,8 +82,59 @@ pub struct StorageSection {
     /// How the size-cap FIFO distributes evictions across targets.
     #[serde(default)]
     pub fifo_strategy: FifoStrategy,
+    /// Age-based multi-resolution retention ladder (off by default).
+    #[serde(default)]
+    pub tiers: TiersSection,
     #[serde(default)]
     pub structs_dir: Option<String>,
+}
+
+/// The retention ladder: full resolution for the newest window, then
+/// envelope buckets (mean + min/max + count) at two coarser tiers.
+/// Age-triggered, not fill-triggered -- deterministic and free of
+/// feedback loops with the size-cap FIFO, which stays the final
+/// backstop and naturally evicts the oldest (coarsest) rows first.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct TiersSection {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Newest window kept at full resolution.
+    #[serde(default = "default_full_res_minutes")]
+    pub full_resolution_minutes: u32,
+    /// Bucket width for the mid tier (seconds).
+    #[serde(default = "default_mid_bucket_seconds")]
+    pub mid_bucket_seconds: u32,
+    /// Age at which mid-tier buckets re-tier to coarse.
+    #[serde(default = "default_mid_horizon_hours")]
+    pub mid_horizon_hours: u32,
+    /// Bucket width for the coarse tier (seconds).
+    #[serde(default = "default_coarse_bucket_seconds")]
+    pub coarse_bucket_seconds: u32,
+}
+
+impl Default for TiersSection {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            full_resolution_minutes: default_full_res_minutes(),
+            mid_bucket_seconds: default_mid_bucket_seconds(),
+            mid_horizon_hours: default_mid_horizon_hours(),
+            coarse_bucket_seconds: default_coarse_bucket_seconds(),
+        }
+    }
+}
+
+fn default_full_res_minutes() -> u32 {
+    60
+}
+fn default_mid_bucket_seconds() -> u32 {
+    1
+}
+fn default_mid_horizon_hours() -> u32 {
+    24
+}
+fn default_coarse_bucket_seconds() -> u32 {
+    60
 }
 
 /// Eviction distribution for the size-cap FIFO.
@@ -164,6 +215,7 @@ impl Default for ServerConfig {
                 audit_retention_days: default_audit_retention_days(),
                 max_db_size_mb: None,
                 fifo_strategy: FifoStrategy::default(),
+                tiers: TiersSection::default(),
                 structs_dir: None,
             },
             targets: Vec::new(),
@@ -201,6 +253,7 @@ impl Default for StorageSection {
             audit_retention_days: default_audit_retention_days(),
             max_db_size_mb: None,
             fifo_strategy: FifoStrategy::default(),
+            tiers: TiersSection::default(),
             structs_dir: None,
         }
     }
