@@ -38,6 +38,9 @@ name = "Local SIL - Ops Demo"
 host = "172.21.0.1"
 port = 9000
 # protocol = "aproto-slip"   # wire protocol (default; validated at boot)
+# health_nonzero_bad = [...]  # dashboard fields flagged bad when nonzero
+#                             # (display policy; defaults cover the apex
+#                             # counters -- override per target as needed)
 auto_connect = false
 manifest = "/data/targets/sil-ops-demo/app_manifest.json"
 structs_dir = "/data/targets/sil-ops-demo/structs"

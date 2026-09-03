@@ -1,4 +1,4 @@
-import { memo, useState } from "react";
+import { memo, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   decodeField,
@@ -20,6 +20,7 @@ interface Target {
   host: string;
   port: number;
   connected: boolean;
+  health_nonzero_bad?: string[];
 }
 
 interface RegistryComponent {
@@ -42,27 +43,13 @@ interface HealthCard {
   metrics: { label: string; value: string; bad?: boolean }[];
 }
 
-/** Heuristic: fields that indicate problems when nonzero */
-const BAD_WHEN_NONZERO = new Set([
-  "overruns",
-  "frameoverruns",
-  "watchdogwarnings",
-  "watchdogwarns",
-  "totalperiodviolations",
-  "violationsthistick",
-  "totalskipcount",
-  "packetsinvalid",
-  "framingerrors",
-  "cmdqueueoverflows",
-  "tlmqueueoverflows",
-  "internalcommandsfailed",
-  "warncount",
-  "critcount",
-]);
-
-function isBad(field: FieldDef, value: number): boolean {
+/** Display policy from the target's config (health_nonzero_bad):
+ *  fields flagged bad when nonzero. The key normalization (lowercase,
+ *  underscores stripped) matches the backend's documented convention.
+ *  Policy lives in per-target config, not in this file. */
+function isBad(field: FieldDef, value: number, rules: Set<string>): boolean {
   const key = field.name.toLowerCase().replace(/_/g, "");
-  return BAD_WHEN_NONZERO.has(key) && value > 0;
+  return rules.has(key) && value > 0;
 }
 
 /* ----------------------------- Struct Dict Loader ----------------------------- */
@@ -190,6 +177,7 @@ async function buildHealthCards(
   selectedTarget: string,
   registry: RegistryComponent[],
   tlmStructs: Map<string, TelemetryStruct>,
+  badRules: Set<string>,
 ): Promise<{ exec: HealthCard["metrics"] | null; cards: HealthCard[] }> {
   const cards: HealthCard[] = [];
   let exec: HealthCard["metrics"] | null = null;
@@ -219,7 +207,7 @@ async function buildHealthCards(
             metrics.push({
               label: field.name,
               value: formatValue(value, field),
-              bad: typeof value === "number" && isBad(field, value),
+              bad: typeof value === "number" && isBad(field, value, badRules),
             });
           }
           exec = metrics.length > 0 ? metrics : null;
@@ -290,7 +278,7 @@ async function buildHealthCards(
         metrics.push({
           label: field.name,
           value: formatValue(value, field),
-          bad: typeof value === "number" && isBad(field, value),
+          bad: typeof value === "number" && isBad(field, value, badRules),
         });
       }
       return metrics.length > 0 ? { title: comp.name, metrics } : null;
@@ -343,7 +331,11 @@ async function buildHealthCards(
               typeof value === "number" && !Number.isInteger(value)
                 ? value.toFixed(1)
                 : String(Math.round(value)),
-            bad: isBad({ name, type: "float", offset: 0, size: 4 }, value),
+            bad: isBad(
+              { name, type: "float", offset: 0, size: 4 },
+              value,
+              badRules,
+            ),
           });
         }
         if (metrics.length > 0) {
@@ -559,11 +551,19 @@ export default function DashboardPage({
   // per-component commands, and push-telemetry grouping. As a query
   // it deduplicates, cancels on target switch, and pauses when the
   // tab is hidden -- this poll drives real device commands.
+  const badRules = useMemo(
+    () =>
+      new Set<string>(
+        targets.find((t) => t.id === selectedTarget)?.health_nonzero_bad ?? [],
+      ),
+    [targets, selectedTarget],
+  );
   const healthQuery = useQuery({
     queryKey: ["health-cards", selectedTarget],
     enabled: isConnected && registry.length > 0 && tlmStructs.size > 0,
     refetchInterval: 2000,
-    queryFn: () => buildHealthCards(selectedTarget, registry, tlmStructs),
+    queryFn: () =>
+      buildHealthCards(selectedTarget, registry, tlmStructs, badRules),
   });
   const execSummary = healthQuery.data?.exec ?? null;
   const healthCards = healthQuery.data?.cards ?? [];

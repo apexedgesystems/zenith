@@ -139,6 +139,9 @@ struct TargetInfo {
     /// Command-surface capabilities the target's dictionaries declare
     /// (e.g. "readback"). Empty for older dictionary sets.
     capabilities: Vec<String>,
+    /// Dashboard display policy from this target's config: field names
+    /// flagged bad when nonzero.
+    health_nonzero_bad: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -338,6 +341,7 @@ async fn list_targets(State(state): State<AppState>) -> Json<serde_json::Value> 
             port: t.config.port,
             connected,
             capabilities: t.struct_dicts.capabilities(),
+            health_nonzero_bad: t.config.health_nonzero_bad.clone(),
         });
     }
     // Sort by ID to preserve config.toml order (target-0, target-1, ...)
@@ -2419,6 +2423,7 @@ async fn add_target(
         protocol: crate::core::transport::Protocol::AprotoSlip
             .name()
             .to_string(),
+        health_nonzero_bad: crate::config::default_health_nonzero_bad_public(),
         auto_connect: false,
     };
 
@@ -2587,89 +2592,6 @@ async fn target_registry(
     }
 
     Ok(Json(serde_json::json!({ "components": components })))
-}
-
-async fn target_schedule(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (client, _) = target_client(&state, &id).await?;
-    let mut link = client.lock().await;
-    if !link.is_connected() {
-        return Err((StatusCode::BAD_GATEWAY, "Not connected".to_string()));
-    }
-    let proto = link.protocol();
-    let Some(cli) = link.aproto() else {
-        return Err((
-            StatusCode::NOT_IMPLEMENTED,
-            unsupported_op("schedule query", proto),
-        ));
-    };
-
-    // Query scheduler health (fullUid=0x000100, opcode=0x0100)
-    let sched = match cli.send_command(0x000100, 0x0100, &[]).await {
-        Ok(r) if r.status == 0 && r.extra.len() >= 32 => {
-            let tick_count = u64::from_le_bytes([
-                r.extra[0], r.extra[1], r.extra[2], r.extra[3], r.extra[4], r.extra[5], r.extra[6],
-                r.extra[7],
-            ]);
-            let task_count = u32::from_le_bytes([r.extra[8], r.extra[9], r.extra[10], r.extra[11]]);
-            let violations =
-                u32::from_le_bytes([r.extra[12], r.extra[13], r.extra[14], r.extra[15]]);
-            let skip_count =
-                u32::from_le_bytes([r.extra[16], r.extra[17], r.extra[18], r.extra[19]]);
-            let freq = u16::from_le_bytes([r.extra[20], r.extra[21]]);
-            let pool_count = r.extra[22];
-            let sleeping = r.extra[23] != 0;
-
-            serde_json::json!({
-                "tickCount": tick_count,
-                "taskCount": task_count,
-                "periodViolations": violations,
-                "totalSkipCount": skip_count,
-                "fundamentalFreqHz": freq,
-                "poolCount": pool_count,
-                "sleeping": sleeping,
-            })
-        }
-        _ => serde_json::json!({"error": "Could not query scheduler"}),
-    };
-
-    // Query executive health for additional context
-    let exec = match cli.send_command(0x000000, 0x0100, &[]).await {
-        Ok(r) if r.status == 0 && r.extra.len() >= 48 => {
-            let clock_cycles = u64::from_le_bytes([
-                r.extra[0], r.extra[1], r.extra[2], r.extra[3], r.extra[4], r.extra[5], r.extra[6],
-                r.extra[7],
-            ]);
-            let freq = u16::from_le_bytes([r.extra[32], r.extra[33]]);
-            let uptime_sec = if freq > 0 {
-                clock_cycles / freq as u64
-            } else {
-                0
-            };
-
-            serde_json::json!({
-                "clockCycles": clock_cycles,
-                "clockFreqHz": freq,
-                "uptimeSeconds": uptime_sec,
-                "frameOverruns": u64::from_le_bytes([
-                    r.extra[16], r.extra[17], r.extra[18], r.extra[19],
-                    r.extra[20], r.extra[21], r.extra[22], r.extra[23],
-                ]),
-                "watchdogWarnings": u64::from_le_bytes([
-                    r.extra[24], r.extra[25], r.extra[26], r.extra[27],
-                    r.extra[28], r.extra[29], r.extra[30], r.extra[31],
-                ]),
-            })
-        }
-        _ => serde_json::json!({"error": "Could not query executive"}),
-    };
-
-    Ok(Json(serde_json::json!({
-        "scheduler": sched,
-        "executive": exec,
-    })))
 }
 
 /* ----------------------------- Struct Dictionaries ----------------------------- */
@@ -3201,7 +3123,6 @@ fn build_router(state: AppState, cors_origins: &[String], upload_max_mb: u32) ->
         )
         .route("/targets/{id}/tprm/staged", get(tprm_staged_digest))
         .route("/targets/{id}/registry", get(target_registry))
-        .route("/targets/{id}/schedule", get(target_schedule))
         .route("/targets/{id}/telemetry/live", get(telemetry_ws))
         .route("/targets/{id}/telemetry/history", get(telemetry_history))
         .route("/targets/{id}/telemetry/latest", get(telemetry_latest))

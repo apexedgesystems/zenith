@@ -33,20 +33,28 @@ interface AuditEntry {
   message?: string;
 }
 
-/* ----------------------------- Opcodes ----------------------------- */
+/* ----------------------------- Executive actions ----------------------------- */
 
-const EXEC_UID = "0x000000";
-
-const OP = {
-  SLEEP: { opcode: "0x0116", label: "Sleep" },
-  WAKE: { opcode: "0x0117", label: "Wake" },
-  PAUSE: { opcode: "0x0110", label: "Pause" },
-  RESUME: { opcode: "0x0111", label: "Resume" },
-  RESTART: { opcode: "0x0127", label: "Restart Executive" },
-  SET_VERBOSITY: { opcode: "0x0121", label: "Set Verbosity" },
-  LOCK: { opcode: "0x0114", label: "Lock" },
-  UNLOCK: { opcode: "0x0115", label: "Unlock" },
+/** Semantic actions this panel offers, resolved against the target's
+ *  generated command config BY NAME -- no opcode numbers live in this
+ *  file. A target whose command set lacks an action gets that control
+ *  disabled rather than a wrong opcode fired at it. */
+const EXEC_ACTIONS = {
+  SLEEP: { name: "CMD_SLEEP", label: "Sleep" },
+  WAKE: { name: "CMD_WAKE", label: "Wake" },
+  PAUSE: { name: "CMD_PAUSE", label: "Pause" },
+  RESUME: { name: "CMD_RESUME", label: "Resume" },
+  SET_VERBOSITY: { name: "SET_VERBOSITY", label: "Set Verbosity" },
+  LOCK: { name: "CMD_LOCK_COMPONENT", label: "Lock" },
+  UNLOCK: { name: "CMD_UNLOCK_COMPONENT", label: "Unlock" },
 } as const;
+
+interface ExecSurface {
+  /** Executive component fullUid (from the registry's EXECUTIVE row). */
+  uid: string;
+  /** Command name -> opcode, from the target's commands config. */
+  opcodes: Record<string, string>;
+}
 
 /** Pack a u32 as 4-char little-endian hex. */
 function u32Hex(n: number): string {
@@ -125,6 +133,38 @@ export default function OperationsPage({
     };
   }, [selectedTarget, connected]);
 
+  /* ---- Executive command surface from the target's config ---- */
+
+  const [execSurface, setExecSurface] = useState<ExecSurface | null>(null);
+  useEffect(() => {
+    if (!selectedTarget) return;
+    setExecSurface(null);
+    let cancelled = false;
+    fetch(`/api/targets/${selectedTarget}/commands`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (cancelled || !data?.components) return;
+        const entries = Object.values(data.components) as {
+          fullUid: string;
+          commands?: { name: string; opcode: string }[];
+        }[];
+        // The executive is the entry that defines the pause action --
+        // identified by what it can do, not by a hardcoded uid.
+        const exec = entries.find(
+          (c) => c.commands?.some((k) => k.name === EXEC_ACTIONS.PAUSE.name),
+        );
+        if (exec?.commands) {
+          const opcodes: Record<string, string> = {};
+          for (const k of exec.commands) opcodes[k.name] = k.opcode;
+          setExecSurface({ uid: exec.fullUid, opcodes });
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedTarget]);
+
   /* ---- Send command via existing generic endpoint ---- */
 
   const send = useCallback(
@@ -197,51 +237,49 @@ export default function OperationsPage({
     [selectedTarget],
   );
 
+  /** Resolve a semantic action against the target's command surface
+   *  and send it; refuses with a notice when the target's config does
+   *  not define the action (never fires a guessed opcode). */
+  const sendExec = useCallback(
+    async (
+      action: { name: string; label: string },
+      payloadHex: string,
+      detail: string,
+    ) => {
+      const opcode = execSurface?.opcodes[action.name];
+      if (!execSurface || !opcode) {
+        void notify(
+          `${action.label} is not in this target's command set`,
+          "Unavailable",
+        );
+        return false;
+      }
+      return send(action.label, execSurface.uid, opcode, payloadHex, detail);
+    },
+    [send, execSurface, notify],
+  );
+
   /* ---- Action handlers ---- */
 
   const sleepWake = useCallback(async () => {
     if (systemAsleep) {
-      const ok = await send(
-        OP.WAKE.label,
-        EXEC_UID,
-        OP.WAKE.opcode,
-        "",
-        "Wake from sleep",
-      );
+      const ok = await sendExec(EXEC_ACTIONS.WAKE, "", "Wake from sleep");
       if (ok) setSystemAsleep(false);
     } else {
-      const ok = await send(
-        OP.SLEEP.label,
-        EXEC_UID,
-        OP.SLEEP.opcode,
-        "",
-        "Sleep system",
-      );
+      const ok = await sendExec(EXEC_ACTIONS.SLEEP, "", "Sleep system");
       if (ok) setSystemAsleep(true);
     }
-  }, [send, systemAsleep]);
+  }, [sendExec, systemAsleep]);
 
   const pauseResume = useCallback(async () => {
     if (systemPaused) {
-      const ok = await send(
-        OP.RESUME.label,
-        EXEC_UID,
-        OP.RESUME.opcode,
-        "",
-        "Resume scheduler",
-      );
+      const ok = await sendExec(EXEC_ACTIONS.RESUME, "", "Resume scheduler");
       if (ok) setSystemPaused(false);
     } else {
-      const ok = await send(
-        OP.PAUSE.label,
-        EXEC_UID,
-        OP.PAUSE.opcode,
-        "",
-        "Pause scheduler",
-      );
+      const ok = await sendExec(EXEC_ACTIONS.PAUSE, "", "Pause scheduler");
       if (ok) setSystemPaused(true);
     }
-  }, [send, systemPaused]);
+  }, [sendExec, systemPaused]);
 
   const restart = useCallback(async () => {
     setConfirmRestart(false);
@@ -342,25 +380,13 @@ export default function OperationsPage({
       void notify("Verbosity must be 0-7", "Invalid verbosity");
       return;
     }
-    await send(
-      OP.SET_VERBOSITY.label,
-      EXEC_UID,
-      OP.SET_VERBOSITY.opcode,
-      u8Hex(v),
-      `level ${v}`,
-    );
-  }, [send, verbosity, notify]);
+    await sendExec(EXEC_ACTIONS.SET_VERBOSITY, u8Hex(v), `level ${v}`);
+  }, [sendExec, verbosity, notify]);
 
   const lockComp = useCallback(
     async (comp: RegistryComponent) => {
       const uid = parseInt(comp.fullUid.replace("0x", ""), 16);
-      const ok = await send(
-        OP.LOCK.label,
-        EXEC_UID,
-        OP.LOCK.opcode,
-        u32Hex(uid),
-        comp.name,
-      );
+      const ok = await sendExec(EXEC_ACTIONS.LOCK, u32Hex(uid), comp.name);
       if (ok) {
         setLockedUids((prev) => {
           const n = new Set(prev);
@@ -369,19 +395,13 @@ export default function OperationsPage({
         });
       }
     },
-    [send],
+    [sendExec],
   );
 
   const unlockComp = useCallback(
     async (comp: RegistryComponent) => {
       const uid = parseInt(comp.fullUid.replace("0x", ""), 16);
-      const ok = await send(
-        OP.UNLOCK.label,
-        EXEC_UID,
-        OP.UNLOCK.opcode,
-        u32Hex(uid),
-        comp.name,
-      );
+      const ok = await sendExec(EXEC_ACTIONS.UNLOCK, u32Hex(uid), comp.name);
       if (ok) {
         setLockedUids((prev) => {
           const n = new Set(prev);
@@ -390,7 +410,7 @@ export default function OperationsPage({
         });
       }
     },
-    [send],
+    [sendExec],
   );
 
   /* ---- Library swap ---- */

@@ -284,7 +284,6 @@ GET    /api/targets/{id}/health
 GET    /api/targets/{id}/inspect/{uid}?category=N&offset=N&length=N
 POST   /api/targets/{id}/command                 # Generic (uid, opcode, payload_hex)
 GET    /api/targets/{id}/registry
-GET    /api/targets/{id}/schedule
 GET    /api/targets/{id}/commands
 
 # Parameters (TUNABLE_PARAM)

@@ -162,6 +162,12 @@ pub struct TargetSection {
     /// silently defaulting.
     #[serde(default = "default_protocol")]
     pub protocol: String,
+    /// Display policy: telemetry field names (lowercased, underscores
+    /// stripped) flagged as bad when nonzero on the dashboard health
+    /// cards. Ground-side judgement, not vehicle truth, so it lives in
+    /// zenith config -- override per target to fit its components.
+    #[serde(default = "default_health_nonzero_bad")]
+    pub health_nonzero_bad: Vec<String>,
     #[serde(default)]
     pub manifest: Option<String>,
     #[serde(default)]
@@ -200,6 +206,32 @@ fn default_target_port() -> u16 {
 }
 fn default_protocol() -> String {
     "aproto-slip".to_string()
+}
+/// The default policy, callable from target-add paths that build a
+/// TargetSection literal.
+pub fn default_health_nonzero_bad_public() -> Vec<String> {
+    default_health_nonzero_bad()
+}
+
+fn default_health_nonzero_bad() -> Vec<String> {
+    [
+        "overruns",
+        "frameoverruns",
+        "watchdogwarnings",
+        "watchdogwarns",
+        "totalperiodviolations",
+        "violationsthistick",
+        "totalskipcount",
+        "packetsinvalid",
+        "framingerrors",
+        "cmdqueueoverflows",
+        "tlmqueueoverflows",
+        "internalcommandsfailed",
+        "warncount",
+        "critcount",
+    ]
+    .map(String::from)
+    .to_vec()
 }
 
 impl Default for ServerConfig {
