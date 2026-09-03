@@ -297,7 +297,8 @@ fn bench_decoder_construction(c: &mut Criterion) {
     let mut group = c.benchmark_group("decoder_construction");
     let dict = make_dict();
     let uids = make_uids();
-    let uid_refs: Vec<(u32, &str)> = uids.iter().map(|(u, n)| (*u, n.as_str())).collect();
+    let uid_refs: Vec<(u32, &str, Option<&str>)> =
+        uids.iter().map(|(u, n)| (*u, n.as_str(), None)).collect();
 
     group.bench_function("build_3_components", |b| {
         b.iter(|| {
@@ -317,7 +318,8 @@ fn bench_decode_hot_path(c: &mut Criterion) {
 
     let dict = make_dict();
     let uids = make_uids();
-    let uid_refs: Vec<(u32, &str)> = uids.iter().map(|(u, n)| (*u, n.as_str())).collect();
+    let uid_refs: Vec<(u32, &str, Option<&str>)> =
+        uids.iter().map(|(u, n)| (*u, n.as_str(), None)).collect();
     let decoder = zenith::core::telemetry::TelemetryDecoder::new(&dict, &uid_refs);
     let packets = make_packets();
     let target: Arc<str> = Arc::from("target-0");

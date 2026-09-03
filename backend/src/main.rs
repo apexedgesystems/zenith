@@ -960,6 +960,29 @@ fn find_tunable_struct<'a>(
     full_uid: u32,
     manifest: Option<&crate::core::config_manager::AppManifest>,
 ) -> Option<(&'a str, &'a str, &'a crate::core::config_manager::StructDef)> {
+    // Exact join first: the manifest's dataFile stem names THE dict
+    // for this uid. Name matching survives only for manifests
+    // predating the field.
+    if let Some(dict) = manifest
+        .and_then(|m| m.dict_key_for(full_uid))
+        .and_then(|key| dicts.components.get(&key))
+    {
+        let mut fallback: Option<(&str, &str, &crate::core::config_manager::StructDef)> = None;
+        for (sname, sdef) in &dict.structs {
+            if sdef.category == "TUNABLE_PARAM" && !sdef.fields.is_empty() {
+                if sdef.size == data_len {
+                    return Some((&dict.component, sname, sdef));
+                }
+                if fallback.is_none() {
+                    fallback = Some((&dict.component, sname, sdef));
+                }
+            }
+        }
+        if fallback.is_some() {
+            return fallback;
+        }
+    }
+
     // Map UID to component name from the manifest
     let component_name = manifest.and_then(|m| {
         m.components.iter().find_map(|c| {
@@ -973,7 +996,7 @@ fn find_tunable_struct<'a>(
         })
     });
 
-    // Try name-based match first (handles struct alignment padding differences)
+    // Legacy name-based match (manifests without dataFile)
     if let Some(name) = component_name {
         let bn = name.to_lowercase();
         for dict in dicts.components.values() {
@@ -1176,14 +1199,24 @@ async fn update_params(
             })
         });
 
-        // Find the two TUNABLE_PARAM structs (header = smaller, entry = larger)
+        // Find the two TUNABLE_PARAM structs (header = smaller, entry
+        // = larger). Exact dataFile join narrows to THE dict when the
+        // manifest carries it; the name hint survives for older
+        // manifests.
+        let exact_key = manifest.as_ref().and_then(|m| m.dict_key_for(full_uid));
+        let search_dicts: Vec<&crate::core::config_manager::ComponentDict> = match &exact_key {
+            Some(key) => dicts.components.get(key).into_iter().collect(),
+            None => dicts.components.values().collect(),
+        };
         let mut tunable_structs: Vec<&crate::core::config_manager::StructDef> = Vec::new();
-        for dict in dicts.components.values() {
-            if let Some(hint) = comp_name {
-                let dn = dict.component.to_lowercase();
-                let hn = hint.to_lowercase();
-                if dn != hn && !dn.contains(&hn) && !hn.contains(&dn) {
-                    continue;
+        for dict in search_dicts {
+            if exact_key.is_none() {
+                if let Some(hint) = comp_name {
+                    let dn = dict.component.to_lowercase();
+                    let hn = hint.to_lowercase();
+                    if dn != hn && !dn.contains(&hn) && !hn.contains(&dn) {
+                        continue;
+                    }
                 }
             }
             for sdef in dict.structs.values() {
@@ -1898,11 +1931,14 @@ async fn telemetry_layouts(
     // saved layouts can point at renamed or removed fields, and that
     // rot should be visible in the picker instead of silently
     // rendering an empty plot.
-    let uid_names: Vec<(u32, String)> = manifest
+    let uid_joins: Vec<(u32, String, Option<String>)> = manifest
         .as_ref()
-        .map(|m| m.component_uids())
+        .map(|m| m.component_dict_joins())
         .unwrap_or_default();
-    let uid_refs: Vec<(u32, &str)> = uid_names.iter().map(|(u, n)| (*u, n.as_str())).collect();
+    let uid_refs: Vec<(u32, &str, Option<&str>)> = uid_joins
+        .iter()
+        .map(|(u, n, k)| (*u, n.as_str(), k.as_deref()))
+        .collect();
     let known: std::collections::HashSet<String> =
         telemetry::TelemetryDecoder::new(&dicts, &uid_refs)
             .channel_names()
