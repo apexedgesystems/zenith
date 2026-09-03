@@ -31,12 +31,12 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
 use crate::config::{FifoStrategy, ServerConfig};
-use crate::core::aproto_client::{AprotoClient, PushTelemetryPacket};
+use crate::core::aproto_client::AprotoClient;
 use crate::core::config_manager::StructDictionary;
 use crate::core::metrics::TargetMetrics;
 use crate::core::telemetry::{self, TelemetrySample};
 use crate::core::tprm;
-use crate::core::transport::{unsupported_op, Protocol, ProtocolLink};
+use crate::core::transport::{unsupported_op, Protocol, ProtocolLink, PushTelemetryPacket};
 use crate::storage::telemetry_db::TelemetryDb;
 
 /* ----------------------------- CLI ----------------------------- */
@@ -142,6 +142,8 @@ struct TargetInfo {
     /// Dashboard display policy from this target's config: field names
     /// flagged bad when nonzero.
     health_nonzero_bad: Vec<String>,
+    /// Wire protocol this target speaks.
+    protocol: String,
 }
 
 #[derive(Serialize)]
@@ -257,10 +259,53 @@ async fn server_version() -> Json<serde_json::Value> {
 fn build_link(
     protocol: Protocol,
     push_tlm_tx: broadcast::Sender<PushTelemetryPacket>,
+    config: &config::TargetSection,
 ) -> ProtocolLink {
     match protocol {
         Protocol::AprotoSlip => ProtocolLink::Aproto(AprotoClient::new(push_tlm_tx)),
+        Protocol::CcsdsSpp => {
+            let apid_map = parse_apid_map(config.apid_map.as_ref(), &config.name);
+            ProtocolLink::CcsdsSpp(crate::core::ccsds_link::SppLink::new(apid_map, push_tlm_tx))
+        }
     }
+}
+
+/// Parse the config's APID routing table. Bad entries are skipped
+/// with a warning naming them; an SPP target with an empty map boots
+/// (valid: watch nothing yet) but says so.
+fn parse_apid_map(
+    raw: Option<&std::collections::HashMap<String, String>>,
+    target_name: &str,
+) -> std::collections::HashMap<u16, u32> {
+    let mut out = std::collections::HashMap::new();
+    let parse_num = |s: &str| -> Option<u32> {
+        let t = s.trim();
+        if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+            u32::from_str_radix(hex, 16).ok()
+        } else {
+            t.parse().ok()
+        }
+    };
+    for (k, v) in raw.into_iter().flatten() {
+        match (parse_num(k), parse_num(v)) {
+            (Some(apid), Some(uid)) if apid <= 0x7FF => {
+                out.insert(apid as u16, uid);
+            }
+            _ => tracing::warn!(
+                "[{}] apid_map entry '{}' = '{}' is not a valid APID/fullUid pair; skipped",
+                target_name,
+                k,
+                v
+            ),
+        }
+    }
+    if out.is_empty() {
+        tracing::warn!(
+            "[{}] SPP target has no APID mappings; telemetry will be dropped until apid_map is configured",
+            target_name
+        );
+    }
+    out
 }
 
 async fn target_client(
@@ -342,6 +387,7 @@ async fn list_targets(State(state): State<AppState>) -> Json<serde_json::Value> 
             connected,
             capabilities: t.struct_dicts.capabilities(),
             health_nonzero_bad: t.config.health_nonzero_bad.clone(),
+            protocol: t.config.protocol.clone(),
         });
     }
     // Sort by ID to preserve config.toml order (target-0, target-1, ...)
@@ -2424,6 +2470,7 @@ async fn add_target(
             .name()
             .to_string(),
         health_nonzero_bad: crate::config::default_health_nonzero_bad_public(),
+        apid_map: None,
         auto_connect: false,
     };
 
@@ -2437,7 +2484,7 @@ async fn add_target(
         metrics.clone(),
     );
 
-    let mut new_client = build_link(Protocol::AprotoSlip, push_tlm_tx.clone());
+    let mut new_client = build_link(Protocol::AprotoSlip, push_tlm_tx.clone(), &tc);
     new_client.set_metrics(metrics.clone());
     let connected = new_client.connected_handle();
     st.targets.insert(
@@ -3509,7 +3556,7 @@ async fn main() {
             eprintln!("FATAL: target '{}': {}", tc.name, e);
             std::process::exit(1);
         });
-        let mut new_client = build_link(protocol, push_tlm_tx.clone());
+        let mut new_client = build_link(protocol, push_tlm_tx.clone(), tc);
         new_client.set_metrics(metrics.clone());
         let connected = new_client.connected_handle();
         targets.insert(

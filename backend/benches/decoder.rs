@@ -11,8 +11,8 @@ use std::sync::Arc;
 use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
 use pprof::criterion::{Output, PProfProfiler};
 
-use zenith::core::aproto_client::PushTelemetryPacket;
 use zenith::core::config_manager::{ComponentDict, FieldDef, StructDef, StructDictionary};
+use zenith::core::transport::PushTelemetryPacket;
 
 /* ----------------------------- Test fixture ----------------------------- */
 

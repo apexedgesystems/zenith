@@ -33,6 +33,7 @@ use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::timeout;
 
+pub use crate::core::transport::PushTelemetryPacket;
 use crate::protocol::{aproto, slip};
 
 /* ----------------------------- Error ----------------------------- */
@@ -51,21 +52,6 @@ pub enum ClientError {
     Closed,
     #[error("send failed")]
     SendFailed,
-}
-
-/* ----------------------------- Push Telemetry ----------------------------- */
-
-/// A raw push telemetry packet received from the target. Carries the
-/// component fullUid and the raw payload bytes; the decoder converts
-/// this into named samples via the per-target struct dictionary.
-///
-/// The original opcode is intentionally NOT stored: zenith routes
-/// purely on (fullUid, payload size) so the opcode is opaque after
-/// the protocol parser has stripped the header.
-#[derive(Debug, Clone)]
-pub struct PushTelemetryPacket {
-    pub full_uid: u32,
-    pub payload: Vec<u8>,
 }
 
 /* ----------------------------- Internal ----------------------------- */

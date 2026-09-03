@@ -13,8 +13,8 @@ use std::sync::Arc;
 use serde::Serialize;
 use tokio::sync::broadcast;
 
-use crate::core::aproto_client::PushTelemetryPacket;
 use crate::core::config_manager::{FieldDef, StructDictionary};
+use crate::core::transport::PushTelemetryPacket;
 
 /* ----------------------------- Types ----------------------------- */
 
@@ -771,7 +771,7 @@ mod tests {
             metrics.clone(),
         );
 
-        let pkt = crate::core::aproto_client::PushTelemetryPacket {
+        let pkt = crate::core::transport::PushTelemetryPacket {
             full_uid: 0x00D000,
             payload: vec![0u8; 8],
         };

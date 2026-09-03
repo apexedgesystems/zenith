@@ -168,6 +168,11 @@ pub struct TargetSection {
     /// zenith config -- override per target to fit its components.
     #[serde(default = "default_health_nonzero_bad")]
     pub health_nonzero_bad: Vec<String>,
+    /// CCSDS SPP targets: APID -> component fullUid routing table
+    /// (keys and values as strings, decimal or 0x hex). Long term this
+    /// arrives as generated target config alongside the manifest.
+    #[serde(default)]
+    pub apid_map: Option<std::collections::HashMap<String, String>>,
     #[serde(default)]
     pub manifest: Option<String>,
     #[serde(default)]

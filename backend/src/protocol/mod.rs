@@ -4,4 +4,5 @@
 //! for communicating with Apex CSF applications over TCP.
 
 pub mod aproto;
+pub mod ccsds_spp;
 pub mod slip;
