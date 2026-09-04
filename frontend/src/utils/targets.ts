@@ -8,6 +8,8 @@ export interface Target {
   port: number;
   connected: boolean;
   capabilities?: string[];
+  /** Dashboard display policy served from this target's config. */
+  health_nonzero_bad?: string[];
 }
 
 /** Format a byte count as a short human-readable string (e.g. "1.2 MB"). */

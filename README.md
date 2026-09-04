@@ -2,12 +2,18 @@
 
 Real-time operations interface for [Apex CSF](https://github.com/apexedgesystems/apex_csf) applications.
 
-Zenith connects to Apex executables over TCP/APROTO, provides a REST API
-for commanding and telemetry, and serves a real-time web UI for
-visualization, configuration, and system management. Zero hardcoded
-component knowledge -- all application-specific behavior comes from
-per-target build artifacts (struct dictionaries, app manifest, plot
-layouts, command catalog) loaded at deploy time.
+Zenith connects to targets over per-target wire protocols (TCP/APROTO
+for Apex executables; CCSDS SPP for telemetry-only space-packet
+sources), provides a REST API for commanding and telemetry, and serves
+a real-time web UI for visualization, configuration, and system
+management. Zero hardcoded component knowledge -- all
+application-specific behavior comes from per-target build artifacts
+(struct dictionaries, app manifest, plot layouts, command catalog)
+loaded at deploy time, and the layers above the transport are
+protocol-neutral by construction: each target declares its protocol in
+config, command surfaces a protocol lacks answer 501, and a CI
+boundary test forbids generic code from referencing any one protocol
+family.
 
 ```
 +--------------------+        TCP / APROTO         +--------------------------+
@@ -284,7 +290,6 @@ GET    /api/targets/{id}/health
 GET    /api/targets/{id}/inspect/{uid}?category=N&offset=N&length=N
 POST   /api/targets/{id}/command                 # Generic (uid, opcode, payload_hex)
 GET    /api/targets/{id}/registry
-GET    /api/targets/{id}/schedule
 GET    /api/targets/{id}/commands
 
 # Parameters (TUNABLE_PARAM)

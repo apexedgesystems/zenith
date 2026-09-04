@@ -21,6 +21,8 @@ export interface Target {
   /** Command-surface capabilities the target's dictionaries declare
    *  (e.g. "readback"). Absent on older backends. */
   capabilities?: string[];
+  /** Dashboard display policy served from this target's config. */
+  health_nonzero_bad?: string[];
 }
 
 const isTarget: Validator<Target> = (v) => {

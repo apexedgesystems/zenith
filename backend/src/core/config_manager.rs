@@ -514,7 +514,12 @@ impl AppManifest {
     }
 
     /// Get component list as (fullUid_u32, display_name) pairs for telemetry routing.
-    pub fn component_uids(&self) -> Vec<(u32, String)> {
+    /// (fullUid, display name, dictionary key) per component. The
+    /// dictionary key is the manifest's dataFile stem -- the
+    /// generator-emitted exact join to the struct-dict component.
+    /// None only on manifests predating the field; consumers fall
+    /// back to name matching there and say so.
+    pub fn component_dict_joins(&self) -> Vec<(u32, String, Option<String>)> {
         self.components
             .iter()
             .filter_map(|c| {
@@ -525,9 +530,26 @@ impl AppManifest {
                 } else {
                     c.name.clone()
                 };
-                Some((uid, display))
+                let key = c
+                    .data_file
+                    .as_ref()
+                    .map(|f| f.trim_end_matches(".json").to_string());
+                Some((uid, display, key))
             })
             .collect()
+    }
+
+    /// The dictionary key for one component by fullUid (dataFile stem).
+    pub fn dict_key_for(&self, full_uid: u32) -> Option<String> {
+        self.components.iter().find_map(|c| {
+            let uid_clean = c.full_uid.trim_start_matches("0x").trim_start_matches("0X");
+            if u32::from_str_radix(uid_clean, 16).ok()? != full_uid {
+                return None;
+            }
+            c.data_file
+                .as_ref()
+                .map(|f| f.trim_end_matches(".json").to_string())
+        })
     }
 }
 

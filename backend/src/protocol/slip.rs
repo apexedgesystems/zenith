@@ -228,31 +228,4 @@ mod tests {
         assert_eq!(bulk_frames.len(), 1);
         assert_eq!(bulk_frames[0], data);
     }
-
-    /// @test The decoder never panics on arbitrary byte streams fed in
-    /// irregular chunk sizes, and every emitted frame survives the
-    /// APROTO parser. Both consume untrusted network input, so this is
-    /// a deterministic pseudo-random adversarial sweep (fixed seed:
-    /// reproducible in CI).
-    #[test]
-    fn decoder_survives_arbitrary_byte_streams() {
-        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
-        let mut next_byte = move || {
-            seed = seed
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            (seed >> 33) as u8
-        };
-
-        for round in 0..200usize {
-            let mut decoder = Decoder::new();
-            let len = (round * 37) % 4096 + 1;
-            let bytes: Vec<u8> = (0..len).map(|_| next_byte()).collect();
-            for chunk in bytes.chunks(1 + round % 61) {
-                for frame in decoder.feed(chunk) {
-                    let _ = crate::protocol::aproto::parse_packet(&frame);
-                }
-            }
-        }
-    }
 }

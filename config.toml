@@ -31,12 +31,40 @@ retention_hours = 24
 # mid_horizon_hours = 24         # ...until this age...
 # coarse_bucket_seconds = 60     # ...then 1min envelope buckets
 
+# CCSDS SPP target example (telemetry-only; command surfaces answer
+# "unsupported for this protocol"). APIDs route to component uids;
+# payloads are the same struct bytes the dictionaries describe.
+# [[targets]]
+# name = "SPP Example"
+# host = "192.168.1.50"
+# port = 10025
+# protocol = "ccsds-spp"      # or "slip+ccsds-spp" for SLIP-framed
+#                              # space packets -- stacks compose
+# structs_dir = "/data/targets/my-target/structs"
+# manifest = "/data/targets/my-target/app_manifest.json"
+# [targets.apid_map]
+# "0x0D0" = "0x00D000"
+
+# Raw SLIP target example (telemetry-only): header-less SLIP frames,
+# each frame one struct payload; the component uid comes from config.
+# [[targets]]
+# name = "Bare Instrument"
+# host = "192.168.1.60"
+# port = 7000
+# protocol = "raw-slip"
+# raw_uid = "0x00D000"
+# structs_dir = "/data/targets/my-target/structs"
+
 # Target: Local SIL ops demo (dev only; 172.21.0.1 is the compose
 # network gateway, i.e. this host as seen from the zenith container)
 [[targets]]
 name = "Local SIL - Ops Demo"
 host = "172.21.0.1"
 port = 9000
+# protocol = "aproto-slip"   # wire protocol (default; validated at boot)
+# health_nonzero_bad = [...]  # dashboard fields flagged bad when nonzero
+#                             # (display policy; defaults cover the apex
+#                             # counters -- override per target as needed)
 auto_connect = false
 manifest = "/data/targets/sil-ops-demo/app_manifest.json"
 structs_dir = "/data/targets/sil-ops-demo/structs"

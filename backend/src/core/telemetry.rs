@@ -13,8 +13,8 @@ use std::sync::Arc;
 use serde::Serialize;
 use tokio::sync::broadcast;
 
-use crate::core::aproto_client::PushTelemetryPacket;
 use crate::core::config_manager::{FieldDef, StructDictionary};
+use crate::core::transport::PushTelemetryPacket;
 
 /* ----------------------------- Types ----------------------------- */
 
@@ -73,18 +73,22 @@ pub struct TelemetryDecoder {
 }
 
 impl TelemetryDecoder {
-    /// Build the decoder lookup table from a struct dictionary plus a
-    /// list of `(fullUid, component_name)` pairs from the manifest.
-    /// Pre-computes channel name `Arc<str>`s for every emittable field
-    /// so the hot path does no string allocation per sample.
-    pub fn new(dicts: &StructDictionary, known_components: &[(u32, &str)]) -> Self {
+    /// Build the decoder lookup table from a struct dictionary plus
+    /// `(fullUid, component_name, dictionary_key)` triples from the
+    /// manifest. The dictionary key (dataFile stem) is the generator-
+    /// emitted exact join; when a manifest predates it, matching falls
+    /// back to name heuristics with a warning, because a fuzzy join
+    /// can silently attach the wrong layout. Pre-computes channel name
+    /// `Arc<str>`s for every emittable field so the hot path does no
+    /// string allocation per sample.
+    pub fn new(dicts: &StructDictionary, known_components: &[(u32, &str, Option<&str>)]) -> Self {
         let mut lookup: HashMap<(u32, usize), Vec<CachedField>> = HashMap::new();
         let mut uid_names: HashMap<u32, Arc<str>> = HashMap::new();
         // Track which field names are already claimed by higher-priority structs
         // to prevent duplicates (e.g. OUTPUT and STATE both having "output" field)
         let mut claimed_fields: HashMap<u32, std::collections::HashSet<String>> = HashMap::new();
 
-        for &(uid, comp_name) in known_components {
+        for &(uid, comp_name, dict_key) in known_components {
             uid_names.insert(uid, Arc::from(comp_name));
 
             let base_name = comp_name.split('#').next().unwrap_or(comp_name).trim();
@@ -93,12 +97,26 @@ impl TelemetryDecoder {
             // Collect all matching structs, sorted by priority (OUTPUT first)
             let mut candidates: Vec<(u8, usize, Vec<FieldDef>)> = Vec::new();
 
-            for dict in dicts.components.values() {
-                let dn = dict.component.to_lowercase();
-                if dn != bn && !dn.contains(&bn) && !bn.contains(&dn) {
-                    continue;
+            let matching_dicts: Vec<&crate::core::config_manager::ComponentDict> = match dict_key {
+                // Exact join on the manifest's dataFile stem.
+                Some(key) => dicts.components.get(key).into_iter().collect(),
+                // Legacy manifest without the join key: name heuristic.
+                None => {
+                    tracing::warn!(
+                        "manifest entry for {comp_name} has no dataFile; falling back to name matching"
+                    );
+                    dicts
+                        .components
+                        .values()
+                        .filter(|d| {
+                            let dn = d.component.to_lowercase();
+                            dn == bn || dn.contains(&bn) || bn.contains(&dn)
+                        })
+                        .collect()
                 }
+            };
 
+            for dict in matching_dicts {
                 for sdef in dict.structs.values() {
                     if sdef.fields.is_empty() || sdef.size == 0 {
                         continue;
@@ -363,11 +381,14 @@ pub fn spawn_router(
         // per lag event, so a sustained overload can't flood the log.
         const LAG_WARN_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
         let mut last_lag_warn: Option<std::time::Instant> = None;
-        let uid_names: Vec<(u32, String)> = manifest
+        let uid_joins: Vec<(u32, String, Option<String>)> = manifest
             .as_ref()
-            .map(|m| m.component_uids())
+            .map(|m| m.component_dict_joins())
             .unwrap_or_default();
-        let uid_refs: Vec<(u32, &str)> = uid_names.iter().map(|(u, n)| (*u, n.as_str())).collect();
+        let uid_refs: Vec<(u32, &str, Option<&str>)> = uid_joins
+            .iter()
+            .map(|(u, n, k)| (*u, n.as_str(), k.as_deref()))
+            .collect();
         let decoder = TelemetryDecoder::new(&dicts, &uid_refs);
         let mut push_rx = push_rx;
         // Dedup: track last timestamp per channel to filter duplicate writes.
@@ -497,12 +518,67 @@ mod tests {
         Arc::from("test-target")
     }
 
+    /// @test The manifest's dictionary key is an exact join: with two
+    /// dicts whose names both fuzzy-match the component, only the
+    /// keyed dict's layout decodes -- the imposter with the same
+    /// payload size but different field names never wins. Guards
+    /// against the fuzzy-match bug class where a similarly-named
+    /// dictionary silently attaches the wrong layout.
+    #[test]
+    fn dict_key_joins_exactly_and_beats_name_matching() {
+        let f = |name: &str, off: usize| FieldDef {
+            name: name.to_string(),
+            field_type: "float".to_string(),
+            offset: off,
+            size: 4,
+            value: serde_json::Value::Null,
+            element_type: None,
+            dims: None,
+            constraints: None,
+        };
+        let make = |comp: &str, field: &str| ComponentDict {
+            component: comp.to_string(),
+            structs: HashMap::from([(
+                "Output".to_string(),
+                StructDef {
+                    category: "OUTPUT".to_string(),
+                    size: 8,
+                    opcode: None,
+                    fields: vec![f(field, 0), f("phase", 4)],
+                    layout_hash: None,
+                    canonical_spec: None,
+                },
+            )]),
+            enums: HashMap::new(),
+            capabilities: Vec::new(),
+        };
+        let dict = StructDictionary {
+            components: HashMap::from([
+                ("WaveGen".to_string(), make("WaveGen", "genuine")),
+                ("WaveGenExt".to_string(), make("WaveGenExt", "imposter")),
+            ]),
+        };
+
+        let decoder = TelemetryDecoder::new(&dict, &[(0x00D000, "WaveGen#0", Some("WaveGen"))]);
+        let pkt = PushTelemetryPacket {
+            full_uid: 0x00D000,
+            payload: vec![0x00, 0x00, 0x00, 0x3F, 0x00, 0x00, 0x80, 0x3F],
+        };
+        let samples = decoder.decode(&target_id(), 1000, &pkt);
+        let names: Vec<&str> = samples.iter().map(|s| &*s.channel).collect();
+        assert!(names.contains(&"WaveGen#0.genuine"));
+        assert!(
+            !names.iter().any(|n| n.contains("imposter")),
+            "fuzzy-matched imposter dict must not decode: {names:?}"
+        );
+    }
+
     /// @test 8-byte WaveGen OUTPUT struct decodes into the two
     /// expected float samples (output, phase) with correct values.
     #[test]
     fn decode_8b_output_emits_two_samples() {
         let dict = make_wavegen_dict();
-        let decoder = TelemetryDecoder::new(&dict, &[(0x00D000, "WaveGen#0")]);
+        let decoder = TelemetryDecoder::new(&dict, &[(0x00D000, "WaveGen#0", None)]);
         let pkt = PushTelemetryPacket {
             full_uid: 0x00D000,
             // 0.5_f32, 1.0_f32 little-endian
@@ -524,7 +600,7 @@ mod tests {
         // STATE struct includes output+phase, but OUTPUT already claimed them.
         // The 16B STATE decode should only emit cycleCount and errorCount.
         let dict = make_wavegen_dict();
-        let decoder = TelemetryDecoder::new(&dict, &[(0x00D000, "WaveGen#0")]);
+        let decoder = TelemetryDecoder::new(&dict, &[(0x00D000, "WaveGen#0", None)]);
         let mut payload = vec![0u8; 16];
         // cycleCount = 42, errorCount = 7
         payload[8..12].copy_from_slice(&42u32.to_le_bytes());
@@ -563,7 +639,7 @@ mod tests {
     fn decode_unknown_payload_falls_back_to_generic() {
         // Empty struct dict -> decoder has no lookup entries -> generic fallback
         let dict = StructDictionary::default();
-        let decoder = TelemetryDecoder::new(&dict, &[(0x00DEAD, "Unknown")]);
+        let decoder = TelemetryDecoder::new(&dict, &[(0x00DEAD, "Unknown", None)]);
         // Payload: 1.0_f32, 2.0_f32, 3.0_f32
         let mut payload = vec![0u8; 12];
         payload[0..4].copy_from_slice(&1.0f32.to_le_bytes());
@@ -617,7 +693,7 @@ mod tests {
         let dict = StructDictionary {
             components: HashMap::from([("X".to_string(), comp)]),
         };
-        let decoder = TelemetryDecoder::new(&dict, &[(0x1, "X")]);
+        let decoder = TelemetryDecoder::new(&dict, &[(0x1, "X", None)]);
         let pkt = PushTelemetryPacket {
             full_uid: 0x1,
             payload: vec![0u8; 8],
@@ -636,7 +712,7 @@ mod tests {
         // produce samples whose channel Arcs point at the SAME allocation
         // (verifiable via Arc::strong_count rising and Arc::ptr_eq).
         let dict = make_wavegen_dict();
-        let decoder = TelemetryDecoder::new(&dict, &[(0x00D000, "WaveGen#0")]);
+        let decoder = TelemetryDecoder::new(&dict, &[(0x00D000, "WaveGen#0", None)]);
         let pkt = PushTelemetryPacket {
             full_uid: 0x00D000,
             payload: vec![0u8; 8],
@@ -695,7 +771,7 @@ mod tests {
             metrics.clone(),
         );
 
-        let pkt = crate::core::aproto_client::PushTelemetryPacket {
+        let pkt = crate::core::transport::PushTelemetryPacket {
             full_uid: 0x00D000,
             payload: vec![0u8; 8],
         };
