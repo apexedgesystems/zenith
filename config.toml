@@ -38,7 +38,8 @@ retention_hours = 24
 # name = "SPP Example"
 # host = "192.168.1.50"
 # port = 10025
-# protocol = "ccsds-spp"
+# protocol = "ccsds-spp"      # or "slip+ccsds-spp" for SLIP-framed
+#                              # space packets -- stacks compose
 # structs_dir = "/data/targets/my-target/structs"
 # manifest = "/data/targets/my-target/app_manifest.json"
 # [targets.apid_map]

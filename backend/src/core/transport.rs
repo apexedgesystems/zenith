@@ -53,8 +53,11 @@ pub struct PushTelemetryPacket {
 pub enum Protocol {
     /// APROTO packets over SLIP framing on TCP (the apex family).
     AprotoSlip,
-    /// CCSDS Space Packets over TCP (telemetry-only).
+    /// CCSDS Space Packets over TCP, self-delimiting (telemetry-only).
     CcsdsSpp,
+    /// SLIP-framed CCSDS Space Packets -- the layered stack
+    /// (telemetry-only).
+    SlipCcsdsSpp,
     /// Header-less SLIP frames over TCP (telemetry-only; fullUid
     /// from config -- the bare-instrument case).
     RawSlip,
@@ -67,9 +70,11 @@ impl Protocol {
         match s {
             "aproto-slip" => Ok(Protocol::AprotoSlip),
             "ccsds-spp" => Ok(Protocol::CcsdsSpp),
+            "slip+ccsds-spp" => Ok(Protocol::SlipCcsdsSpp),
             "raw-slip" => Ok(Protocol::RawSlip),
             other => Err(format!(
-                "unknown protocol '{}' (supported: aproto-slip, ccsds-spp, raw-slip)",
+                "unknown protocol '{}' (supported: aproto-slip, ccsds-spp, \
+                 slip+ccsds-spp, raw-slip)",
                 other
             )),
         }
@@ -79,6 +84,7 @@ impl Protocol {
         match self {
             Protocol::AprotoSlip => "aproto-slip",
             Protocol::CcsdsSpp => "ccsds-spp",
+            Protocol::SlipCcsdsSpp => "slip+ccsds-spp",
             Protocol::RawSlip => "raw-slip",
         }
     }
@@ -87,16 +93,17 @@ impl Protocol {
 /// One target's link, dispatched by protocol.
 pub enum ProtocolLink {
     Aproto(AprotoClient),
-    CcsdsSpp(crate::core::ccsds_link::SppLink),
-    RawSlip(crate::core::raw_slip_link::RawSlipLink),
+    /// Every composed telemetry-only stream stack (SPP, SLIP+SPP,
+    /// raw SLIP, future EPP compositions) shares one link type; the
+    /// composition lives in its PipelineSpec.
+    Stream(crate::core::stream_link::StreamLink),
 }
 
 impl ProtocolLink {
     pub fn protocol(&self) -> Protocol {
         match self {
             ProtocolLink::Aproto(_) => Protocol::AprotoSlip,
-            ProtocolLink::CcsdsSpp(_) => Protocol::CcsdsSpp,
-            ProtocolLink::RawSlip(_) => Protocol::RawSlip,
+            ProtocolLink::Stream(s) => s.protocol(),
         }
     }
 
@@ -105,24 +112,21 @@ impl ProtocolLink {
     pub async fn connect(&mut self, host: &str, port: u16) -> Result<(), ClientError> {
         match self {
             ProtocolLink::Aproto(c) => c.connect(host, port).await,
-            ProtocolLink::CcsdsSpp(c) => c.connect(host, port).await,
-            ProtocolLink::RawSlip(c) => c.connect(host, port).await,
+            ProtocolLink::Stream(c) => c.connect(host, port).await,
         }
     }
 
     pub fn disconnect(&mut self) {
         match self {
             ProtocolLink::Aproto(c) => c.disconnect(),
-            ProtocolLink::CcsdsSpp(c) => c.disconnect(),
-            ProtocolLink::RawSlip(c) => c.disconnect(),
+            ProtocolLink::Stream(c) => c.disconnect(),
         }
     }
 
     pub fn is_connected(&self) -> bool {
         match self {
             ProtocolLink::Aproto(c) => c.is_connected(),
-            ProtocolLink::CcsdsSpp(c) => c.is_connected(),
-            ProtocolLink::RawSlip(c) => c.is_connected(),
+            ProtocolLink::Stream(c) => c.is_connected(),
         }
     }
 
@@ -131,16 +135,14 @@ impl ProtocolLink {
     pub fn connected_handle(&self) -> Arc<AtomicBool> {
         match self {
             ProtocolLink::Aproto(c) => c.connected_handle(),
-            ProtocolLink::CcsdsSpp(c) => c.connected_handle(),
-            ProtocolLink::RawSlip(c) => c.connected_handle(),
+            ProtocolLink::Stream(c) => c.connected_handle(),
         }
     }
 
     pub fn set_metrics(&mut self, metrics: Arc<crate::core::metrics::TargetMetrics>) {
         match self {
             ProtocolLink::Aproto(c) => c.set_metrics(metrics),
-            ProtocolLink::CcsdsSpp(c) => c.set_metrics(metrics),
-            ProtocolLink::RawSlip(c) => c.set_metrics(metrics),
+            ProtocolLink::Stream(c) => c.set_metrics(metrics),
         }
     }
 
@@ -153,8 +155,7 @@ impl ProtocolLink {
     pub fn aproto(&mut self) -> Option<&mut AprotoClient> {
         match self {
             ProtocolLink::Aproto(c) => Some(c),
-            ProtocolLink::CcsdsSpp(_) => None,
-            ProtocolLink::RawSlip(_) => None,
+            ProtocolLink::Stream(_) => None,
         }
     }
 }
@@ -193,7 +194,7 @@ mod tests {
                 include_str!("../protocol/ccsds_spp.rs"),
             ),
             ("protocol/slip.rs", include_str!("../protocol/slip.rs")),
-            ("core/raw_slip_link.rs", include_str!("raw_slip_link.rs")),
+            ("core/stream_link.rs", include_str!("stream_link.rs")),
         ] {
             assert!(
                 !source.to_lowercase().contains("aproto"),

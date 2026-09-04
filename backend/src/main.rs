@@ -263,23 +263,28 @@ fn build_link(
 ) -> ProtocolLink {
     match protocol {
         Protocol::AprotoSlip => ProtocolLink::Aproto(AprotoClient::new(push_tlm_tx)),
-        Protocol::CcsdsSpp => {
-            let apid_map = parse_apid_map(config.apid_map.as_ref(), &config.name);
-            ProtocolLink::CcsdsSpp(crate::core::ccsds_link::SppLink::new(apid_map, push_tlm_tx))
-        }
-        Protocol::RawSlip => {
-            let raw_uid = config.raw_uid.as_deref().and_then(|s| {
-                let t = s.trim();
-                if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-                    u32::from_str_radix(hex, 16).ok()
-                } else {
-                    t.parse().ok()
-                }
-            });
-            ProtocolLink::RawSlip(crate::core::raw_slip_link::RawSlipLink::new(
-                raw_uid,
-                push_tlm_tx,
-            ))
+        Protocol::CcsdsSpp | Protocol::SlipCcsdsSpp | Protocol::RawSlip => {
+            use crate::core::stream_link::{PipelineSpec, StreamLink};
+            let spec = match protocol {
+                Protocol::CcsdsSpp => PipelineSpec::Spp {
+                    apid_map: parse_apid_map(config.apid_map.as_ref(), &config.name),
+                },
+                Protocol::SlipCcsdsSpp => PipelineSpec::SlipSpp {
+                    apid_map: parse_apid_map(config.apid_map.as_ref(), &config.name),
+                },
+                Protocol::RawSlip => PipelineSpec::SlipRaw {
+                    uid: config.raw_uid.as_deref().and_then(|s| {
+                        let t = s.trim();
+                        if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+                            u32::from_str_radix(hex, 16).ok()
+                        } else {
+                            t.parse().ok()
+                        }
+                    }),
+                },
+                Protocol::AprotoSlip => unreachable!("guarded by the outer match"),
+            };
+            ProtocolLink::Stream(StreamLink::new(protocol, spec, push_tlm_tx))
         }
     }
 }
