@@ -11,9 +11,13 @@
 //!   layoutHash[4]  = CRC-32 of the canonical field spec
 //!   payloadCrc[4]  = CRC-32 (IEEE 802.3) of the payload bytes
 //!
-//! Canonical field spec: every leaf field contributes `name:type:size;`
-//! in emission order; layoutHash is the CRC-32 of that ASCII string,
-//! so two layouts with the same byte count still hash apart.
+//! Canonical field spec (offset-aware): every leaf contributes
+//! `name:type:size:offset;` in emission order -- nested structs
+//! flatten to their leaves at absolute offsets, arrays contribute
+//! `name:array:total:offset;[elemtype:elemsizexN]` -- terminated by
+//! `|size:total`. layoutHash is the CRC-32 of that ASCII string, so
+//! two layouts with the same fields still hash apart when their
+//! packing differs.
 //!
 //! Conformance: the tests below assert byte-identity against the
 //! golden vectors in compat/tprm/ -- the cross-repo contract. This
@@ -72,10 +76,9 @@ pub fn crc32(data: &[u8]) -> u32 {
     !crc
 }
 
-/// One entry of a payload layout, in emission order. Nested-struct
-/// containers appear as `field_type = "struct"` with size 0, followed
-/// by their leaves -- they carry no bytes but are part of the hashed
-/// spec.
+/// One leaf of a payload layout, in emission order. Nested structs
+/// do not appear as entries: they flatten to their leaves, each
+/// carrying its absolute offset.
 #[derive(Debug, Clone)]
 pub struct LeafSpec<'a> {
     pub name: &'a str,
@@ -83,14 +86,18 @@ pub struct LeafSpec<'a> {
     /// Total serialized bytes of this leaf (element size x count for
     /// arrays).
     pub size: usize,
+    /// Absolute byte offset within the payload.
+    pub offset: usize,
     /// For arrays: (element_type, element_size, element_count).
     pub array: Option<(&'a str, usize, usize)>,
 }
 
 /// Build the canonical field spec string. Scalar leaves contribute
-/// `name:type:size;`; array leaves contribute
-/// `name:array:totalsize;[elemtype:elemsizexN]`.
-pub fn canonical_field_spec<'a, I>(fields: I) -> String
+/// `name:type:size:offset;`; array leaves contribute
+/// `name:array:totalsize:offset;[elemtype:elemsizexN]`; the string
+/// ends with the `|size:total` terminator so trailing padding is part
+/// of the hashed layout.
+pub fn canonical_field_spec<'a, I>(fields: I, total_size: usize) -> String
 where
     I: IntoIterator<Item = LeafSpec<'a>>,
 {
@@ -98,23 +105,30 @@ where
     for leaf in fields {
         match leaf.array {
             None => {
-                spec.push_str(&format!("{}:{}:{};", leaf.name, leaf.field_type, leaf.size));
+                spec.push_str(&format!(
+                    "{}:{}:{}:{};",
+                    leaf.name, leaf.field_type, leaf.size, leaf.offset
+                ));
             }
             Some((elem_type, elem_size, count)) => {
-                spec.push_str(&format!("{}:array:{};", leaf.name, leaf.size));
+                spec.push_str(&format!(
+                    "{}:array:{}:{};",
+                    leaf.name, leaf.size, leaf.offset
+                ));
                 spec.push_str(&format!("[{}:{}x{}]", elem_type, elem_size, count));
             }
         }
     }
+    spec.push_str(&format!("|size:{}", total_size));
     spec
 }
 
 /// layoutHash over a canonical field spec.
-pub fn layout_hash<'a, I>(fields: I) -> u32
+pub fn layout_hash<'a, I>(fields: I, total_size: usize) -> u32
 where
     I: IntoIterator<Item = LeafSpec<'a>>,
 {
-    crc32(canonical_field_spec(fields).as_bytes())
+    crc32(canonical_field_spec(fields, total_size).as_bytes())
 }
 
 /// Stamp the v3 prelude onto a payload body.
@@ -295,6 +309,7 @@ mod tests {
         name: String,
         field_type: String,
         size: usize,
+        offset: usize,
         element_type: Option<String>,
         element_count: usize,
     }
@@ -355,6 +370,7 @@ mod tests {
                         name: key.trim().to_string(),
                         field_type: field("type = ").unwrap_or_default(),
                         size: field("size = ").and_then(|s| s.parse().ok()).unwrap_or(0),
+                        offset: 0,
                         element_type: field("element_type = "),
                         element_count: 0,
                     });
@@ -374,11 +390,24 @@ mod tests {
                 }
             }
         }
-        // Struct containers stay in the list (they contribute
-        // `name:struct:0;`); section headers that only held inline
-        // tables have no type and are dropped.
+        // Offset assignment by declaration-order accumulation (the
+        // toml carries sizes only). Struct containers stay as rows --
+        // the vector contract gives them `name:struct:0:offset;` at
+        // the container's starting position, zero bytes consumed --
+        // followed by their leaves at absolute offsets. Section
+        // headers that only held inline tables have no type and drop.
         leaves.retain(|l| !l.field_type.is_empty());
+        let mut off = 0usize;
+        for l in &mut leaves {
+            l.offset = off;
+            off += l.size;
+        }
         leaves
+    }
+
+    /// Total payload size implied by a vector's leaves.
+    fn total_size(leaves: &[TomlLeaf]) -> usize {
+        leaves.last().map(|l| l.offset + l.size).unwrap_or(0)
     }
 
     fn leaf_specs(leaves: &[TomlLeaf]) -> Vec<LeafSpec<'_>> {
@@ -388,6 +417,7 @@ mod tests {
                 name: &l.name,
                 field_type: &l.field_type,
                 size: l.size,
+                offset: l.offset,
                 array: l
                     .element_type
                     .as_deref()
@@ -425,10 +455,16 @@ mod tests {
         ] {
             let vector = read_vector(bin_name);
             let leaves = parse_vector_toml(toml_name);
-            let hash = layout_hash(leaf_specs(&leaves));
+            let total = total_size(&leaves);
+            let hash = layout_hash(leaf_specs(&leaves), total);
 
             let (prelude, body) =
                 parse_v3(&vector).unwrap_or_else(|e| panic!("{bin_name}: vector fails parse: {e}"));
+            assert_eq!(
+                total,
+                body.len(),
+                "{bin_name}: accumulated leaf sizes disagree with the body"
+            );
             assert_eq!(
                 prelude.layout_hash, hash,
                 "{bin_name}: layout-hash recipe diverges from contract"
@@ -513,21 +549,38 @@ mod tests {
             ("seqGroup", "uint", 1),
             ("seqPhase", "uint", 1),
         ];
+        // Offset-aware form: absolute offsets accumulate across the
+        // header and every entry; the total terminator makes the hash
+        // entry-count-dependent twice over. The 2-task value anchors
+        // to the contract vector's own prelude; the pre-flag-day
+        // 3-task evidence constant is retired with the old form.
         let hash_for = |entry_count: usize| {
+            let mut off = 0usize;
+            let leaves: Vec<(&str, &str, usize, usize)> = hdr
+                .iter()
+                .chain((0..entry_count).flat_map(|_| entry.iter()))
+                .map(|&(name, field_type, size)| {
+                    let o = off;
+                    off += size;
+                    (name, field_type, size, o)
+                })
+                .collect();
+            let total = off;
             layout_hash(
-                hdr.iter()
-                    .chain((0..entry_count).flat_map(|_| entry.iter()))
-                    .map(|&(name, field_type, size)| LeafSpec {
+                leaves
+                    .iter()
+                    .map(|&(name, field_type, size, offset)| LeafSpec {
                         name,
                         field_type,
                         size,
+                        offset,
                         array: None,
                     }),
+                total,
             )
         };
         let (vector_prelude, _) = parse_v3(&read_vector("scheduler_shape.bin")).unwrap();
         assert_eq!(hash_for(2), vector_prelude.layout_hash);
-        assert_eq!(hash_for(3), 0xFEF9_BC60);
         assert_ne!(hash_for(2), hash_for(3));
     }
 
