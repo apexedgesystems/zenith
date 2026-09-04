@@ -77,6 +77,10 @@ pub struct FieldDef {
     /// Rails from the dictionary; array fields apply them per element.
     #[serde(default)]
     pub constraints: Option<FieldConstraints>,
+    /// For `type = "nested"` fields: the STRUCT-category fragment this
+    /// field's bytes instantiate (one or more times, two levels max).
+    #[serde(default, rename = "struct")]
+    pub struct_ref: Option<String>,
 }
 
 /// A struct definition with its fields.
@@ -99,6 +103,9 @@ pub struct StructDef {
     /// (diagnostic surface; the hash is the contract).
     #[serde(default)]
     pub canonical_spec: Option<String>,
+    /// Packed layout marker (no alignment padding between fields).
+    #[serde(default)]
+    pub packed: Option<bool>,
 }
 
 impl StructDef {
@@ -124,6 +131,42 @@ pub struct ComponentDict {
     /// on older dictionaries; treated as empty.
     #[serde(default)]
     pub capabilities: Vec<String>,
+}
+
+/// Inline a struct's nested fields: a `type = "nested"` field with a
+/// fragment reference expands to the fragment's leaves at absolute
+/// offsets, one entry per instance when the field spans multiple
+/// (names become `field[i].leaf`). Two levels max per the dictionary
+/// contract. Display and encode paths use the result directly -- the
+/// offsets are payload-absolute.
+pub fn expanded_fields(dict: &ComponentDict, fields: &[FieldDef], depth: u8) -> Vec<FieldDef> {
+    let mut out = Vec::new();
+    for f in fields {
+        let fragment = (f.field_type == "nested" && depth < 2)
+            .then_some(f.struct_ref.as_ref())
+            .flatten()
+            .and_then(|r| dict.structs.get(r));
+        match fragment {
+            Some(frag) if frag.size > 0 => {
+                let count = (f.size / frag.size).max(1);
+                let inner = expanded_fields(dict, &frag.fields, depth + 1);
+                for i in 0..count {
+                    for leaf in &inner {
+                        let mut l = leaf.clone();
+                        l.offset = f.offset + i * frag.size + leaf.offset;
+                        l.name = if count > 1 {
+                            format!("{}[{}].{}", f.name, i, leaf.name)
+                        } else {
+                            format!("{}.{}", f.name, leaf.name)
+                        };
+                        out.push(l);
+                    }
+                }
+            }
+            _ => out.push(f.clone()),
+        }
+    }
+    out
 }
 
 /// All loaded struct dictionaries keyed by component name.
@@ -218,8 +261,11 @@ impl StructDictionary {
         let dict = self.components.get(component)?;
         let sdef = dict.structs.get(struct_name)?;
 
+        // Nested fields expand to their fragment leaves at absolute
+        // offsets, so the newly spec-defined nested structs decode
+        // (and display) leaf by leaf instead of as opaque blobs.
         let mut fields = serde_json::Map::new();
-        for field in &sdef.fields {
+        for field in &expanded_fields(dict, &sdef.fields, 0) {
             if field.offset + field.size > data.len() {
                 continue;
             }
@@ -723,5 +769,108 @@ mod tests {
 
         let bare: StructDef = serde_json::from_str(r#"{"size": 4}"#).unwrap();
         assert_eq!(bare.layout_hash_u32(), None);
+    }
+}
+
+#[cfg(test)]
+mod nested_tests {
+    use super::*;
+
+    fn f(name: &str, ty: &str, off: usize, sz: usize) -> FieldDef {
+        FieldDef {
+            name: name.to_string(),
+            field_type: ty.to_string(),
+            offset: off,
+            size: sz,
+            value: serde_json::Value::Null,
+            element_type: None,
+            dims: None,
+            constraints: None,
+            struct_ref: None,
+        }
+    }
+
+    /// @test A nested field spanning multiple fragment instances
+    /// expands to indexed leaves at payload-absolute offsets, and a
+    /// fragment containing its own nested field expands one level
+    /// deeper (two levels max: a third level stays opaque).
+    #[test]
+    fn nested_fields_expand_to_absolute_leaves() {
+        let mut sub = StructDef {
+            category: "STRUCT".to_string(),
+            size: 4,
+            opcode: None,
+            fields: vec![f("a", "uint", 0, 2), f("b", "uint", 2, 2)],
+            layout_hash: None,
+            canonical_spec: None,
+            packed: Some(true),
+        };
+        let mut inner_ref = f("pair", "nested", 2, 4);
+        inner_ref.struct_ref = Some("Sub".to_string());
+        let deep = StructDef {
+            category: "STRUCT".to_string(),
+            size: 6,
+            opcode: None,
+            fields: vec![f("x", "uint", 0, 2), inner_ref],
+            layout_hash: None,
+            canonical_spec: None,
+            packed: None,
+        };
+        sub.packed = Some(true);
+
+        let mut top_ref = f("subs", "nested", 4, 8);
+        top_ref.struct_ref = Some("Sub".to_string());
+        let top = StructDef {
+            category: "TUNABLE_PARAM".to_string(),
+            size: 12,
+            opcode: None,
+            fields: vec![f("hdr", "uint", 0, 4), top_ref],
+            layout_hash: None,
+            canonical_spec: None,
+            packed: None,
+        };
+        let mut deep_ref = f("d", "nested", 0, 6);
+        deep_ref.struct_ref = Some("Deep".to_string());
+        let two_level = StructDef {
+            category: "TUNABLE_PARAM".to_string(),
+            size: 6,
+            opcode: None,
+            fields: vec![deep_ref],
+            layout_hash: None,
+            canonical_spec: None,
+            packed: None,
+        };
+
+        let dict = ComponentDict {
+            component: "C".to_string(),
+            structs: HashMap::from([
+                ("Sub".to_string(), sub),
+                ("Deep".to_string(), deep),
+                ("Top".to_string(), top.clone()),
+                ("TwoLevel".to_string(), two_level.clone()),
+            ]),
+            enums: HashMap::new(),
+            capabilities: Vec::new(),
+        };
+
+        // 8 bytes of nested = 2 instances of the 4-byte fragment.
+        let out = expanded_fields(&dict, &top.fields, 0);
+        let names: Vec<(&str, usize)> = out.iter().map(|x| (x.name.as_str(), x.offset)).collect();
+        assert_eq!(
+            names,
+            vec![
+                ("hdr", 0),
+                ("subs[0].a", 4),
+                ("subs[0].b", 6),
+                ("subs[1].a", 8),
+                ("subs[1].b", 10),
+            ]
+        );
+
+        // Two levels expand; the innermost nested at depth 2 stays as
+        // its fragment leaves (d.pair -> a/b), proving the recursion.
+        let out = expanded_fields(&dict, &two_level.fields, 0);
+        let names: Vec<(&str, usize)> = out.iter().map(|x| (x.name.as_str(), x.offset)).collect();
+        assert_eq!(names, vec![("d.x", 0), ("d.pair.a", 2), ("d.pair.b", 4)]);
     }
 }

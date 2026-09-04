@@ -474,6 +474,7 @@ mod tests {
             element_type: None,
             dims: None,
             constraints: None,
+            struct_ref: None,
         };
         let comp = ComponentDict {
             component: "WaveGenerator".to_string(),
@@ -487,6 +488,7 @@ mod tests {
                         fields: vec![f("output", "float", 0, 4), f("phase", "float", 4, 4)],
                         layout_hash: None,
                         canonical_spec: None,
+                        packed: None,
                     },
                 ),
                 (
@@ -503,6 +505,7 @@ mod tests {
                         ],
                         layout_hash: None,
                         canonical_spec: None,
+                        packed: None,
                     },
                 ),
             ]),
@@ -535,6 +538,7 @@ mod tests {
             element_type: None,
             dims: None,
             constraints: None,
+            struct_ref: None,
         };
         let make = |comp: &str, field: &str| ComponentDict {
             component: comp.to_string(),
@@ -547,6 +551,7 @@ mod tests {
                     fields: vec![f(field, 0), f("phase", 4)],
                     layout_hash: None,
                     canonical_spec: None,
+                    packed: None,
                 },
             )]),
             enums: HashMap::new(),
@@ -669,6 +674,7 @@ mod tests {
             element_type: None,
             dims: None,
             constraints: None,
+            struct_ref: None,
         };
         let comp = ComponentDict {
             component: "X".to_string(),
@@ -685,6 +691,7 @@ mod tests {
                     ],
                     layout_hash: None,
                     canonical_spec: None,
+                    packed: None,
                 },
             )]),
             enums: HashMap::new(),

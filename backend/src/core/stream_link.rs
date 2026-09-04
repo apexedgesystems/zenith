@@ -278,6 +278,7 @@ mod tests {
             element_type: None,
             dims: None,
             constraints: None,
+            struct_ref: None,
         };
         let comp = ComponentDict {
             component: "WaveGenerator".to_string(),
@@ -290,6 +291,7 @@ mod tests {
                     fields: vec![f("output", 0), f("phase", 4)],
                     layout_hash: None,
                     canonical_spec: None,
+                    packed: None,
                 },
             )]),
             enums: std::collections::HashMap::new(),

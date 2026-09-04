@@ -1393,7 +1393,13 @@ async fn update_params(
             find_tunable_struct(&dicts, original_binary.len(), full_uid, manifest.as_deref())
         {
             struct_size = sdef.size;
-            struct_fields = sdef.fields.clone();
+            // Expanded so nested fragments are editable leaf by leaf
+            // (offsets payload-absolute; encode_field works unchanged).
+            struct_fields = dicts
+                .components
+                .get(_comp as &str)
+                .map(|d| crate::core::config_manager::expanded_fields(d, &sdef.fields, 0))
+                .unwrap_or_else(|| sdef.fields.clone());
             dict_hash = sdef.layout_hash_u32();
         }
 
@@ -1877,6 +1883,7 @@ fn encode_field(
                     element_type: None,
                     dims: None,
                     constraints: None,
+                    struct_ref: None,
                 };
                 encode_field(buf, &elem, v)
             })
