@@ -44,6 +44,16 @@ retention_hours = 24
 # [targets.apid_map]
 # "0x0D0" = "0x00D000"
 
+# Raw SLIP target example (telemetry-only): header-less SLIP frames,
+# each frame one struct payload; the component uid comes from config.
+# [[targets]]
+# name = "Bare Instrument"
+# host = "192.168.1.60"
+# port = 7000
+# protocol = "raw-slip"
+# raw_uid = "0x00D000"
+# structs_dir = "/data/targets/my-target/structs"
+
 # Target: Local SIL ops demo (dev only; 172.21.0.1 is the compose
 # network gateway, i.e. this host as seen from the zenith container)
 [[targets]]

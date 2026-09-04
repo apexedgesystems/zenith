@@ -22,8 +22,7 @@ use tokio::net::TcpStream;
 use tokio::sync::broadcast;
 use tokio::time::{timeout, Duration};
 
-use crate::core::aproto_client::ClientError;
-use crate::core::transport::PushTelemetryPacket;
+use crate::core::transport::{ClientError, PushTelemetryPacket};
 use crate::protocol::ccsds_spp;
 
 pub struct SppLink {

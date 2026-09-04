@@ -395,4 +395,32 @@ mod tests {
             }
         }
     }
+    /// @test The SLIP decoder never panics on arbitrary byte streams fed
+    /// in irregular chunks, and every emitted frame survives this
+    /// parser. Lives here because it exercises the aproto stack ON
+    /// TOP of the neutral framing layer -- slip.rs itself must not
+    /// know aproto exists.
+    /// Both consume untrusted network input: a deterministic
+    /// pseudo-random adversarial sweep (fixed seed, reproducible).
+    #[test]
+    fn decoder_survives_arbitrary_byte_streams() {
+        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next_byte = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 33) as u8
+        };
+
+        for round in 0..200usize {
+            let mut decoder = crate::protocol::slip::Decoder::new();
+            let len = (round * 37) % 4096 + 1;
+            let bytes: Vec<u8> = (0..len).map(|_| next_byte()).collect();
+            for chunk in bytes.chunks(1 + round % 61) {
+                for frame in decoder.feed(chunk) {
+                    let _ = parse_packet(&frame);
+                }
+            }
+        }
+    }
 }

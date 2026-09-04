@@ -15,7 +15,22 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
-use crate::core::aproto_client::{AprotoClient, ClientError};
+use crate::core::aproto_client::AprotoClient;
+
+/// Transport-layer errors, shared by every protocol link.
+#[derive(Debug, thiserror::Error)]
+pub enum ClientError {
+    #[error("connection failed: {0}")]
+    Connect(#[from] std::io::Error),
+    #[error("not connected")]
+    NotConnected,
+    #[error("timeout waiting for response")]
+    Timeout,
+    #[error("connection closed by remote")]
+    Closed,
+    #[error("send failed")]
+    SendFailed,
+}
 
 /* ----------------------------- Push Telemetry ----------------------------- */
 
@@ -40,6 +55,9 @@ pub enum Protocol {
     AprotoSlip,
     /// CCSDS Space Packets over TCP (telemetry-only).
     CcsdsSpp,
+    /// Header-less SLIP frames over TCP (telemetry-only; fullUid
+    /// from config -- the bare-instrument case).
+    RawSlip,
 }
 
 impl Protocol {
@@ -49,8 +67,9 @@ impl Protocol {
         match s {
             "aproto-slip" => Ok(Protocol::AprotoSlip),
             "ccsds-spp" => Ok(Protocol::CcsdsSpp),
+            "raw-slip" => Ok(Protocol::RawSlip),
             other => Err(format!(
-                "unknown protocol '{}' (supported: aproto-slip, ccsds-spp)",
+                "unknown protocol '{}' (supported: aproto-slip, ccsds-spp, raw-slip)",
                 other
             )),
         }
@@ -60,6 +79,7 @@ impl Protocol {
         match self {
             Protocol::AprotoSlip => "aproto-slip",
             Protocol::CcsdsSpp => "ccsds-spp",
+            Protocol::RawSlip => "raw-slip",
         }
     }
 }
@@ -68,6 +88,7 @@ impl Protocol {
 pub enum ProtocolLink {
     Aproto(AprotoClient),
     CcsdsSpp(crate::core::ccsds_link::SppLink),
+    RawSlip(crate::core::raw_slip_link::RawSlipLink),
 }
 
 impl ProtocolLink {
@@ -75,6 +96,7 @@ impl ProtocolLink {
         match self {
             ProtocolLink::Aproto(_) => Protocol::AprotoSlip,
             ProtocolLink::CcsdsSpp(_) => Protocol::CcsdsSpp,
+            ProtocolLink::RawSlip(_) => Protocol::RawSlip,
         }
     }
 
@@ -84,6 +106,7 @@ impl ProtocolLink {
         match self {
             ProtocolLink::Aproto(c) => c.connect(host, port).await,
             ProtocolLink::CcsdsSpp(c) => c.connect(host, port).await,
+            ProtocolLink::RawSlip(c) => c.connect(host, port).await,
         }
     }
 
@@ -91,6 +114,7 @@ impl ProtocolLink {
         match self {
             ProtocolLink::Aproto(c) => c.disconnect(),
             ProtocolLink::CcsdsSpp(c) => c.disconnect(),
+            ProtocolLink::RawSlip(c) => c.disconnect(),
         }
     }
 
@@ -98,6 +122,7 @@ impl ProtocolLink {
         match self {
             ProtocolLink::Aproto(c) => c.is_connected(),
             ProtocolLink::CcsdsSpp(c) => c.is_connected(),
+            ProtocolLink::RawSlip(c) => c.is_connected(),
         }
     }
 
@@ -107,6 +132,7 @@ impl ProtocolLink {
         match self {
             ProtocolLink::Aproto(c) => c.connected_handle(),
             ProtocolLink::CcsdsSpp(c) => c.connected_handle(),
+            ProtocolLink::RawSlip(c) => c.connected_handle(),
         }
     }
 
@@ -114,6 +140,7 @@ impl ProtocolLink {
         match self {
             ProtocolLink::Aproto(c) => c.set_metrics(metrics),
             ProtocolLink::CcsdsSpp(c) => c.set_metrics(metrics),
+            ProtocolLink::RawSlip(c) => c.set_metrics(metrics),
         }
     }
 
@@ -127,6 +154,7 @@ impl ProtocolLink {
         match self {
             ProtocolLink::Aproto(c) => Some(c),
             ProtocolLink::CcsdsSpp(_) => None,
+            ProtocolLink::RawSlip(_) => None,
         }
     }
 }
@@ -164,6 +192,8 @@ mod tests {
                 "protocol/ccsds_spp.rs",
                 include_str!("../protocol/ccsds_spp.rs"),
             ),
+            ("protocol/slip.rs", include_str!("../protocol/slip.rs")),
+            ("core/raw_slip_link.rs", include_str!("raw_slip_link.rs")),
         ] {
             assert!(
                 !source.to_lowercase().contains("aproto"),

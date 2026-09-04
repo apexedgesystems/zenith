@@ -267,6 +267,20 @@ fn build_link(
             let apid_map = parse_apid_map(config.apid_map.as_ref(), &config.name);
             ProtocolLink::CcsdsSpp(crate::core::ccsds_link::SppLink::new(apid_map, push_tlm_tx))
         }
+        Protocol::RawSlip => {
+            let raw_uid = config.raw_uid.as_deref().and_then(|s| {
+                let t = s.trim();
+                if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+                    u32::from_str_radix(hex, 16).ok()
+                } else {
+                    t.parse().ok()
+                }
+            });
+            ProtocolLink::RawSlip(crate::core::raw_slip_link::RawSlipLink::new(
+                raw_uid,
+                push_tlm_tx,
+            ))
+        }
     }
 }
 
@@ -2471,6 +2485,7 @@ async fn add_target(
             .to_string(),
         health_nonzero_bad: crate::config::default_health_nonzero_bad_public(),
         apid_map: None,
+        raw_uid: None,
         auto_connect: false,
     };
 

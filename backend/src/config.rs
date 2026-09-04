@@ -173,6 +173,10 @@ pub struct TargetSection {
     /// arrives as generated target config alongside the manifest.
     #[serde(default)]
     pub apid_map: Option<std::collections::HashMap<String, String>>,
+    /// raw-slip targets: the one component fullUid this header-less
+    /// stream speaks for ("0x" hex or decimal).
+    #[serde(default)]
+    pub raw_uid: Option<String>,
     #[serde(default)]
     pub manifest: Option<String>,
     #[serde(default)]

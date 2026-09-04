@@ -33,26 +33,8 @@ use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::timeout;
 
-pub use crate::core::transport::PushTelemetryPacket;
+pub use crate::core::transport::{ClientError, PushTelemetryPacket};
 use crate::protocol::{aproto, slip};
-
-/* ----------------------------- Error ----------------------------- */
-
-/// APROTO client error type. Surfaces TCP-level connection failures,
-/// timeouts, remote-side disconnects, and channel-send failures.
-#[derive(Debug, thiserror::Error)]
-pub enum ClientError {
-    #[error("connection failed: {0}")]
-    Connect(#[from] std::io::Error),
-    #[error("not connected")]
-    NotConnected,
-    #[error("timeout waiting for response")]
-    Timeout,
-    #[error("connection closed by remote")]
-    Closed,
-    #[error("send failed")]
-    SendFailed,
-}
 
 /* ----------------------------- Internal ----------------------------- */
 
