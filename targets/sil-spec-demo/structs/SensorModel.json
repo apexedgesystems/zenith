@@ -47,8 +47,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0x0911D5EE",
-      "canonical_spec": "temperature:float:4;rampRate:float:4;stepCount:uint:4;wrapCount:uint:4;overtemp:uint:1;reserved:array:3;[uint:1x3]"
+      "layout_hash": "0xFD0D2FAC",
+      "canonical_spec": "temperature:float:4:0;rampRate:float:4:4;stepCount:uint:4:8;wrapCount:uint:4:12;overtemp:uint:1:16;reserved:array:3:17;[uint:1x3]|size:20"
     },
     "SensorOutput": {
       "category": "OUTPUT",
@@ -89,8 +89,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0x5F5A5996",
-      "canonical_spec": "temperature:float:4;temperatureRate:float:4;overtemp:uint:1;reserved:array:3;[uint:1x3]"
+      "layout_hash": "0xF9B53AAF",
+      "canonical_spec": "temperature:float:4:0;temperatureRate:float:4:4;overtemp:uint:1:8;reserved:array:3:9;[uint:1x3]|size:12"
     },
     "SensorState": {
       "category": "STATE",
@@ -112,8 +112,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0x1F72C7BA",
-      "canonical_spec": "stepCount:uint:4;wrapCount:uint:4;"
+      "layout_hash": "0xAB1015BD",
+      "canonical_spec": "stepCount:uint:4:0;wrapCount:uint:4:4;|size:8"
     },
     "SensorTunableParams": {
       "category": "TUNABLE_PARAM",
@@ -145,8 +145,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0x9E0E8399",
-      "canonical_spec": "rampRate:float:4;initialTemp:float:4;maxTemp:float:4;"
+      "layout_hash": "0x4A9E522F",
+      "canonical_spec": "rampRate:float:4:0;initialTemp:float:4:4;maxTemp:float:4:8;|size:12"
     }
   }
 }

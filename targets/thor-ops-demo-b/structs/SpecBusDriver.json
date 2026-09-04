@@ -33,8 +33,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0x258BEC42",
-      "canonical_spec": "txFrames:uint:4;rxFrames:uint:4;txBytes:uint:4;rxBytes:uint:4;"
+      "layout_hash": "0xFA18EF7B",
+      "canonical_spec": "txFrames:uint:4:0;rxFrames:uint:4:4;txBytes:uint:4:8;rxBytes:uint:4:12;|size:16"
     },
     "FrameRequest": {
       "category": "COMMAND",
@@ -69,8 +69,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0x024D2797",
-      "canonical_spec": "length:uint:1;reserved:array:3;[uint:1x3]data:array:16;[uint:1x16]"
+      "layout_hash": "0xC2E2B3C1",
+      "canonical_spec": "length:uint:1:0;reserved:array:3:1;[uint:1x3]data:array:16:4;[uint:1x16]|size:20"
     },
     "SpecBusDriverOutput": {
       "category": "OUTPUT",
@@ -101,8 +101,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0xF67EFC97",
-      "canonical_spec": "rxFrames:uint:4;lastRxLen:uint:1;reserved:array:3;[uint:1x3]"
+      "layout_hash": "0xBE351D97",
+      "canonical_spec": "rxFrames:uint:4:0;lastRxLen:uint:1:4;reserved:array:3:5;[uint:1x3]|size:8"
     },
     "SpecBusDriverState": {
       "category": "STATE",
@@ -159,8 +159,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0xF209623F",
-      "canonical_spec": "txFrames:uint:4;rxFrames:uint:4;txBytes:uint:4;rxBytes:uint:4;rejects:uint:4;pending:uint:1;reserved:array:3;[uint:1x3]"
+      "layout_hash": "0x1D5C64E4",
+      "canonical_spec": "txFrames:uint:4:0;rxFrames:uint:4:4;txBytes:uint:4:8;rxBytes:uint:4:12;rejects:uint:4:16;pending:uint:1:20;reserved:array:3:21;[uint:1x3]|size:24"
     },
     "SpecBusDriverTunableParams": {
       "category": "TUNABLE_PARAM",
@@ -198,8 +198,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0xB0B4CB9E",
-      "canonical_spec": "loopDelayTicks:uint:2;maxFrameBytes:uint:1;reserved:uint:1;"
+      "layout_hash": "0xBABA083F",
+      "canonical_spec": "loopDelayTicks:uint:2:0;maxFrameBytes:uint:1:2;reserved:uint:1:3;|size:4"
     }
   },
   "commands": [

@@ -21,8 +21,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0x930F87EA",
-      "canonical_spec": "value:float:4;sequence:uint:4;"
+      "layout_hash": "0x51666963",
+      "canonical_spec": "value:float:4:0;sequence:uint:4:4;|size:8"
     },
     "SpecChannelState": {
       "category": "STATE",
@@ -44,8 +44,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0x5BEBA9CF",
-      "canonical_spec": "elapsed:float:4;zeros:uint:4;"
+      "layout_hash": "0x9253B2F0",
+      "canonical_spec": "elapsed:float:4:0;zeros:uint:4:4;|size:8"
     },
     "SpecChannelTunableParams": {
       "category": "TUNABLE_PARAM",
@@ -80,8 +80,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0xEB487440",
-      "canonical_spec": "gain:float:4;offset:float:4;channelTag:string:4;"
+      "layout_hash": "0x2E5269C1",
+      "canonical_spec": "gain:float:4:0;offset:float:4:4;channelTag:string:4:8;|size:12"
     }
   },
   "commands": [

@@ -47,8 +47,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0x307F7315",
-      "canonical_spec": "collectCount:uint:4;packetsSent:uint:4;sendFailures:uint:4;activeCount:uint:2;reserved:uint:2;"
+      "layout_hash": "0x86699C0E",
+      "canonical_spec": "collectCount:uint:4:0;packetsSent:uint:4:4;sendFailures:uint:4:8;activeCount:uint:2:12;reserved:uint:2:14;|size:16"
     },
     "TelemetryManagerState": {
       "category": "STATE",
@@ -95,47 +95,53 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0x307F7315",
-      "canonical_spec": "collectCount:uint:4;packetsSent:uint:4;sendFailures:uint:4;activeCount:uint:2;reserved:uint:2;"
+      "layout_hash": "0x86699C0E",
+      "canonical_spec": "collectCount:uint:4:0;packetsSent:uint:4:4;sendFailures:uint:4:8;activeCount:uint:2:12;reserved:uint:2:14;|size:16"
     },
     "TelemetryManagerTprm": {
       "category": "TUNABLE_PARAM",
-      "size": 8,
+      "size": 520,
       "fields": [
         {
           "name": "collectRateHz",
           "type": "uint",
           "offset": 0,
           "size": 2,
-          "value": 1
+          "value": 1,
+          "doc": "Base collect task rate (Hz); subscriptions divide from this."
         },
         {
           "name": "reserved0",
           "type": "uint",
           "offset": 2,
           "size": 2,
-          "value": 0
+          "value": 0,
+          "doc": "Explicit padding."
         },
         {
           "name": "reserved1",
           "type": "uint",
           "offset": 4,
           "size": 4,
-          "value": 0
+          "value": 0,
+          "doc": "Explicit padding."
         },
         {
           "name": "subscriptions",
-          "type": "array",
+          "type": "nested",
+          "struct": "TelemetrySubscription",
+          "dims": [32],
           "offset": 8,
-          "size": 0,
-          "value": [],
-          "element_type": "TelemetrySubscription",
-          "dims": [0]
+          "size": 512,
+          "doc": "Push channel table; unused entries have active = 0."
         }
-      ]
+      ],
+      "spec_defined": true,
+      "layout_hash": "0x816D61C8",
+      "canonical_spec": "collectRateHz:uint:2:0;reserved0:uint:2:2;reserved1:uint:4:4;fullUid:uint:4:8;category:uint:1:12;active:uint:1:13;opcode:uint:2:14;offset:uint:2:16;length:uint:2:18;rateDiv:uint:2:20;reserved:uint:2:22;fullUid:uint:4:24;category:uint:1:28;active:uint:1:29;opcode:uint:2:30;offset:uint:2:32;length:uint:2:34;rateDiv:uint:2:36;reserved:uint:2:38;fullUid:uint:4:40;category:uint:1:44;active:uint:1:45;opcode:uint:2:46;offset:uint:2:48;length:uint:2:50;rateDiv:uint:2:52;reserved:uint:2:54;fullUid:uint:4:56;category:uint:1:60;active:uint:1:61;opcode:uint:2:62;offset:uint:2:64;length:uint:2:66;rateDiv:uint:2:68;reserved:uint:2:70;fullUid:uint:4:72;category:uint:1:76;active:uint:1:77;opcode:uint:2:78;offset:uint:2:80;length:uint:2:82;rateDiv:uint:2:84;reserved:uint:2:86;fullUid:uint:4:88;category:uint:1:92;active:uint:1:93;opcode:uint:2:94;offset:uint:2:96;length:uint:2:98;rateDiv:uint:2:100;reserved:uint:2:102;fullUid:uint:4:104;category:uint:1:108;active:uint:1:109;opcode:uint:2:110;offset:uint:2:112;length:uint:2:114;rateDiv:uint:2:116;reserved:uint:2:118;fullUid:uint:4:120;category:uint:1:124;active:uint:1:125;opcode:uint:2:126;offset:uint:2:128;length:uint:2:130;rateDiv:uint:2:132;reserved:uint:2:134;fullUid:uint:4:136;category:uint:1:140;active:uint:1:141;opcode:uint:2:142;offset:uint:2:144;length:uint:2:146;rateDiv:uint:2:148;reserved:uint:2:150;fullUid:uint:4:152;category:uint:1:156;active:uint:1:157;opcode:uint:2:158;offset:uint:2:160;length:uint:2:162;rateDiv:uint:2:164;reserved:uint:2:166;fullUid:uint:4:168;category:uint:1:172;active:uint:1:173;opcode:uint:2:174;offset:uint:2:176;length:uint:2:178;rateDiv:uint:2:180;reserved:uint:2:182;fullUid:uint:4:184;category:uint:1:188;active:uint:1:189;opcode:uint:2:190;offset:uint:2:192;length:uint:2:194;rateDiv:uint:2:196;reserved:uint:2:198;fullUid:uint:4:200;category:uint:1:204;active:uint:1:205;opcode:uint:2:206;offset:uint:2:208;length:uint:2:210;rateDiv:uint:2:212;reserved:uint:2:214;fullUid:uint:4:216;category:uint:1:220;active:uint:1:221;opcode:uint:2:222;offset:uint:2:224;length:uint:2:226;rateDiv:uint:2:228;reserved:uint:2:230;fullUid:uint:4:232;category:uint:1:236;active:uint:1:237;opcode:uint:2:238;offset:uint:2:240;length:uint:2:242;rateDiv:uint:2:244;reserved:uint:2:246;fullUid:uint:4:248;category:uint:1:252;active:uint:1:253;opcode:uint:2:254;offset:uint:2:256;length:uint:2:258;rateDiv:uint:2:260;reserved:uint:2:262;fullUid:uint:4:264;category:uint:1:268;active:uint:1:269;opcode:uint:2:270;offset:uint:2:272;length:uint:2:274;rateDiv:uint:2:276;reserved:uint:2:278;fullUid:uint:4:280;category:uint:1:284;active:uint:1:285;opcode:uint:2:286;offset:uint:2:288;length:uint:2:290;rateDiv:uint:2:292;reserved:uint:2:294;fullUid:uint:4:296;category:uint:1:300;active:uint:1:301;opcode:uint:2:302;offset:uint:2:304;length:uint:2:306;rateDiv:uint:2:308;reserved:uint:2:310;fullUid:uint:4:312;category:uint:1:316;active:uint:1:317;opcode:uint:2:318;offset:uint:2:320;length:uint:2:322;rateDiv:uint:2:324;reserved:uint:2:326;fullUid:uint:4:328;category:uint:1:332;active:uint:1:333;opcode:uint:2:334;offset:uint:2:336;length:uint:2:338;rateDiv:uint:2:340;reserved:uint:2:342;fullUid:uint:4:344;category:uint:1:348;active:uint:1:349;opcode:uint:2:350;offset:uint:2:352;length:uint:2:354;rateDiv:uint:2:356;reserved:uint:2:358;fullUid:uint:4:360;category:uint:1:364;active:uint:1:365;opcode:uint:2:366;offset:uint:2:368;length:uint:2:370;rateDiv:uint:2:372;reserved:uint:2:374;fullUid:uint:4:376;category:uint:1:380;active:uint:1:381;opcode:uint:2:382;offset:uint:2:384;length:uint:2:386;rateDiv:uint:2:388;reserved:uint:2:390;fullUid:uint:4:392;category:uint:1:396;active:uint:1:397;opcode:uint:2:398;offset:uint:2:400;length:uint:2:402;rateDiv:uint:2:404;reserved:uint:2:406;fullUid:uint:4:408;category:uint:1:412;active:uint:1:413;opcode:uint:2:414;offset:uint:2:416;length:uint:2:418;rateDiv:uint:2:420;reserved:uint:2:422;fullUid:uint:4:424;category:uint:1:428;active:uint:1:429;opcode:uint:2:430;offset:uint:2:432;length:uint:2:434;rateDiv:uint:2:436;reserved:uint:2:438;fullUid:uint:4:440;category:uint:1:444;active:uint:1:445;opcode:uint:2:446;offset:uint:2:448;length:uint:2:450;rateDiv:uint:2:452;reserved:uint:2:454;fullUid:uint:4:456;category:uint:1:460;active:uint:1:461;opcode:uint:2:462;offset:uint:2:464;length:uint:2:466;rateDiv:uint:2:468;reserved:uint:2:470;fullUid:uint:4:472;category:uint:1:476;active:uint:1:477;opcode:uint:2:478;offset:uint:2:480;length:uint:2:482;rateDiv:uint:2:484;reserved:uint:2:486;fullUid:uint:4:488;category:uint:1:492;active:uint:1:493;opcode:uint:2:494;offset:uint:2:496;length:uint:2:498;rateDiv:uint:2:500;reserved:uint:2:502;fullUid:uint:4:504;category:uint:1:508;active:uint:1:509;opcode:uint:2:510;offset:uint:2:512;length:uint:2:514;rateDiv:uint:2:516;reserved:uint:2:518;|size:520"
     },
     "TelemetrySubscription": {
-      "category": "TUNABLE_PARAM",
+      "category": "STRUCT",
       "size": 16,
       "fields": [
         {
@@ -143,58 +149,69 @@
           "type": "uint",
           "offset": 0,
           "size": 4,
-          "value": 0
+          "value": 0,
+          "doc": "Target component fullUid (e.g. 0x00D000)."
         },
         {
-          "name": "category{",
+          "name": "category",
           "type": "uint",
           "offset": 4,
           "size": 1,
-          "value": null
+          "value": 0,
+          "doc": "DataCategory enum (0=STATIC, 1=TUNABLE, 2=STATE, 3=INPUT, 4=OUTPUT)."
         },
         {
           "name": "active",
           "type": "uint",
           "offset": 5,
           "size": 1,
-          "value": 0
+          "value": 0,
+          "doc": "1 = active, 0 = inactive."
         },
         {
           "name": "opcode",
           "type": "uint",
           "offset": 6,
           "size": 2,
-          "value": 0
+          "value": 0,
+          "doc": "APROTO opcode for the outbound telemetry packet."
         },
         {
           "name": "offset",
           "type": "uint",
           "offset": 8,
           "size": 2,
-          "value": 0
+          "value": 0,
+          "doc": "Byte offset into the data block (0 = start)."
         },
         {
           "name": "length",
           "type": "uint",
           "offset": 10,
           "size": 2,
-          "value": 0
+          "value": 0,
+          "doc": "Bytes to read (0 = entire block)."
         },
         {
           "name": "rateDiv",
           "type": "uint",
           "offset": 12,
           "size": 2,
-          "value": 1
+          "value": 1,
+          "doc": "Rate divisor: push every N collect ticks (1 = every tick)."
         },
         {
           "name": "reserved",
           "type": "uint",
           "offset": 14,
           "size": 2,
-          "value": 0
+          "value": 0,
+          "doc": "Explicit padding."
         }
-      ]
+      ],
+      "spec_defined": true,
+      "layout_hash": "0x66BDFF8A",
+      "canonical_spec": "fullUid:uint:4:0;category:uint:1:4;active:uint:1:5;opcode:uint:2:6;offset:uint:2:8;length:uint:2:10;rateDiv:uint:2:12;reserved:uint:2:14;|size:16"
     }
   },
   "enums": {

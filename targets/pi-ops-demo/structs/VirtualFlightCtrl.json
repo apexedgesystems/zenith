@@ -35,8 +35,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0x5A9B1590",
-      "canonical_spec": "rxCount:uint:4;txCount:uint:4;crcErrors:uint:4;pollCount:uint:4;"
+      "layout_hash": "0xC31087A9",
+      "canonical_spec": "rxCount:uint:4:0;txCount:uint:4:4;crcErrors:uint:4:8;pollCount:uint:4:12;|size:16"
     }
   }
 }

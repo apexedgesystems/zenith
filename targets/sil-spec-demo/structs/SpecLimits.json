@@ -16,8 +16,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0x716D14C3",
-      "canonical_spec": "delta:float:4;"
+      "layout_hash": "0xD026B087",
+      "canonical_spec": "delta:float:4:0;|size:4"
     },
     "SpecLimitsState": {
       "category": "STATE",
@@ -44,8 +44,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0xE9F62C33",
-      "canonical_spec": "value:float:4;nudges:uint:4;rejects:uint:4;"
+      "layout_hash": "0x508291FC",
+      "canonical_spec": "value:float:4:0;nudges:uint:4:4;rejects:uint:4:8;|size:12"
     },
     "SpecLimitsTunableParams": {
       "category": "TUNABLE_PARAM",
@@ -133,8 +133,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0xEA32365D",
-      "canonical_spec": "floorOnly:float:4;ceilOnly:float:4;banded:float:4;stepped:float:4;gainTable:array:16;[float:4x4]mode:uint:1;reserved:array:3;[uint:1x3]"
+      "layout_hash": "0xE4F35CF5",
+      "canonical_spec": "floorOnly:float:4:0;ceilOnly:float:4:4;banded:float:4:8;stepped:float:4:12;gainTable:array:16:16;[float:4x4]mode:uint:1:32;reserved:array:3:33;[uint:1x3]|size:36"
     }
   },
   "commands": [

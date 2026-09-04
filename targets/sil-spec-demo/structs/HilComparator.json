@@ -35,8 +35,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0xD4D4498E",
-      "canonical_spec": "maxDivergence:float:4;compareCount:uint:4;warnCount:uint:4;reserved:uint:4;"
+      "layout_hash": "0x16E14D96",
+      "canonical_spec": "maxDivergence:float:4:0;compareCount:uint:4:4;warnCount:uint:4:8;reserved:uint:4:12;|size:16"
     },
     "ComparatorTunableParams": {
       "category": "TUNABLE_PARAM",
@@ -60,8 +60,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0xCE8CD128",
-      "canonical_spec": "warnThreshold:float:4;reserved:float:4;"
+      "layout_hash": "0x37BF5D88",
+      "canonical_spec": "warnThreshold:float:4:0;reserved:float:4:4;|size:8"
     }
   }
 }
