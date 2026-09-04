@@ -93,23 +93,33 @@ impl Extractor {
 
     /// Feed stream bytes; returns every complete packet now available
     /// as (header, data field bytes).
+    ///
+    /// Consumption is cursor-based with a single drain per feed:
+    /// resync skips are O(1) each (a front-removal per garbage octet
+    /// would go quadratic across a garbage run -- a corrupted or
+    /// hostile stream must cost linear time, same standard the other
+    /// parsers are held to). Residue is bounded by one incomplete
+    /// packet (MAX_PACKET).
     pub fn feed(&mut self, data: &[u8]) -> Vec<(SppHeader, Vec<u8>)> {
         self.buf.extend_from_slice(data);
         let mut out = Vec::new();
-        loop {
-            // Resync: drop octets until a plausible header leads.
-            while self.buf.len() >= HEADER_SIZE && parse_header(&self.buf).is_none() {
-                self.buf.remove(0);
+        let mut pos = 0usize;
+        while self.buf.len() - pos >= HEADER_SIZE {
+            match parse_header(&self.buf[pos..]) {
+                // Resync: skip one octet until a plausible header leads.
+                None => pos += 1,
+                Some(hdr) => {
+                    let total = HEADER_SIZE + hdr.data_len;
+                    if self.buf.len() - pos < total {
+                        break;
+                    }
+                    out.push((hdr, self.buf[pos + HEADER_SIZE..pos + total].to_vec()));
+                    pos += total;
+                }
             }
-            let Some(hdr) = parse_header(&self.buf) else {
-                break;
-            };
-            let total = HEADER_SIZE + hdr.data_len;
-            if self.buf.len() < total {
-                break;
-            }
-            out.push((hdr, self.buf[HEADER_SIZE..total].to_vec()));
-            self.buf.drain(..total);
+        }
+        if pos > 0 {
+            self.buf.drain(..pos);
         }
         out
     }

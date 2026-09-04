@@ -161,5 +161,42 @@ criterion_group! {
         bench_aproto_build,
         bench_aproto_parse,
         bench_full_pipeline,
+        bench_spp_extract
 }
 criterion_main!(benches);
+
+fn bench_spp_extract(c: &mut Criterion) {
+    use zenith::protocol::ccsds_spp;
+
+    // A realistic telemetry burst: 100 packets, 32-byte payloads.
+    let mut stream = Vec::new();
+    for i in 0..100u16 {
+        stream.extend(ccsds_spp::pack(0x0D0 + (i % 4), i, &[0xA5; 32]));
+    }
+
+    let mut group = c.benchmark_group("ccsds_spp_extract");
+    group.throughput(Throughput::Bytes(stream.len() as u64));
+    group.bench_function("clean_stream_100pkts", |b| {
+        b.iter(|| {
+            let mut ex = ccsds_spp::Extractor::new();
+            black_box(ex.feed(&stream))
+        })
+    });
+
+    // The adversarial case the cursor rewrite exists for: a garbage
+    // run before every packet forces resync work; cost must stay
+    // linear in the garbage volume.
+    let mut dirty = Vec::new();
+    for i in 0..100u16 {
+        dirty.extend(std::iter::repeat_n(0xFFu8, 64));
+        dirty.extend(ccsds_spp::pack(0x0D0, i, &[0xA5; 32]));
+    }
+    group.throughput(Throughput::Bytes(dirty.len() as u64));
+    group.bench_function("garbage_resync_100pkts", |b| {
+        b.iter(|| {
+            let mut ex = ccsds_spp::Extractor::new();
+            black_box(ex.feed(&dirty))
+        })
+    });
+    group.finish();
+}
