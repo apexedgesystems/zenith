@@ -1,5 +1,12 @@
 import { memo, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { deletePref, savePref, usePref } from "../api/queries";
+import {
+  arrangeCards,
+  moveTitle,
+  toggleHidden,
+  type CardArrangement,
+} from "../utils/cardPrefs";
 import {
   decodeField,
   formatValue,
@@ -551,6 +558,29 @@ export default function DashboardPage({
   // per-component commands, and push-telemetry grouping. As a query
   // it deduplicates, cancels on target switch, and pauses when the
   // tab is hidden -- this poll drives real device commands.
+  // Card arrangement preference (per target). Customize mode shows
+  // hidden cards greyed with controls; normal mode applies the pref.
+  const [customizing, setCustomizing] = useState(false);
+  const prefScope = `target:${selectedTarget}`;
+  const cardPrefQuery = usePref<CardArrangement>(
+    prefScope,
+    "dashboard",
+    "cards",
+  );
+  const cardPref = cardPrefQuery.data ?? null;
+  const persistCards = (next: CardArrangement) => {
+    queryClient.setQueryData(["pref", prefScope, "dashboard", "cards"], next);
+    savePref(prefScope, "dashboard", "cards", next).catch(() => {
+      cardPrefQuery.refetch();
+    });
+  };
+  const resetCards = () => {
+    queryClient.setQueryData(["pref", prefScope, "dashboard", "cards"], null);
+    deletePref(prefScope, "dashboard", "cards").catch(() => {
+      cardPrefQuery.refetch();
+    });
+  };
+
   const badRules = useMemo(
     () =>
       new Set<string>(
@@ -681,11 +711,107 @@ export default function DashboardPage({
 
       {/* Component Health Cards */}
       {isConnected && healthCards.length > 0 ? (
-        <div className="grid grid-cols-2 gap-3 mb-5">
-          {healthCards.map((card) => (
-            <MetricCard key={card.title} card={card} />
-          ))}
-        </div>
+        <>
+          <div className="flex items-center justify-end gap-2 mb-2">
+            {customizing && cardPref && (
+              <button
+                onClick={resetCards}
+                className="text-xs px-2 py-1"
+                style={{
+                  color: "var(--color-text-muted)",
+                  backgroundColor: "transparent",
+                  border: "1px solid var(--color-border)",
+                }}
+              >
+                Reset to defaults
+              </button>
+            )}
+            <button
+              onClick={() => setCustomizing((c) => !c)}
+              className="text-xs px-2 py-1"
+              style={{
+                color: customizing
+                  ? "var(--color-accent)"
+                  : "var(--color-text-muted)",
+                backgroundColor: "transparent",
+                border: "1px solid var(--color-border)",
+              }}
+            >
+              {customizing ? "Done" : "Customize cards"}
+            </button>
+          </div>
+          <div className="grid grid-cols-2 gap-3 mb-5">
+            {arrangeCards(healthCards, cardPref, customizing).map((card) => {
+              const isHidden = (cardPref?.hidden ?? []).includes(card.title);
+              const allTitles = healthCards.map((c) => c.title);
+              return (
+                <div
+                  key={card.title}
+                  style={
+                    customizing && isHidden ? { opacity: 0.35 } : undefined
+                  }
+                >
+                  {customizing && (
+                    <div className="flex items-center gap-1 mb-1">
+                      <span
+                        className="text-[10px] flex-1 truncate"
+                        style={{ color: "var(--color-text-muted)" }}
+                      >
+                        {card.title}
+                      </span>
+                      {([-1, 1] as const).map((d) => (
+                        <button
+                          key={d}
+                          onClick={() =>
+                            persistCards({
+                              hidden: cardPref?.hidden ?? [],
+                              order: moveTitle(
+                                cardPref?.order ?? [],
+                                allTitles,
+                                card.title,
+                                d,
+                              ),
+                            })
+                          }
+                          className="text-[10px] px-1.5"
+                          style={{
+                            backgroundColor: "var(--color-elevated)",
+                            border: "1px solid var(--color-border)",
+                            color: "var(--color-text-secondary)",
+                          }}
+                        >
+                          {d === -1 ? "<" : ">"}
+                        </button>
+                      ))}
+                      <button
+                        onClick={() =>
+                          persistCards({
+                            hidden: toggleHidden(
+                              cardPref?.hidden ?? [],
+                              card.title,
+                            ),
+                            order: cardPref?.order ?? [],
+                          })
+                        }
+                        className="text-[10px] px-1.5"
+                        style={{
+                          backgroundColor: "var(--color-elevated)",
+                          border: "1px solid var(--color-border)",
+                          color: isHidden
+                            ? "var(--color-ok)"
+                            : "var(--color-warn)",
+                        }}
+                      >
+                        {isHidden ? "Show" : "Hide"}
+                      </button>
+                    </div>
+                  )}
+                  <MetricCard card={card} />
+                </div>
+              );
+            })}
+          </div>
+        </>
       ) : !isConnected ? (
         <div
           className="rounded-lg p-8 mb-5 text-center text-sm"
