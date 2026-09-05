@@ -310,6 +310,318 @@
         }
       ]
     },
+    "StandaloneSequenceTprm": {
+      "category": "PROTOCOL",
+      "size": 1032,
+      "fields": [
+        {
+          "name": "sequenceId",
+          "type": "uint",
+          "offset": 0,
+          "size": 2,
+          "value": 0,
+          "doc": "Unique ID for logging/telemetry."
+        },
+        {
+          "name": "eventId",
+          "type": "uint",
+          "offset": 2,
+          "size": 2,
+          "value": 0,
+          "doc": "Trigger event (0 = manual start only)."
+        },
+        {
+          "name": "stepCount",
+          "type": "uint",
+          "offset": 4,
+          "size": 1,
+          "value": 0,
+          "doc": "Number of valid steps (0-16)."
+        },
+        {
+          "name": "repeatCount",
+          "type": "uint",
+          "offset": 5,
+          "size": 1,
+          "value": 0,
+          "doc": "Repeat count (0 = once, 0xFF = forever)."
+        },
+        {
+          "name": "type",
+          "type": "uint",
+          "offset": 6,
+          "size": 1,
+          "value": 0,
+          "doc": "SequenceType enum (0=RTS, 1=ATS)."
+        },
+        {
+          "name": "armed",
+          "type": "uint",
+          "offset": 7,
+          "size": 1,
+          "value": 0,
+          "doc": "1 = armed on load."
+        },
+        {
+          "name": "steps",
+          "type": "nested",
+          "struct": "StandaloneStepTprm",
+          "dims": [16],
+          "offset": 8,
+          "size": 1024,
+          "doc": "Step table (SEQUENCE_MAX_STEPS)."
+        }
+      ],
+      "spec_defined": true,
+      "layout_hash": "0xF443AD7B",
+      "canonical_spec": "sequenceId:uint:2:0;eventId:uint:2:2;stepCount:uint:1:4;repeatCount:uint:1:5;type:uint:1:6;armed:uint:1:7;targetFullUid:uint:4:8;targetCategory:uint:1:12;targetByteOffset:uint:2:13;targetByteLen:uint:1:15;actionType:uint:1:16;armTarget:uint:1:17;armIndex:uint:1:18;armState:uint:1:19;commandOpcode:uint:2:20;commandPayloadLen:uint:1:22;commandPayload:array:16:23;[uint:1x16]delayCycles:uint:4:39;timeoutCycles:uint:4:43;onTimeout:uint:1:47;onComplete:uint:1:48;gotoStep:uint:1:49;retryMax:uint:1:50;targetFullUid:uint:4:51;targetCategory:uint:1:55;targetByteOffset:uint:2:56;targetByteLen:uint:1:58;predicate:uint:1:59;dataType:uint:1:60;threshold:array:8:61;[uint:1x8]enabled:uint:1:69;reserved:uint:1:70;reserved:uint:1:71;targetFullUid:uint:4:72;targetCategory:uint:1:76;targetByteOffset:uint:2:77;targetByteLen:uint:1:79;actionType:uint:1:80;armTarget:uint:1:81;armIndex:uint:1:82;armState:uint:1:83;commandOpcode:uint:2:84;commandPayloadLen:uint:1:86;commandPayload:array:16:87;[uint:1x16]delayCycles:uint:4:103;timeoutCycles:uint:4:107;onTimeout:uint:1:111;onComplete:uint:1:112;gotoStep:uint:1:113;retryMax:uint:1:114;targetFullUid:uint:4:115;targetCategory:uint:1:119;targetByteOffset:uint:2:120;targetByteLen:uint:1:122;predicate:uint:1:123;dataType:uint:1:124;threshold:array:8:125;[uint:1x8]enabled:uint:1:133;reserved:uint:1:134;reserved:uint:1:135;targetFullUid:uint:4:136;targetCategory:uint:1:140;targetByteOffset:uint:2:141;targetByteLen:uint:1:143;actionType:uint:1:144;armTarget:uint:1:145;armIndex:uint:1:146;armState:uint:1:147;commandOpcode:uint:2:148;commandPayloadLen:uint:1:150;commandPayload:array:16:151;[uint:1x16]delayCycles:uint:4:167;timeoutCycles:uint:4:171;onTimeout:uint:1:175;onComplete:uint:1:176;gotoStep:uint:1:177;retryMax:uint:1:178;targetFullUid:uint:4:179;targetCategory:uint:1:183;targetByteOffset:uint:2:184;targetByteLen:uint:1:186;predicate:uint:1:187;dataType:uint:1:188;threshold:array:8:189;[uint:1x8]enabled:uint:1:197;reserved:uint:1:198;reserved:uint:1:199;targetFullUid:uint:4:200;targetCategory:uint:1:204;targetByteOffset:uint:2:205;targetByteLen:uint:1:207;actionType:uint:1:208;armTarget:uint:1:209;armIndex:uint:1:210;armState:uint:1:211;commandOpcode:uint:2:212;commandPayloadLen:uint:1:214;commandPayload:array:16:215;[uint:1x16]delayCycles:uint:4:231;timeoutCycles:uint:4:235;onTimeout:uint:1:239;onComplete:uint:1:240;gotoStep:uint:1:241;retryMax:uint:1:242;targetFullUid:uint:4:243;targetCategory:uint:1:247;targetByteOffset:uint:2:248;targetByteLen:uint:1:250;predicate:uint:1:251;dataType:uint:1:252;threshold:array:8:253;[uint:1x8]enabled:uint:1:261;reserved:uint:1:262;reserved:uint:1:263;targetFullUid:uint:4:264;targetCategory:uint:1:268;targetByteOffset:uint:2:269;targetByteLen:uint:1:271;actionType:uint:1:272;armTarget:uint:1:273;armIndex:uint:1:274;armState:uint:1:275;commandOpcode:uint:2:276;commandPayloadLen:uint:1:278;commandPayload:array:16:279;[uint:1x16]delayCycles:uint:4:295;timeoutCycles:uint:4:299;onTimeout:uint:1:303;onComplete:uint:1:304;gotoStep:uint:1:305;retryMax:uint:1:306;targetFullUid:uint:4:307;targetCategory:uint:1:311;targetByteOffset:uint:2:312;targetByteLen:uint:1:314;predicate:uint:1:315;dataType:uint:1:316;threshold:array:8:317;[uint:1x8]enabled:uint:1:325;reserved:uint:1:326;reserved:uint:1:327;targetFullUid:uint:4:328;targetCategory:uint:1:332;targetByteOffset:uint:2:333;targetByteLen:uint:1:335;actionType:uint:1:336;armTarget:uint:1:337;armIndex:uint:1:338;armState:uint:1:339;commandOpcode:uint:2:340;commandPayloadLen:uint:1:342;commandPayload:array:16:343;[uint:1x16]delayCycles:uint:4:359;timeoutCycles:uint:4:363;onTimeout:uint:1:367;onComplete:uint:1:368;gotoStep:uint:1:369;retryMax:uint:1:370;targetFullUid:uint:4:371;targetCategory:uint:1:375;targetByteOffset:uint:2:376;targetByteLen:uint:1:378;predicate:uint:1:379;dataType:uint:1:380;threshold:array:8:381;[uint:1x8]enabled:uint:1:389;reserved:uint:1:390;reserved:uint:1:391;targetFullUid:uint:4:392;targetCategory:uint:1:396;targetByteOffset:uint:2:397;targetByteLen:uint:1:399;actionType:uint:1:400;armTarget:uint:1:401;armIndex:uint:1:402;armState:uint:1:403;commandOpcode:uint:2:404;commandPayloadLen:uint:1:406;commandPayload:array:16:407;[uint:1x16]delayCycles:uint:4:423;timeoutCycles:uint:4:427;onTimeout:uint:1:431;onComplete:uint:1:432;gotoStep:uint:1:433;retryMax:uint:1:434;targetFullUid:uint:4:435;targetCategory:uint:1:439;targetByteOffset:uint:2:440;targetByteLen:uint:1:442;predicate:uint:1:443;dataType:uint:1:444;threshold:array:8:445;[uint:1x8]enabled:uint:1:453;reserved:uint:1:454;reserved:uint:1:455;targetFullUid:uint:4:456;targetCategory:uint:1:460;targetByteOffset:uint:2:461;targetByteLen:uint:1:463;actionType:uint:1:464;armTarget:uint:1:465;armIndex:uint:1:466;armState:uint:1:467;commandOpcode:uint:2:468;commandPayloadLen:uint:1:470;commandPayload:array:16:471;[uint:1x16]delayCycles:uint:4:487;timeoutCycles:uint:4:491;onTimeout:uint:1:495;onComplete:uint:1:496;gotoStep:uint:1:497;retryMax:uint:1:498;targetFullUid:uint:4:499;targetCategory:uint:1:503;targetByteOffset:uint:2:504;targetByteLen:uint:1:506;predicate:uint:1:507;dataType:uint:1:508;threshold:array:8:509;[uint:1x8]enabled:uint:1:517;reserved:uint:1:518;reserved:uint:1:519;targetFullUid:uint:4:520;targetCategory:uint:1:524;targetByteOffset:uint:2:525;targetByteLen:uint:1:527;actionType:uint:1:528;armTarget:uint:1:529;armIndex:uint:1:530;armState:uint:1:531;commandOpcode:uint:2:532;commandPayloadLen:uint:1:534;commandPayload:array:16:535;[uint:1x16]delayCycles:uint:4:551;timeoutCycles:uint:4:555;onTimeout:uint:1:559;onComplete:uint:1:560;gotoStep:uint:1:561;retryMax:uint:1:562;targetFullUid:uint:4:563;targetCategory:uint:1:567;targetByteOffset:uint:2:568;targetByteLen:uint:1:570;predicate:uint:1:571;dataType:uint:1:572;threshold:array:8:573;[uint:1x8]enabled:uint:1:581;reserved:uint:1:582;reserved:uint:1:583;targetFullUid:uint:4:584;targetCategory:uint:1:588;targetByteOffset:uint:2:589;targetByteLen:uint:1:591;actionType:uint:1:592;armTarget:uint:1:593;armIndex:uint:1:594;armState:uint:1:595;commandOpcode:uint:2:596;commandPayloadLen:uint:1:598;commandPayload:array:16:599;[uint:1x16]delayCycles:uint:4:615;timeoutCycles:uint:4:619;onTimeout:uint:1:623;onComplete:uint:1:624;gotoStep:uint:1:625;retryMax:uint:1:626;targetFullUid:uint:4:627;targetCategory:uint:1:631;targetByteOffset:uint:2:632;targetByteLen:uint:1:634;predicate:uint:1:635;dataType:uint:1:636;threshold:array:8:637;[uint:1x8]enabled:uint:1:645;reserved:uint:1:646;reserved:uint:1:647;targetFullUid:uint:4:648;targetCategory:uint:1:652;targetByteOffset:uint:2:653;targetByteLen:uint:1:655;actionType:uint:1:656;armTarget:uint:1:657;armIndex:uint:1:658;armState:uint:1:659;commandOpcode:uint:2:660;commandPayloadLen:uint:1:662;commandPayload:array:16:663;[uint:1x16]delayCycles:uint:4:679;timeoutCycles:uint:4:683;onTimeout:uint:1:687;onComplete:uint:1:688;gotoStep:uint:1:689;retryMax:uint:1:690;targetFullUid:uint:4:691;targetCategory:uint:1:695;targetByteOffset:uint:2:696;targetByteLen:uint:1:698;predicate:uint:1:699;dataType:uint:1:700;threshold:array:8:701;[uint:1x8]enabled:uint:1:709;reserved:uint:1:710;reserved:uint:1:711;targetFullUid:uint:4:712;targetCategory:uint:1:716;targetByteOffset:uint:2:717;targetByteLen:uint:1:719;actionType:uint:1:720;armTarget:uint:1:721;armIndex:uint:1:722;armState:uint:1:723;commandOpcode:uint:2:724;commandPayloadLen:uint:1:726;commandPayload:array:16:727;[uint:1x16]delayCycles:uint:4:743;timeoutCycles:uint:4:747;onTimeout:uint:1:751;onComplete:uint:1:752;gotoStep:uint:1:753;retryMax:uint:1:754;targetFullUid:uint:4:755;targetCategory:uint:1:759;targetByteOffset:uint:2:760;targetByteLen:uint:1:762;predicate:uint:1:763;dataType:uint:1:764;threshold:array:8:765;[uint:1x8]enabled:uint:1:773;reserved:uint:1:774;reserved:uint:1:775;targetFullUid:uint:4:776;targetCategory:uint:1:780;targetByteOffset:uint:2:781;targetByteLen:uint:1:783;actionType:uint:1:784;armTarget:uint:1:785;armIndex:uint:1:786;armState:uint:1:787;commandOpcode:uint:2:788;commandPayloadLen:uint:1:790;commandPayload:array:16:791;[uint:1x16]delayCycles:uint:4:807;timeoutCycles:uint:4:811;onTimeout:uint:1:815;onComplete:uint:1:816;gotoStep:uint:1:817;retryMax:uint:1:818;targetFullUid:uint:4:819;targetCategory:uint:1:823;targetByteOffset:uint:2:824;targetByteLen:uint:1:826;predicate:uint:1:827;dataType:uint:1:828;threshold:array:8:829;[uint:1x8]enabled:uint:1:837;reserved:uint:1:838;reserved:uint:1:839;targetFullUid:uint:4:840;targetCategory:uint:1:844;targetByteOffset:uint:2:845;targetByteLen:uint:1:847;actionType:uint:1:848;armTarget:uint:1:849;armIndex:uint:1:850;armState:uint:1:851;commandOpcode:uint:2:852;commandPayloadLen:uint:1:854;commandPayload:array:16:855;[uint:1x16]delayCycles:uint:4:871;timeoutCycles:uint:4:875;onTimeout:uint:1:879;onComplete:uint:1:880;gotoStep:uint:1:881;retryMax:uint:1:882;targetFullUid:uint:4:883;targetCategory:uint:1:887;targetByteOffset:uint:2:888;targetByteLen:uint:1:890;predicate:uint:1:891;dataType:uint:1:892;threshold:array:8:893;[uint:1x8]enabled:uint:1:901;reserved:uint:1:902;reserved:uint:1:903;targetFullUid:uint:4:904;targetCategory:uint:1:908;targetByteOffset:uint:2:909;targetByteLen:uint:1:911;actionType:uint:1:912;armTarget:uint:1:913;armIndex:uint:1:914;armState:uint:1:915;commandOpcode:uint:2:916;commandPayloadLen:uint:1:918;commandPayload:array:16:919;[uint:1x16]delayCycles:uint:4:935;timeoutCycles:uint:4:939;onTimeout:uint:1:943;onComplete:uint:1:944;gotoStep:uint:1:945;retryMax:uint:1:946;targetFullUid:uint:4:947;targetCategory:uint:1:951;targetByteOffset:uint:2:952;targetByteLen:uint:1:954;predicate:uint:1:955;dataType:uint:1:956;threshold:array:8:957;[uint:1x8]enabled:uint:1:965;reserved:uint:1:966;reserved:uint:1:967;targetFullUid:uint:4:968;targetCategory:uint:1:972;targetByteOffset:uint:2:973;targetByteLen:uint:1:975;actionType:uint:1:976;armTarget:uint:1:977;armIndex:uint:1:978;armState:uint:1:979;commandOpcode:uint:2:980;commandPayloadLen:uint:1:982;commandPayload:array:16:983;[uint:1x16]delayCycles:uint:4:999;timeoutCycles:uint:4:1003;onTimeout:uint:1:1007;onComplete:uint:1:1008;gotoStep:uint:1:1009;retryMax:uint:1:1010;targetFullUid:uint:4:1011;targetCategory:uint:1:1015;targetByteOffset:uint:2:1016;targetByteLen:uint:1:1018;predicate:uint:1:1019;dataType:uint:1:1020;threshold:array:8:1021;[uint:1x8]enabled:uint:1:1029;reserved:uint:1:1030;reserved:uint:1:1031;|size:1032"
+    },
+    "StandaloneStepTprm": {
+      "category": "STRUCT",
+      "size": 64,
+      "fields": [
+        {
+          "name": "targetFullUid",
+          "type": "uint",
+          "offset": 0,
+          "size": 4,
+          "value": 0,
+          "doc": "Target component."
+        },
+        {
+          "name": "targetCategory",
+          "type": "uint",
+          "offset": 4,
+          "size": 1,
+          "value": 0,
+          "doc": "DataCategory enum value."
+        },
+        {
+          "name": "targetByteOffset",
+          "type": "uint",
+          "offset": 5,
+          "size": 2,
+          "value": 0,
+          "doc": "Byte offset."
+        },
+        {
+          "name": "targetByteLen",
+          "type": "uint",
+          "offset": 7,
+          "size": 1,
+          "value": 0,
+          "doc": "Byte length."
+        },
+        {
+          "name": "actionType",
+          "type": "uint",
+          "offset": 8,
+          "size": 1,
+          "value": 0,
+          "doc": "ActionType enum (COMMAND=0, ARM_CONTROL=1)."
+        },
+        {
+          "name": "armTarget",
+          "type": "uint",
+          "offset": 9,
+          "size": 1,
+          "value": 0,
+          "doc": "ArmControlTarget enum."
+        },
+        {
+          "name": "armIndex",
+          "type": "uint",
+          "offset": 10,
+          "size": 1,
+          "value": 0,
+          "doc": "Table index."
+        },
+        {
+          "name": "armState",
+          "type": "uint",
+          "offset": 11,
+          "size": 1,
+          "value": 0,
+          "doc": "1 = arm, 0 = disarm."
+        },
+        {
+          "name": "commandOpcode",
+          "type": "uint",
+          "offset": 12,
+          "size": 2,
+          "value": 0,
+          "doc": "Command opcode."
+        },
+        {
+          "name": "commandPayloadLen",
+          "type": "uint",
+          "offset": 14,
+          "size": 1,
+          "value": 0,
+          "doc": "Payload length."
+        },
+        {
+          "name": "commandPayload",
+          "type": "array",
+          "element_type": "uint",
+          "dims": [16],
+          "offset": 15,
+          "size": 16,
+          "value": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+          "doc": "Command payload bytes."
+        },
+        {
+          "name": "delayCycles",
+          "type": "uint",
+          "offset": 31,
+          "size": 4,
+          "value": 0,
+          "doc": "Delay (RTS: relative, ATS: absolute offset)."
+        },
+        {
+          "name": "timeoutCycles",
+          "type": "uint",
+          "offset": 35,
+          "size": 4,
+          "value": 0,
+          "doc": "Max wait (0 = no timeout)."
+        },
+        {
+          "name": "onTimeout",
+          "type": "uint",
+          "offset": 39,
+          "size": 1,
+          "value": 0,
+          "doc": "StepTimeoutPolicy enum."
+        },
+        {
+          "name": "onComplete",
+          "type": "uint",
+          "offset": 40,
+          "size": 1,
+          "value": 0,
+          "doc": "StepCompletionAction enum."
+        },
+        {
+          "name": "gotoStep",
+          "type": "uint",
+          "offset": 41,
+          "size": 1,
+          "value": 0,
+          "doc": "Target for GOTO_STEP or START_RTS slot."
+        },
+        {
+          "name": "retryMax",
+          "type": "uint",
+          "offset": 42,
+          "size": 1,
+          "value": 0,
+          "doc": "Max retries on timeout."
+        },
+        {
+          "name": "waitCondition",
+          "type": "nested",
+          "struct": "StandaloneWaitConditionTprm",
+          "offset": 43,
+          "size": 20,
+          "doc": "Optional hold condition."
+        },
+        {
+          "name": "reserved",
+          "type": "uint",
+          "offset": 63,
+          "size": 1,
+          "value": 0,
+          "doc": "Explicit padding."
+        }
+      ],
+      "spec_defined": true,
+      "layout_hash": "0x9F83068F",
+      "canonical_spec": "targetFullUid:uint:4:0;targetCategory:uint:1:4;targetByteOffset:uint:2:5;targetByteLen:uint:1:7;actionType:uint:1:8;armTarget:uint:1:9;armIndex:uint:1:10;armState:uint:1:11;commandOpcode:uint:2:12;commandPayloadLen:uint:1:14;commandPayload:array:16:15;[uint:1x16]delayCycles:uint:4:31;timeoutCycles:uint:4:35;onTimeout:uint:1:39;onComplete:uint:1:40;gotoStep:uint:1:41;retryMax:uint:1:42;targetFullUid:uint:4:43;targetCategory:uint:1:47;targetByteOffset:uint:2:48;targetByteLen:uint:1:50;predicate:uint:1:51;dataType:uint:1:52;threshold:array:8:53;[uint:1x8]enabled:uint:1:61;reserved:uint:1:62;reserved:uint:1:63;|size:64"
+    },
+    "StandaloneWaitConditionTprm": {
+      "category": "STRUCT",
+      "size": 20,
+      "fields": [
+        {
+          "name": "targetFullUid",
+          "type": "uint",
+          "offset": 0,
+          "size": 4,
+          "value": 0,
+          "doc": "Component fullUid to watch."
+        },
+        {
+          "name": "targetCategory",
+          "type": "uint",
+          "offset": 4,
+          "size": 1,
+          "value": 0,
+          "doc": "DataCategory enum value."
+        },
+        {
+          "name": "targetByteOffset",
+          "type": "uint",
+          "offset": 5,
+          "size": 2,
+          "value": 0,
+          "doc": "Byte offset into the data block."
+        },
+        {
+          "name": "targetByteLen",
+          "type": "uint",
+          "offset": 7,
+          "size": 1,
+          "value": 0,
+          "doc": "Byte length to compare."
+        },
+        {
+          "name": "predicate",
+          "type": "uint",
+          "offset": 8,
+          "size": 1,
+          "value": 0,
+          "doc": "WatchPredicate enum value."
+        },
+        {
+          "name": "dataType",
+          "type": "uint",
+          "offset": 9,
+          "size": 1,
+          "value": 0,
+          "doc": "WatchDataType enum value."
+        },
+        {
+          "name": "threshold",
+          "type": "array",
+          "element_type": "uint",
+          "dims": [8],
+          "offset": 10,
+          "size": 8,
+          "value": [0, 0, 0, 0, 0, 0, 0, 0],
+          "doc": "Raw threshold bytes."
+        },
+        {
+          "name": "enabled",
+          "type": "uint",
+          "offset": 18,
+          "size": 1,
+          "value": 0,
+          "doc": "1 = condition active."
+        },
+        {
+          "name": "reserved",
+          "type": "uint",
+          "offset": 19,
+          "size": 1,
+          "value": 0,
+          "doc": "Explicit padding."
+        }
+      ],
+      "spec_defined": true,
+      "layout_hash": "0x84C98ADB",
+      "canonical_spec": "targetFullUid:uint:4:0;targetCategory:uint:1:4;targetByteOffset:uint:2:5;targetByteLen:uint:1:7;predicate:uint:1:8;dataType:uint:1:9;threshold:array:8:10;[uint:1x8]enabled:uint:1:18;reserved:uint:1:19;|size:20"
+    },
     "WatchpointTprm": {
       "category": "TUNABLE_PARAM",
       "size": 26,

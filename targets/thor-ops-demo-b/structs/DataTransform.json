@@ -47,8 +47,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0x70B4AF85",
-      "canonical_spec": "applyCycles:uint:4;masksApplied:uint:4;resolveFailures:uint:4;applyFailures:uint:4;entriesArmed:uint:4;"
+      "layout_hash": "0x1BCD6174",
+      "canonical_spec": "applyCycles:uint:4:0;masksApplied:uint:4:4;resolveFailures:uint:4:8;applyFailures:uint:4:12;entriesArmed:uint:4:16;|size:20"
     },
     "TransformStats": {
       "category": "STATE",
@@ -95,8 +95,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0x70B4AF85",
-      "canonical_spec": "applyCycles:uint:4;masksApplied:uint:4;resolveFailures:uint:4;applyFailures:uint:4;entriesArmed:uint:4;"
+      "layout_hash": "0x1BCD6174",
+      "canonical_spec": "applyCycles:uint:4:0;masksApplied:uint:4:4;resolveFailures:uint:4:8;applyFailures:uint:4:12;entriesArmed:uint:4:16;|size:20"
     }
   },
   "enums": {

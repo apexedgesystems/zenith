@@ -87,8 +87,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0xCB1D5DFF",
-      "canonical_spec": "simTime:float:8;lastAlt:float:8;lastVz:float:8;stepCount:uint:4;ctrlCount:uint:4;tlmCount:uint:4;commLossCount:uint:4;staleCmdFrames:uint:4;lastSeenRxCount:uint:4;commLost:uint:1;reserved:array:7;[uint:1x7]"
+      "layout_hash": "0xEC84014F",
+      "canonical_spec": "simTime:float:8:0;lastAlt:float:8:8;lastVz:float:8:16;stepCount:uint:4:24;ctrlCount:uint:4:28;tlmCount:uint:4:32;commLossCount:uint:4:36;staleCmdFrames:uint:4:40;lastSeenRxCount:uint:4:44;commLost:uint:1:48;reserved:array:7:49;[uint:1x7]|size:56"
     },
     "HilPlantTunableParams": {
       "category": "TUNABLE_PARAM",
@@ -160,8 +160,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0x2D523611",
-      "canonical_spec": "mass:float:8;dragCd:float:8;dragArea:float:8;targetAlt:float:8;ctrlKp:float:8;ctrlKd:float:8;thrustMax:float:8;commLossFrames:float:8;"
+      "layout_hash": "0x4ECECA54",
+      "canonical_spec": "mass:float:8:0;dragCd:float:8:8;dragArea:float:8:16;targetAlt:float:8:24;ctrlKp:float:8:32;ctrlKd:float:8:40;thrustMax:float:8:48;commLossFrames:float:8:56;|size:64"
     },
     "VehicleState": {
       "category": "OUTPUT",

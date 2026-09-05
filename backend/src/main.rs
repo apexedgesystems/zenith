@@ -1356,28 +1356,50 @@ async fn update_params(
             ));
         }
 
-        // Variable-length layout hash (recipe confirmed by the apex
-        // side, relay 2026-08-16): header leaves then each entry's
-        // leaves in order, no container markers. The hash is
-        // entry-count-dependent by design -- the count is part of the
-        // layout the vehicle will read.
+        // Variable-length layout hash, offset-aware form: header
+        // leaves then each entry instance's leaves at ABSOLUTE
+        // offsets, terminated by the total size -- entry-count
+        // dependent by construction (contract-pinned by the
+        // scheduler-shape vector).
+        let entry_offsets: Vec<Vec<usize>> = (0..entries.len())
+            .map(|i| {
+                ent_struct
+                    .fields
+                    .iter()
+                    .map(|f| hdr_struct.size + i * ent_struct.size + f.offset)
+                    .collect()
+            })
+            .collect();
         let hash = tprm::layout_hash(
-            dict_leaf_specs(&hdr_struct.fields).into_iter().chain(
-                std::iter::repeat_with(|| dict_leaf_specs(&ent_struct.fields))
-                    .take(entries.len())
-                    .flatten(),
-            ),
+            dict_leaf_specs(&hdr_struct.fields)
+                .into_iter()
+                .chain(entry_offsets.iter().flat_map(|offs| {
+                    dict_leaf_specs(&ent_struct.fields)
+                        .into_iter()
+                        .zip(offs.iter())
+                        .map(|(mut leaf, &off)| {
+                            leaf.offset = off;
+                            leaf
+                        })
+                })),
+            total_size,
         );
 
         (buf, hash)
     } else {
         // Flat: single struct
         let mut dict_hash: Option<u32> = None;
-        if let Some((_comp, _sname, sdef)) =
+        if let Some((comp, _sname, sdef)) =
             find_tunable_struct(&dicts, original_binary.len(), full_uid, manifest.as_deref())
         {
             struct_size = sdef.size;
-            struct_fields = sdef.fields.clone();
+            // Expanded so nested fragments are editable leaf by leaf
+            // (offsets payload-absolute; encode_field works unchanged).
+            struct_fields = dicts
+                .components
+                .get(comp)
+                .map(|d| crate::core::config_manager::expanded_fields(d, &sdef.fields, 0))
+                .unwrap_or_else(|| sdef.fields.clone());
             dict_hash = sdef.layout_hash_u32();
         }
 
@@ -1433,7 +1455,7 @@ async fn update_params(
                 "no layout_hash in dictionary for uid 0x{:06X}; recomputing from flattened fields",
                 full_uid
             );
-            tprm::layout_hash(dict_leaf_specs(&struct_fields))
+            tprm::layout_hash(dict_leaf_specs(&struct_fields), struct_size)
         });
         (buf, hash)
     };
@@ -1754,6 +1776,7 @@ fn dict_leaf_specs(fields: &[crate::core::config_manager::FieldDef]) -> Vec<tprm
             name: &f.name,
             field_type: &f.field_type,
             size: f.size,
+            offset: f.offset,
             array: if f.field_type == "array" {
                 let count = f
                     .dims
@@ -1860,6 +1883,7 @@ fn encode_field(
                     element_type: None,
                     dims: None,
                     constraints: None,
+                    struct_ref: None,
                 };
                 encode_field(buf, &elem, v)
             })

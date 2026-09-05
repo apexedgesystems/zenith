@@ -21,8 +21,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0x7E448D88",
-      "canonical_spec": "checksum:uint:4;stepCount:uint:4;"
+      "layout_hash": "0xABB7323E",
+      "canonical_spec": "checksum:uint:4:0;stepCount:uint:4:4;|size:8"
     },
     "SpecMatrixState": {
       "category": "STATE",
@@ -43,8 +43,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0x26945ADF",
-      "canonical_spec": "stepCount:uint:4;checksum:uint:4;"
+      "layout_hash": "0xEC80FB62",
+      "canonical_spec": "stepCount:uint:4:0;checksum:uint:4:4;|size:8"
     },
     "SpecMatrixTunableParams": {
       "category": "TUNABLE_PARAM",
@@ -177,8 +177,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0x5D6CD6BA",
-      "canonical_spec": "iWide:int:8;uWide:uint:8;precise:float:8;iWord:int:4;uWord:uint:4;ratio:float:4;gains:array:8;[uint:2x4]iShort:int:2;uShort:uint:2;iTiny:int:1;uTiny:uint:1;enabled:bool:1;label:string:12;tags:array:12;[string:6x2]blob:array:5;[uint:1x5]"
+      "layout_hash": "0xA597E249",
+      "canonical_spec": "iWide:int:8:0;uWide:uint:8:8;precise:float:8:16;iWord:int:4:24;uWord:uint:4:28;ratio:float:4:32;gains:array:8:36;[uint:2x4]iShort:int:2:44;uShort:uint:2:46;iTiny:int:1:48;uTiny:uint:1:49;enabled:bool:1:50;label:string:12:51;tags:array:12:63;[string:6x2]blob:array:5:75;[uint:1x5]|size:80"
     }
   },
   "commands": [

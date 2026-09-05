@@ -16,8 +16,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0xBFA1F4A4",
-      "canonical_spec": "referenceValue:float:4;"
+      "layout_hash": "0x4BABF3B0",
+      "canonical_spec": "referenceValue:float:4:0;|size:4"
     },
     "SetModeRequest": {
       "category": "COMMAND",
@@ -33,8 +33,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0xD9AF370A",
-      "canonical_spec": "mode:uint:1;"
+      "layout_hash": "0x6D1C898F",
+      "canonical_spec": "mode:uint:1:0;|size:1"
     },
     "SpecSensorOutput": {
       "category": "OUTPUT",
@@ -56,8 +56,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0x930F87EA",
-      "canonical_spec": "value:float:4;sequence:uint:4;"
+      "layout_hash": "0x51666963",
+      "canonical_spec": "value:float:4:0;sequence:uint:4:4;|size:8"
     },
     "SpecSensorState": {
       "category": "STATE",
@@ -110,8 +110,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0xACA7D3C9",
-      "canonical_spec": "elapsed:float:4;drift:float:4;samples:uint:4;rejects:uint:4;mode:uint:1;reserved:array:3;[uint:1x3]"
+      "layout_hash": "0x3B5D3A65",
+      "canonical_spec": "elapsed:float:4:0;drift:float:4:4;samples:uint:4:8;rejects:uint:4:12;mode:uint:1:16;reserved:array:3:17;[uint:1x3]|size:20"
     },
     "SpecSensorTunableParams": {
       "category": "TUNABLE_PARAM",
@@ -183,8 +183,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0x2924797D",
-      "canonical_spec": "sampleRateHz:float:4;referenceValue:float:4;driftRate:float:4;noiseAmplitude:float:4;mode:uint:1;reserved:array:3;[uint:1x3]"
+      "layout_hash": "0x7668D6AC",
+      "canonical_spec": "sampleRateHz:float:4:0;referenceValue:float:4:4;driftRate:float:4:8;noiseAmplitude:float:4:12;mode:uint:1:16;reserved:array:3:17;[uint:1x3]|size:20"
     },
     "StatsResponse": {
       "category": "TELEMETRY",
@@ -231,8 +231,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0x4F601226",
-      "canonical_spec": "samples:uint:4;rejects:uint:4;lastValue:float:4;mode:uint:1;reserved:array:3;[uint:1x3]"
+      "layout_hash": "0xD39B482B",
+      "canonical_spec": "samples:uint:4:0;rejects:uint:4:4;lastValue:float:4:8;mode:uint:1:12;reserved:array:3:13;[uint:1x3]|size:16"
     }
   },
   "commands": [

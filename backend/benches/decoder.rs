@@ -31,6 +31,7 @@ fn make_dict() -> StructDictionary {
                     opcode: None,
                     layout_hash: None,
                     canonical_spec: None,
+                    packed: None,
                     fields: vec![
                         FieldDef {
                             name: "output".to_string(),
@@ -41,6 +42,7 @@ fn make_dict() -> StructDictionary {
                             element_type: None,
                             dims: None,
                             constraints: None,
+                            struct_ref: None,
                         },
                         FieldDef {
                             name: "phase".to_string(),
@@ -51,6 +53,7 @@ fn make_dict() -> StructDictionary {
                             element_type: None,
                             dims: None,
                             constraints: None,
+                            struct_ref: None,
                         },
                     ],
                 },
@@ -63,6 +66,7 @@ fn make_dict() -> StructDictionary {
                     opcode: None,
                     layout_hash: None,
                     canonical_spec: None,
+                    packed: None,
                     fields: vec![
                         FieldDef {
                             name: "output".to_string(),
@@ -73,6 +77,7 @@ fn make_dict() -> StructDictionary {
                             element_type: None,
                             dims: None,
                             constraints: None,
+                            struct_ref: None,
                         },
                         FieldDef {
                             name: "phase".to_string(),
@@ -83,6 +88,7 @@ fn make_dict() -> StructDictionary {
                             element_type: None,
                             dims: None,
                             constraints: None,
+                            struct_ref: None,
                         },
                         FieldDef {
                             name: "cycleCount".to_string(),
@@ -93,6 +99,7 @@ fn make_dict() -> StructDictionary {
                             element_type: None,
                             dims: None,
                             constraints: None,
+                            struct_ref: None,
                         },
                         FieldDef {
                             name: "amplitude".to_string(),
@@ -103,6 +110,7 @@ fn make_dict() -> StructDictionary {
                             element_type: None,
                             dims: None,
                             constraints: None,
+                            struct_ref: None,
                         },
                         FieldDef {
                             name: "frequency".to_string(),
@@ -113,6 +121,7 @@ fn make_dict() -> StructDictionary {
                             element_type: None,
                             dims: None,
                             constraints: None,
+                            struct_ref: None,
                         },
                         FieldDef {
                             name: "offset".to_string(),
@@ -123,6 +132,7 @@ fn make_dict() -> StructDictionary {
                             element_type: None,
                             dims: None,
                             constraints: None,
+                            struct_ref: None,
                         },
                         FieldDef {
                             name: "lastUpdateMs".to_string(),
@@ -133,6 +143,7 @@ fn make_dict() -> StructDictionary {
                             element_type: None,
                             dims: None,
                             constraints: None,
+                            struct_ref: None,
                         },
                         FieldDef {
                             name: "errorCount".to_string(),
@@ -143,6 +154,7 @@ fn make_dict() -> StructDictionary {
                             element_type: None,
                             dims: None,
                             constraints: None,
+                            struct_ref: None,
                         },
                         FieldDef {
                             name: "lastSampleNs".to_string(),
@@ -153,6 +165,7 @@ fn make_dict() -> StructDictionary {
                             element_type: None,
                             dims: None,
                             constraints: None,
+                            struct_ref: None,
                         },
                         FieldDef {
                             name: "warmupRemain".to_string(),
@@ -163,6 +176,7 @@ fn make_dict() -> StructDictionary {
                             element_type: None,
                             dims: None,
                             constraints: None,
+                            struct_ref: None,
                         },
                         FieldDef {
                             name: "padding".to_string(),
@@ -173,6 +187,7 @@ fn make_dict() -> StructDictionary {
                             element_type: None,
                             dims: None,
                             constraints: None,
+                            struct_ref: None,
                         },
                     ],
                 },
@@ -192,6 +207,7 @@ fn make_dict() -> StructDictionary {
                 opcode: None,
                 layout_hash: None,
                 canonical_spec: None,
+                packed: None,
                 fields: vec![
                     FieldDef {
                         name: "cpuLoad".to_string(),
@@ -202,6 +218,7 @@ fn make_dict() -> StructDictionary {
                         element_type: None,
                         dims: None,
                         constraints: None,
+                        struct_ref: None,
                     },
                     FieldDef {
                         name: "tempC".to_string(),
@@ -212,6 +229,7 @@ fn make_dict() -> StructDictionary {
                         element_type: None,
                         dims: None,
                         constraints: None,
+                        struct_ref: None,
                     },
                     FieldDef {
                         name: "ramKb".to_string(),
@@ -222,6 +240,7 @@ fn make_dict() -> StructDictionary {
                         element_type: None,
                         dims: None,
                         constraints: None,
+                        struct_ref: None,
                     },
                     FieldDef {
                         name: "fdCount".to_string(),
@@ -232,6 +251,7 @@ fn make_dict() -> StructDictionary {
                         element_type: None,
                         dims: None,
                         constraints: None,
+                        struct_ref: None,
                     },
                     FieldDef {
                         name: "uptimeS".to_string(),
@@ -242,6 +262,7 @@ fn make_dict() -> StructDictionary {
                         element_type: None,
                         dims: None,
                         constraints: None,
+                        struct_ref: None,
                     },
                 ],
             },

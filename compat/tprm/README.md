@@ -32,8 +32,12 @@ layoutHash[4]  = CRC-32 of the canonical field spec
 payloadCrc[4]  = CRC-32 (IEEE 802.3) of the payload bytes
 ```
 
-Canonical field spec: every leaf field contributes `name:type:size;`
-in emission order; layoutHash is the CRC-32 of that ASCII string. The
+Canonical field spec (offset-aware, flag-day form): every leaf field
+contributes `name:type:size:offset;` in emission order -- nested
+structs flatten to their leaves at absolute offsets, arrays
+contribute `name:array:total:offset;[elemtype:elemsizexN]` -- and the
+string ends with a `|size:total` terminator. layoutHash is the CRC-32
+of that ASCII string. The
 vehicle verifies all six prelude properties on load and rejects each
 failure distinctly -- an unstamped or mis-stamped upload never
 reaches a component.
