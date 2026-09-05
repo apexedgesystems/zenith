@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { deletePref, savePref, usePref } from "../api/queries";
 import {
   bytesToHex,
   decodeField,
@@ -326,6 +327,53 @@ export default function CommandingPage({
     [selectedTarget, targets],
   );
 
+  // Operator-pinned favorites, per target: a starred (component,
+  // command) pair renders beside the quick commands. Payload is NOT
+  // stored -- a favorite recalls the form (component + command
+  // selected) so field values are entered fresh, never replayed
+  // stale.
+  const favScope = `target:${selectedTarget}`;
+  const favQuery = usePref<{ component: string; command: string }[]>(
+    favScope,
+    "commanding",
+    "favorites",
+  );
+  const favorites = favQuery.data ?? [];
+  const persistFavorites = (next: { component: string; command: string }[]) => {
+    const save = next.length
+      ? savePref(favScope, "commanding", "favorites", next)
+      : deletePref(favScope, "commanding", "favorites");
+    save.catch(() => {}).then(() => favQuery.refetch());
+  };
+  const isFavorite =
+    !!selectedComponent &&
+    !!selectedCommand &&
+    favorites.some(
+      (f) => f.component === selectedComponent && f.command === selectedCommand,
+    );
+  const toggleFavorite = () => {
+    if (!selectedComponent || !selectedCommand) return;
+    persistFavorites(
+      isFavorite
+        ? favorites.filter(
+            (f) =>
+              !(
+                f.component === selectedComponent &&
+                f.command === selectedCommand
+              ),
+          )
+        : [
+            ...favorites,
+            { component: selectedComponent, command: selectedCommand },
+          ],
+    );
+  };
+  const recallFavorite = (f: { component: string; command: string }) => {
+    setSelectedComponent(f.component);
+    setSelectedCommand(f.command);
+    setFieldValues({});
+  };
+
   const sendFormCommand = () => {
     if (!selectedComponent || !components[selectedComponent]) return;
     const comp = components[selectedComponent];
@@ -385,6 +433,36 @@ export default function CommandingPage({
                 }}
               >
                 {cmd.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Favorites (operator-pinned, per target) */}
+      {favorites.length > 0 && (
+        <div className="mb-5">
+          <div
+            className="text-xs uppercase tracking-wider mb-2"
+            style={{ color: "var(--color-text-muted)" }}
+          >
+            Favorites
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {favorites.map((f) => (
+              <button
+                key={`${f.component}/${f.command}`}
+                onClick={() => recallFavorite(f)}
+                title="Recall this command into the form"
+                className="text-xs px-3 py-1.5 rounded-md"
+                style={{
+                  backgroundColor: "var(--color-elevated)",
+                  color: "var(--color-accent)",
+                  border: "1px solid var(--color-border)",
+                  cursor: "pointer",
+                }}
+              >
+                {f.component} / {f.command}
               </button>
             ))}
           </div>
@@ -513,6 +591,27 @@ export default function CommandingPage({
           >
             {sending ? "Sending..." : "Send"}
           </button>
+          {currentCmd && (
+            <button
+              onClick={toggleFavorite}
+              title={
+                isFavorite
+                  ? "Remove from favorites"
+                  : "Pin this command as a favorite for this target"
+              }
+              className="text-sm px-2 py-1.5 rounded-md"
+              style={{
+                backgroundColor: "transparent",
+                color: isFavorite
+                  ? "var(--color-accent)"
+                  : "var(--color-text-muted)",
+                border: "1px solid var(--color-border)",
+                cursor: "pointer",
+              }}
+            >
+              {isFavorite ? "Pinned" : "Pin"}
+            </button>
+          )}
           <button
             onClick={() => setShowRaw(!showRaw)}
             className="text-xs px-2 py-1"
