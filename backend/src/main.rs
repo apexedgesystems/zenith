@@ -613,6 +613,23 @@ async fn upload_file(
         .decode(&body.content_base64)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid base64: {}", e)))?;
 
+    // RTS destinations get the author-time sequence check.
+    if body.remote_path.contains("rts/") {
+        let dicts = {
+            state
+                .read()
+                .await
+                .targets
+                .get(&id)
+                .map(|t| t.struct_dicts.clone())
+        };
+        if let Some(dicts) = dicts {
+            if let Err(reason) = crate::core::sequence::validate_rts_upload(&dicts, &data) {
+                return Err((StatusCode::UNPROCESSABLE_ENTITY, reason));
+            }
+        }
+    }
+
     let detail = format!("path={} bytes={}", body.remote_path, data.len());
     let ip_str = addr.ip().to_string();
 
