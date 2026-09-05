@@ -189,6 +189,22 @@ impl TelemetryDb {
             );",
         )?;
 
+        // Operator UI preferences: (scope, kind, name) -> JSON value.
+        // Scope is "global" or "target:<id>" today; the key shape
+        // leaves room for a user prefix when auth-scoped preferences
+        // arrive, without a migration. Display policy only -- vehicle
+        // truth never lives here.
+        writer.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ui_prefs (
+                scope TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                name TEXT NOT NULL,
+                value TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (scope, kind, name)
+            );",
+        )?;
+
         // Audit log: append-only record of operator actions for compliance
         // and post-incident review. Read-only via API; new rows are added
         // by log_audit(). No automatic pruning -- operators are expected
@@ -1031,6 +1047,69 @@ impl TelemetryDb {
                     status: row.get(6)?,
                     source_ip: row.get(7)?,
                 })
+            })?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            Ok(out)
+        })
+    }
+
+    /// Read one preference value (raw JSON text).
+    pub fn get_pref(&self, scope: &str, kind: &str, name: &str) -> Result<Option<String>, DbError> {
+        self.with_reader(|conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT value FROM ui_prefs WHERE scope = ?1 AND kind = ?2 AND name = ?3",
+                    params![scope, kind, name],
+                    |row| row.get(0),
+                )
+                .optional()?)
+        })
+    }
+
+    /// Upsert one preference value.
+    pub fn set_pref(
+        &self,
+        scope: &str,
+        kind: &str,
+        name: &str,
+        value: &str,
+    ) -> Result<(), DbError> {
+        let conn = self.writer.lock().map_err(|_| DbError::Lock)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        conn.execute(
+            "INSERT INTO ui_prefs (scope, kind, name, value, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(scope, kind, name) DO UPDATE SET
+               value = excluded.value, updated_at = excluded.updated_at",
+            params![scope, kind, name, value, now],
+        )?;
+        Ok(())
+    }
+
+    /// Delete one preference; true when a row existed.
+    pub fn delete_pref(&self, scope: &str, kind: &str, name: &str) -> Result<bool, DbError> {
+        let conn = self.writer.lock().map_err(|_| DbError::Lock)?;
+        let n = conn.execute(
+            "DELETE FROM ui_prefs WHERE scope = ?1 AND kind = ?2 AND name = ?3",
+            params![scope, kind, name],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// All preferences under (scope, kind), name -> raw JSON text.
+    pub fn list_prefs(&self, scope: &str, kind: &str) -> Result<Vec<(String, String)>, DbError> {
+        self.with_reader(|conn| {
+            let mut stmt = conn.prepare_cached(
+                "SELECT name, value FROM ui_prefs WHERE scope = ?1 AND kind = ?2 ORDER BY name",
+            )?;
+            let rows = stmt.query_map(params![scope, kind], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?;
             let mut out = Vec::new();
             for r in rows {
@@ -2521,6 +2600,46 @@ mod tests {
         // And the ladder can process the migrated rows.
         let pass = db.tier_pass(COARSE_TIER, 1_000, 1_000, u64::MAX).unwrap();
         assert_eq!(pass.source_rows, 1);
+    }
+
+    /// @test Preference round trip: set, read back, overwrite,
+    /// list within (scope, kind), delete -- with scopes isolated.
+    #[test]
+    fn ui_prefs_round_trip_and_scoping() {
+        let (_dir, db) = open_temp_db();
+        assert_eq!(
+            db.get_pref("target:t1", "dashboard", "cards").unwrap(),
+            None
+        );
+
+        db.set_pref("target:t1", "dashboard", "cards", r#"{"hidden":[]}"#)
+            .unwrap();
+        db.set_pref("target:t1", "dashboard", "cards", r#"{"hidden":["X"]}"#)
+            .unwrap();
+        db.set_pref("target:t2", "dashboard", "cards", r#"{"hidden":["Y"]}"#)
+            .unwrap();
+        db.set_pref("target:t1", "commanding", "favorites", "[]")
+            .unwrap();
+
+        assert_eq!(
+            db.get_pref("target:t1", "dashboard", "cards")
+                .unwrap()
+                .as_deref(),
+            Some(r#"{"hidden":["X"]}"#)
+        );
+        let listed = db.list_prefs("target:t1", "dashboard").unwrap();
+        assert_eq!(
+            listed,
+            vec![("cards".to_string(), r#"{"hidden":["X"]}"#.to_string())]
+        );
+
+        assert!(db.delete_pref("target:t1", "dashboard", "cards").unwrap());
+        assert!(!db.delete_pref("target:t1", "dashboard", "cards").unwrap());
+        // Other scopes untouched.
+        assert!(db
+            .get_pref("target:t2", "dashboard", "cards")
+            .unwrap()
+            .is_some());
     }
 
     /// @test audit_count reports the live number of audit rows.
