@@ -1389,7 +1389,7 @@ async fn update_params(
     } else {
         // Flat: single struct
         let mut dict_hash: Option<u32> = None;
-        if let Some((_comp, _sname, sdef)) =
+        if let Some((comp, _sname, sdef)) =
             find_tunable_struct(&dicts, original_binary.len(), full_uid, manifest.as_deref())
         {
             struct_size = sdef.size;
@@ -1397,7 +1397,7 @@ async fn update_params(
             // (offsets payload-absolute; encode_field works unchanged).
             struct_fields = dicts
                 .components
-                .get(_comp as &str)
+                .get(comp)
                 .map(|d| crate::core::config_manager::expanded_fields(d, &sdef.fields, 0))
                 .unwrap_or_else(|| sdef.fields.clone());
             dict_hash = sdef.layout_hash_u32();
