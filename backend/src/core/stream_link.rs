@@ -19,13 +19,30 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
-use tokio::io::AsyncReadExt;
-use tokio::net::TcpStream;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::broadcast;
 use tokio::time::{timeout, Duration};
 
 use crate::core::transport::{ClientError, Protocol, PushTelemetryPacket};
 use crate::protocol::{ccsds_spp, slip};
+
+/// How bytes reach zenith -- a third composition axis, orthogonal to
+/// the framing and packet stages. TCP dials the target and reads a
+/// byte stream; UDP binds a local port and receives datagrams (the
+/// common flight-stack ground pattern: telemetry sent to our port,
+/// commands sent to the target's). The same pipeline consumes
+/// either: a datagram is just a read chunk whose boundaries the
+/// stages already tolerate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Carrier {
+    /// Dial host:port, read the stream.
+    Tcp,
+    /// Bind listen_port for inbound datagrams; host:port is where
+    /// outbound (arm) datagrams go. listen_port 0 = OS-assigned,
+    /// useful only when the peer replies to the source address.
+    Udp { listen_port: u16 },
+}
 
 /// What to build a pipeline from -- config data, kept so each connect
 /// starts a pristine pipeline (no stale partial frames across
@@ -138,10 +155,50 @@ impl PacketPipeline {
     }
 }
 
+/// The per-chunk work both reader loops share: feed the pipeline,
+/// broadcast what routes, rate-limit the unroutable warning.
+struct Ingest {
+    pipeline: PacketPipeline,
+    push_tx: broadcast::Sender<PushTelemetryPacket>,
+    proto_name: &'static str,
+    last_warn: Option<tokio::time::Instant>,
+}
+
+impl Ingest {
+    const UNROUTABLE_WARN_EVERY: Duration = Duration::from_secs(30);
+
+    fn feed(&mut self, bytes: &[u8]) {
+        let (packets, unroutable) = self.pipeline.feed(bytes);
+        for pkt in packets {
+            let _ = self.push_tx.send(pkt);
+        }
+        if unroutable > 0
+            && self
+                .last_warn
+                .is_none_or(|t| t.elapsed() >= Self::UNROUTABLE_WARN_EVERY)
+        {
+            tracing::warn!(
+                "{}: {unroutable} unroutable unit(s) dropped \
+                 (unmapped address or malformed packet)",
+                self.proto_name
+            );
+            self.last_warn = Some(tokio::time::Instant::now());
+        }
+    }
+}
+
 /// One target's stream link: socket + composed pipeline.
 pub struct StreamLink {
     protocol: Protocol,
     spec: PipelineSpec,
+    carrier: Carrier,
+    /// Raw bytes sent to the target on every connect, before the
+    /// reader starts -- the downlink-arm step. Ground reality for
+    /// many targets: nothing is emitted until a ground message
+    /// enables the downlink, so arming is part of link bring-up,
+    /// not an operator afterthought. The bytes are per-target
+    /// config and opaque here -- zenith sends, never interprets.
+    arm: Vec<Vec<u8>>,
     push_tlm_tx: broadcast::Sender<PushTelemetryPacket>,
     reader_handle: Option<tokio::task::JoinHandle<()>>,
     connected: Arc<AtomicBool>,
@@ -154,6 +211,8 @@ impl StreamLink {
     pub fn new(
         protocol: Protocol,
         spec: PipelineSpec,
+        carrier: Carrier,
+        arm: Vec<Vec<u8>>,
         push_tlm_tx: broadcast::Sender<PushTelemetryPacket>,
     ) -> Self {
         if let PipelineSpec::SlipRaw { uid: None } = &spec {
@@ -164,6 +223,8 @@ impl StreamLink {
         Self {
             protocol,
             spec,
+            carrier,
+            arm,
             push_tlm_tx,
             reader_handle: None,
             connected: Arc::new(AtomicBool::new(false)),
@@ -181,61 +242,88 @@ impl StreamLink {
 
     pub async fn connect(&mut self, host: &str, port: u16) -> Result<(), ClientError> {
         let addr = format!("{}:{}", host, port);
-        let stream = timeout(Duration::from_secs(5), TcpStream::connect(&addr))
-            .await
-            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "connection timed out"))?
-            .map_err(ClientError::Connect)?;
-        stream.set_nodelay(true)?;
-
-        let connected = self.connected.clone();
         let gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        connected.store(true, Ordering::Release);
-
-        let push_tx = self.push_tlm_tx.clone();
-        let mut pipeline = PacketPipeline::build(&self.spec);
-        let conn_flag = connected.clone();
+        let mut ingest = Ingest {
+            pipeline: PacketPipeline::build(&self.spec),
+            push_tx: self.push_tlm_tx.clone(),
+            proto_name: self.protocol.name(),
+            last_warn: None,
+        };
+        let conn_flag = self.connected.clone();
         let gen_flag = self.generation.clone();
         let proto_name = self.protocol.name();
-        let reader_handle = tokio::spawn(async move {
-            const UNROUTABLE_WARN_EVERY: Duration = Duration::from_secs(30);
-            let mut last_warn: Option<tokio::time::Instant> = None;
-            let mut buf = vec![0u8; 65536];
-            let mut stream = stream;
-            loop {
-                match stream.read(&mut buf).await {
-                    Ok(0) => {
-                        if gen_flag.load(Ordering::Acquire) == gen {
-                            conn_flag.store(false, Ordering::Release);
-                        }
-                        tracing::info!("{proto_name} connection closed by remote");
-                        break;
-                    }
-                    Ok(n) => {
-                        let (packets, unroutable) = pipeline.feed(&buf[..n]);
-                        for pkt in packets {
-                            let _ = push_tx.send(pkt);
-                        }
-                        if unroutable > 0
-                            && last_warn.is_none_or(|t| t.elapsed() >= UNROUTABLE_WARN_EVERY)
-                        {
-                            tracing::warn!(
-                                "{proto_name}: {unroutable} unroutable unit(s) dropped \
-                                 (unmapped address or malformed packet)"
-                            );
-                            last_warn = Some(tokio::time::Instant::now());
-                        }
-                    }
-                    Err(e) => {
-                        if gen_flag.load(Ordering::Acquire) == gen {
-                            conn_flag.store(false, Ordering::Release);
-                        }
-                        tracing::error!("{proto_name} read error: {e}");
-                        break;
-                    }
-                }
-            }
-        });
 
+        let reader_handle = match self.carrier {
+            Carrier::Tcp => {
+                let mut stream = timeout(Duration::from_secs(5), TcpStream::connect(&addr))
+                    .await
+                    .map_err(|_| {
+                        std::io::Error::new(std::io::ErrorKind::TimedOut, "connection timed out")
+                    })?
+                    .map_err(ClientError::Connect)?;
+                stream.set_nodelay(true)?;
+                // Arm the downlink before the reader owns the socket:
+                // one-shot writes, so no writer half to keep.
+                for bytes in &self.arm {
+                    stream.write_all(bytes).await?;
+                }
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 65536];
+                    loop {
+                        match stream.read(&mut buf).await {
+                            Ok(0) => {
+                                if gen_flag.load(Ordering::Acquire) == gen {
+                                    conn_flag.store(false, Ordering::Release);
+                                }
+                                tracing::info!("{proto_name} connection closed by remote");
+                                break;
+                            }
+                            Ok(n) => ingest.feed(&buf[..n]),
+                            Err(e) => {
+                                if gen_flag.load(Ordering::Acquire) == gen {
+                                    conn_flag.store(false, Ordering::Release);
+                                }
+                                tracing::error!("{proto_name} read error: {e}");
+                                break;
+                            }
+                        }
+                    }
+                })
+            }
+            Carrier::Udp { listen_port } => {
+                // One unconnected socket does both directions: bound
+                // locally so telemetry datagrams land here, send_to
+                // for arming. Deliberately NOT connect()ed -- the
+                // target's telemetry sender is typically a different
+                // socket than its command receiver, and a connected
+                // UDP socket would filter those datagrams out.
+                let sock = UdpSocket::bind(("0.0.0.0", listen_port))
+                    .await
+                    .map_err(ClientError::Connect)?;
+                for bytes in &self.arm {
+                    sock.send_to(bytes, &addr)
+                        .await
+                        .map_err(ClientError::Connect)?;
+                }
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 65536];
+                    loop {
+                        match sock.recv_from(&mut buf).await {
+                            Ok((n, _src)) => ingest.feed(&buf[..n]),
+                            Err(e) => {
+                                if gen_flag.load(Ordering::Acquire) == gen {
+                                    conn_flag.store(false, Ordering::Release);
+                                }
+                                tracing::error!("{proto_name} udp recv error: {e}");
+                                break;
+                            }
+                        }
+                    }
+                })
+            }
+        };
+
+        self.connected.store(true, Ordering::Release);
         self.reader_handle = Some(reader_handle);
         tracing::info!("Connected ({proto_name}) to {addr}");
         Ok(())
@@ -388,7 +476,7 @@ mod tests {
         for (proto, spec, chunks) in cases {
             let addr = serve_bytes(chunks).await;
             let (push_tx, mut push_rx) = broadcast::channel(16);
-            let mut link = StreamLink::new(proto, spec, push_tx);
+            let mut link = StreamLink::new(proto, spec, Carrier::Tcp, Vec::new(), push_tx);
             link.connect(&addr.ip().to_string(), addr.port())
                 .await
                 .unwrap();
@@ -422,6 +510,8 @@ mod tests {
         let mut link = StreamLink::new(
             Protocol::SlipCcsdsSpp,
             PipelineSpec::SlipSpp { apid_map: map },
+            Carrier::Tcp,
+            Vec::new(),
             push_tx,
         );
         link.connect(&addr.ip().to_string(), addr.port())
@@ -435,6 +525,84 @@ mod tests {
         link.disconnect();
     }
 
+    /// @test The UDP carrier end to end: connect binds a local
+    /// socket, fires the arm datagram at the target's command port,
+    /// and telemetry datagrams flowing back parse through the same
+    /// SPP pipeline the TCP carrier uses. The fake target verifies
+    /// the arm bytes arrive verbatim before it emits anything --
+    /// downlink-silent-until-armed, enforced.
+    #[tokio::test]
+    async fn udp_carrier_arms_then_receives() {
+        let arm: Vec<u8> = vec![0x18, 0x80, 0xC0, 0x00, 0x00, 0x11, 0x06, 0x00];
+        let target = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+
+        let expect_arm = arm.clone();
+        tokio::spawn(async move {
+            let mut buf = [0u8; 256];
+            let (n, src) = target.recv_from(&mut buf).await.unwrap();
+            assert_eq!(&buf[..n], &expect_arm[..], "arm datagram must arrive first");
+            let pkt = ccsds_spp::pack(0x0D0, 1, &[7, 7, 7, 7]);
+            target.send_to(&pkt, src).await.unwrap();
+        });
+
+        let (push_tx, mut push_rx) = broadcast::channel(16);
+        let mut link = StreamLink::new(
+            Protocol::CcsdsSpp,
+            PipelineSpec::Spp {
+                apid_map: HashMap::from([(0x0D0u16, 0x00D000u32)]),
+            },
+            // Port 0: the fake target replies to the arm's source
+            // address, so the test needs no fixed-port coordination.
+            Carrier::Udp { listen_port: 0 },
+            vec![arm],
+            push_tx,
+        );
+        link.connect(&target_addr.ip().to_string(), target_addr.port())
+            .await
+            .unwrap();
+        assert!(link.is_connected());
+
+        let pkt = recv_one(&mut push_rx).await;
+        assert_eq!(pkt.full_uid, 0x00D000);
+        assert_eq!(pkt.payload, vec![7, 7, 7, 7]);
+        link.disconnect();
+    }
+
+    /// @test The TCP carrier writes arm bytes before the reader owns
+    /// the socket -- same arm semantics on both carriers.
+    #[tokio::test]
+    async fn tcp_carrier_writes_arm_before_reading() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 4];
+            tokio::io::AsyncReadExt::read_exact(&mut sock, &mut buf)
+                .await
+                .unwrap();
+            assert_eq!(&buf, b"ARM!");
+            sock.write_all(&slip::encode(&[1, 2, 3])).await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        });
+
+        let (push_tx, mut push_rx) = broadcast::channel(16);
+        let mut link = StreamLink::new(
+            Protocol::RawSlip,
+            PipelineSpec::SlipRaw { uid: Some(0xAB) },
+            Carrier::Tcp,
+            vec![b"ARM!".to_vec()],
+            push_tx,
+        );
+        link.connect(&addr.ip().to_string(), addr.port())
+            .await
+            .unwrap();
+        let pkt = recv_one(&mut push_rx).await;
+        assert_eq!(pkt.full_uid, 0xAB);
+        assert_eq!(pkt.payload, vec![1, 2, 3]);
+        link.disconnect();
+    }
+
     /// @test Without a configured raw_uid, raw frames drop instead of
     /// inventing an address -- the link stays connected and harmless.
     #[tokio::test]
@@ -444,6 +612,8 @@ mod tests {
         let mut link = StreamLink::new(
             Protocol::RawSlip,
             PipelineSpec::SlipRaw { uid: None },
+            Carrier::Tcp,
+            Vec::new(),
             push_tx,
         );
         link.connect(&addr.ip().to_string(), addr.port())

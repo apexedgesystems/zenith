@@ -177,6 +177,25 @@ pub struct TargetSection {
     /// stream speaks for ("0x" hex or decimal).
     #[serde(default)]
     pub raw_uid: Option<String>,
+    /// Stream targets: how bytes reach zenith. "tcp" (default) dials
+    /// host:port and reads the stream; "udp" binds `udp_listen_port`
+    /// for inbound telemetry datagrams and sends outbound (arm)
+    /// datagrams to host:port. aproto-slip is TCP-only; validated at
+    /// boot.
+    #[serde(default = "default_carrier")]
+    pub carrier: String,
+    /// UDP carrier: local port bound for inbound telemetry. Required
+    /// when carrier = "udp" -- the target sends to a configured port,
+    /// so an OS-assigned one would never hear it.
+    #[serde(default)]
+    pub udp_listen_port: Option<u16>,
+    /// Hex-encoded raw byte strings sent to the target on every
+    /// connect, in order, before telemetry reading starts -- the
+    /// downlink-arm step for targets that emit nothing until a
+    /// ground message enables their output. Protocol-neutral by
+    /// design: bytes on the carrier, not commands zenith interprets.
+    #[serde(default)]
+    pub arm_hex: Vec<String>,
     #[serde(default)]
     pub manifest: Option<String>,
     #[serde(default)]
@@ -215,6 +234,9 @@ fn default_target_port() -> u16 {
 }
 fn default_protocol() -> String {
     "aproto-slip".to_string()
+}
+fn default_carrier() -> String {
+    "tcp".to_string()
 }
 /// The default policy, callable from target-add paths that build a
 /// TargetSection literal.

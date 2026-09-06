@@ -265,6 +265,14 @@ fn build_link(
         Protocol::AprotoSlip => ProtocolLink::Aproto(AprotoClient::new(push_tlm_tx)),
         Protocol::CcsdsSpp | Protocol::SlipCcsdsSpp | Protocol::RawSlip => {
             use crate::core::stream_link::{PipelineSpec, StreamLink};
+            // Boot already validated the carrier (see carrier_from_config
+            // at startup); a bad value on the dynamic-add path degrades
+            // to TCP with a warning rather than taking the server down.
+            let carrier = carrier_from_config(config, protocol).unwrap_or_else(|e| {
+                tracing::warn!("[{}] {e}; using tcp carrier", config.name);
+                crate::core::stream_link::Carrier::Tcp
+            });
+            let arm = parse_arm_hex(&config.arm_hex, &config.name);
             let spec = match protocol {
                 Protocol::CcsdsSpp => PipelineSpec::Spp {
                     apid_map: parse_apid_map(config.apid_map.as_ref(), &config.name),
@@ -284,9 +292,52 @@ fn build_link(
                 },
                 Protocol::AprotoSlip => unreachable!("guarded by the outer match"),
             };
-            ProtocolLink::Stream(StreamLink::new(protocol, spec, push_tlm_tx))
+            ProtocolLink::Stream(StreamLink::new(protocol, spec, carrier, arm, push_tlm_tx))
         }
     }
+}
+
+/// Resolve a target's carrier declaration against its protocol.
+/// Errors are boot refusals: a misspelled carrier or a UDP listener
+/// with no port must never silently become a link that hears nothing.
+fn carrier_from_config(
+    config: &config::TargetSection,
+    protocol: Protocol,
+) -> Result<crate::core::stream_link::Carrier, String> {
+    use crate::core::stream_link::Carrier;
+    match config.carrier.as_str() {
+        "tcp" => Ok(Carrier::Tcp),
+        "udp" => {
+            if protocol == Protocol::AprotoSlip {
+                return Err("carrier 'udp' is not supported for aproto-slip (TCP-only)".into());
+            }
+            match config.udp_listen_port {
+                Some(port) => Ok(Carrier::Udp { listen_port: port }),
+                None => Err("carrier 'udp' requires udp_listen_port (the local port \
+                     the target sends telemetry to)"
+                    .into()),
+            }
+        }
+        other => Err(format!("unknown carrier '{}' (supported: tcp, udp)", other)),
+    }
+}
+
+/// Decode the config's arm_hex entries. Bad entries are skipped with
+/// a warning naming them -- same policy as apid_map -- because a
+/// mangled arm string should cost that arm step, not the whole boot.
+fn parse_arm_hex(raw: &[String], target_name: &str) -> Vec<Vec<u8>> {
+    let mut out = Vec::new();
+    for entry in raw {
+        match hex::decode(entry.trim()) {
+            Ok(bytes) if !bytes.is_empty() => out.push(bytes),
+            _ => tracing::warn!(
+                "[{}] arm_hex entry '{}' is not valid hex; skipped",
+                target_name,
+                entry
+            ),
+        }
+    }
+    out
 }
 
 /// Parse the config's APID routing table. Bad entries are skipped
@@ -2636,6 +2687,9 @@ async fn add_target(
         health_nonzero_bad: crate::config::default_health_nonzero_bad_public(),
         apid_map: None,
         raw_uid: None,
+        carrier: "tcp".to_string(),
+        udp_listen_port: None,
+        arm_hex: Vec::new(),
         auto_connect: false,
     };
 
@@ -3726,6 +3780,12 @@ async fn main() {
             eprintln!("FATAL: target '{}': {}", tc.name, e);
             std::process::exit(1);
         });
+        // Same refusal discipline for the carrier axis: a typo or a
+        // portless UDP listener is a config bug, not a degraded mode.
+        if let Err(e) = carrier_from_config(tc, protocol) {
+            eprintln!("FATAL: target '{}': {}", tc.name, e);
+            std::process::exit(1);
+        }
         let mut new_client = build_link(protocol, push_tlm_tx.clone(), tc);
         new_client.set_metrics(metrics.clone());
         let connected = new_client.connected_handle();
