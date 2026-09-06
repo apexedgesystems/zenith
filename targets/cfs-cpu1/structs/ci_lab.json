@@ -1,0 +1,47 @@
+{
+  "component": "ci_lab",
+  "structs": {
+    "Housekeeping": {
+      "category": "TELEMETRY",
+      "size": 22,
+      "fields": [
+        {
+          "name": "CommandCounter",
+          "offset": 10,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "CommandErrorCounter",
+          "offset": 11,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "EnableChecksums",
+          "offset": 12,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "SocketConnected",
+          "offset": 13,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "IngestPackets",
+          "offset": 14,
+          "size": 4,
+          "type": "uint"
+        },
+        {
+          "name": "IngestErrors",
+          "offset": 18,
+          "size": 4,
+          "type": "uint"
+        }
+      ]
+    }
+  }
+}

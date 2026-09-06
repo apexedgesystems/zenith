@@ -1,0 +1,89 @@
+{
+  "component": "cfe_evs",
+  "structs": {
+    "Housekeeping": {
+      "category": "TELEMETRY",
+      "size": 154,
+      "fields": [
+        {
+          "name": "CommandCounter",
+          "offset": 10,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "CommandErrorCounter",
+          "offset": 11,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "MessageFormatMode",
+          "offset": 12,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "MessageTruncCounter",
+          "offset": 13,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "UnregisteredAppCounter",
+          "offset": 14,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "OutputPort",
+          "offset": 15,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "LogFullFlag",
+          "offset": 16,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "LogMode",
+          "offset": 17,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "MessageSendCounter",
+          "offset": 18,
+          "size": 2,
+          "type": "uint"
+        },
+        {
+          "name": "LogOverflowCounter",
+          "offset": 20,
+          "size": 2,
+          "type": "uint"
+        },
+        {
+          "name": "LogEnabled",
+          "offset": 22,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "Padding",
+          "offset": 23,
+          "size": 3,
+          "type": "string"
+        },
+        {
+          "name": "AppData",
+          "offset": 26,
+          "size": 128,
+          "type": "array"
+        }
+      ]
+    }
+  }
+}

@@ -87,10 +87,15 @@ carrier = "udp"
 udp_listen_port = 2234
 arm_hex = ["1880c000001106003132372e302e302e3100000000000000"]
 auto_connect = false
+manifest = "/data/targets/cfs-cpu1/app_manifest.json"
+structs_dir = "/data/targets/cfs-cpu1/structs"
 [targets.apid_map]
-"0x080" = "0x00800000" # CFE_ES housekeeping
-"0x083" = "0x00830000" # CFE_SB housekeeping
-"0x085" = "0x00850000" # CFE_TIME housekeeping
+"0x000" = "0x00C00000" # CFE_ES
+"0x001" = "0x00C00001" # CFE_EVS
+"0x003" = "0x00C00003" # CFE_SB
+"0x005" = "0x00C00005" # CFE_TIME
+"0x080" = "0x00C00080" # TO_LAB
+"0x084" = "0x00C00084" # CI_LAB
 
 # Target: Local SIL ops demo (dev only)
 [[targets]]
