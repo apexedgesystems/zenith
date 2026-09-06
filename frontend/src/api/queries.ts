@@ -305,3 +305,45 @@ export function useTunableFields(
     },
   });
 }
+
+/* ------------------------------ ui prefs ------------------------------ */
+
+/** One preference value under (scope, kind, name). null data = no
+ *  preference saved (the 404 is expected, not an error state). */
+export function usePref<T>(scope: string, kind: string, name: string) {
+  return useQuery<T | null>({
+    queryKey: ["pref", scope, kind, name],
+    staleTime: 60_000,
+    queryFn: async () => {
+      const r = await fetch(`/api/prefs/${scope}/${kind}/${name}`);
+      if (r.status === 404) return null;
+      if (!r.ok) throw new Error(await r.text());
+      return (await r.json()) as T;
+    },
+  });
+}
+
+export async function savePref(
+  scope: string,
+  kind: string,
+  name: string,
+  value: unknown,
+): Promise<void> {
+  const r = await fetch(`/api/prefs/${scope}/${kind}/${name}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(value),
+  });
+  if (!r.ok) throw new Error(await r.text());
+}
+
+export async function deletePref(
+  scope: string,
+  kind: string,
+  name: string,
+): Promise<void> {
+  const r = await fetch(`/api/prefs/${scope}/${kind}/${name}`, {
+    method: "DELETE",
+  });
+  if (!r.ok) throw new Error(await r.text());
+}

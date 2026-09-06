@@ -1,5 +1,12 @@
 import { memo, useMemo, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { deletePref, savePref, usePref } from "../api/queries";
+import {
+  arrangeCards,
+  moveTitle,
+  toggleHidden,
+  type CardArrangement,
+} from "../utils/cardPrefs";
 import {
   decodeField,
   formatValue,
@@ -353,8 +360,14 @@ async function buildHealthCards(
 /** Executive summary -- always-present banner for the guaranteed component. */
 const ExecutiveSummary = memo(function ExecutiveSummary({
   metrics,
+  pref,
+  customizing,
+  onPersist,
 }: {
   metrics: HealthCard["metrics"];
+  pref: CardArrangement | null;
+  customizing: boolean;
+  onPersist: (next: CardArrangement) => void;
 }) {
   // Format large cycle counts with compact notation
   const formatMetric = (m: { label: string; value: string }) => {
@@ -390,15 +403,69 @@ const ExecutiveSummary = memo(function ExecutiveSummary({
         </span>
       </div>
       <div className="grid grid-cols-4 gap-3">
-        {metrics
-          .filter((m) => !m.label.startsWith("reserved"))
-          .slice(0, 8)
-          .map((m) => (
+        {(() => {
+          const eligible = metrics
+            .filter((m) => !m.label.startsWith("reserved"))
+            .map((m) => ({ title: m.label, m }));
+          const arranged = arrangeCards(eligible, pref, customizing);
+          const shown = customizing ? arranged : arranged.slice(0, 8);
+          const allTitles = eligible.map((e) => e.title);
+          const hiddenSet = new Set(pref?.hidden ?? []);
+          return shown.map(({ title, m }) => (
             <div
               key={m.label}
               className="rounded-md p-2"
-              style={{ backgroundColor: "var(--color-elevated)" }}
+              style={{
+                backgroundColor: "var(--color-elevated)",
+                opacity: customizing && hiddenSet.has(title) ? 0.35 : 1,
+              }}
             >
+              {customizing && (
+                <div className="flex gap-1 mb-1">
+                  {([-1, 1] as const).map((d) => (
+                    <button
+                      key={d}
+                      onClick={() =>
+                        onPersist({
+                          hidden: pref?.hidden ?? [],
+                          order: moveTitle(
+                            pref?.order ?? [],
+                            allTitles,
+                            title,
+                            d,
+                          ),
+                        })
+                      }
+                      className="text-[9px] px-1"
+                      style={{
+                        backgroundColor: "var(--color-surface)",
+                        border: "1px solid var(--color-border)",
+                        color: "var(--color-text-secondary)",
+                      }}
+                    >
+                      {d === -1 ? "<" : ">"}
+                    </button>
+                  ))}
+                  <button
+                    onClick={() =>
+                      onPersist({
+                        hidden: toggleHidden(pref?.hidden ?? [], title),
+                        order: pref?.order ?? [],
+                      })
+                    }
+                    className="text-[9px] px-1"
+                    style={{
+                      backgroundColor: "var(--color-surface)",
+                      border: "1px solid var(--color-border)",
+                      color: hiddenSet.has(title)
+                        ? "var(--color-ok)"
+                        : "var(--color-warn)",
+                    }}
+                  >
+                    {hiddenSet.has(title) ? "show" : "hide"}
+                  </button>
+                </div>
+              )}
               <div
                 className="text-[10px] uppercase tracking-wider mb-0.5"
                 style={{ color: "var(--color-text-muted)" }}
@@ -416,7 +483,8 @@ const ExecutiveSummary = memo(function ExecutiveSummary({
                 {formatMetric(m)}
               </div>
             </div>
-          ))}
+          ));
+        })()}
       </div>
     </div>
   );
@@ -551,6 +619,51 @@ export default function DashboardPage({
   // per-component commands, and push-telemetry grouping. As a query
   // it deduplicates, cancels on target switch, and pauses when the
   // tab is hidden -- this poll drives real device commands.
+  // Card arrangement preference (per target). Customize mode shows
+  // hidden cards greyed with controls; normal mode applies the pref.
+  const [customizing, setCustomizing] = useState(false);
+  const prefScope = `target:${selectedTarget}`;
+  const cardPrefQuery = usePref<CardArrangement>(
+    prefScope,
+    "dashboard",
+    "cards",
+  );
+  const execPrefQuery = usePref<CardArrangement>(
+    prefScope,
+    "dashboard",
+    "exec-tiles",
+  );
+  const execPref = execPrefQuery.data ?? null;
+  const persistExecTiles = (next: CardArrangement) => {
+    queryClient.setQueryData(
+      ["pref", prefScope, "dashboard", "exec-tiles"],
+      next,
+    );
+    savePref(prefScope, "dashboard", "exec-tiles", next).catch(() => {
+      execPrefQuery.refetch();
+    });
+  };
+  const cardPref = cardPrefQuery.data ?? null;
+  const persistCards = (next: CardArrangement) => {
+    queryClient.setQueryData(["pref", prefScope, "dashboard", "cards"], next);
+    savePref(prefScope, "dashboard", "cards", next).catch(() => {
+      cardPrefQuery.refetch();
+    });
+  };
+  const resetCards = () => {
+    queryClient.setQueryData(["pref", prefScope, "dashboard", "cards"], null);
+    queryClient.setQueryData(
+      ["pref", prefScope, "dashboard", "exec-tiles"],
+      null,
+    );
+    deletePref(prefScope, "dashboard", "cards").catch(() => {
+      cardPrefQuery.refetch();
+    });
+    deletePref(prefScope, "dashboard", "exec-tiles").catch(() => {
+      execPrefQuery.refetch();
+    });
+  };
+
   const badRules = useMemo(
     () =>
       new Set<string>(
@@ -674,18 +787,121 @@ export default function DashboardPage({
       )}
 
       {/* Executive Summary (always present when connected) */}
-      {isConnected && execSummary && <ExecutiveSummary metrics={execSummary} />}
+      {isConnected && execSummary && (
+        <ExecutiveSummary
+          metrics={execSummary}
+          pref={execPref}
+          customizing={customizing}
+          onPersist={persistExecTiles}
+        />
+      )}
 
       {/* Pipeline counters (present whenever the backend knows the target) */}
       {pipeline && <PipelineSummary m={pipeline} />}
 
       {/* Component Health Cards */}
       {isConnected && healthCards.length > 0 ? (
-        <div className="grid grid-cols-2 gap-3 mb-5">
-          {healthCards.map((card) => (
-            <MetricCard key={card.title} card={card} />
-          ))}
-        </div>
+        <>
+          <div className="flex items-center justify-end gap-2 mb-2">
+            {customizing && (cardPref || execPref) && (
+              <button
+                onClick={resetCards}
+                className="text-xs px-2 py-1"
+                style={{
+                  color: "var(--color-text-muted)",
+                  backgroundColor: "transparent",
+                  border: "1px solid var(--color-border)",
+                }}
+              >
+                Reset to defaults
+              </button>
+            )}
+            <button
+              onClick={() => setCustomizing((c) => !c)}
+              className="text-xs px-2 py-1"
+              style={{
+                color: customizing
+                  ? "var(--color-accent)"
+                  : "var(--color-text-muted)",
+                backgroundColor: "transparent",
+                border: "1px solid var(--color-border)",
+              }}
+            >
+              {customizing ? "Done" : "Customize"}
+            </button>
+          </div>
+          <div className="grid grid-cols-2 gap-3 mb-5">
+            {arrangeCards(healthCards, cardPref, customizing).map((card) => {
+              const isHidden = (cardPref?.hidden ?? []).includes(card.title);
+              const allTitles = healthCards.map((c) => c.title);
+              return (
+                <div
+                  key={card.title}
+                  style={
+                    customizing && isHidden ? { opacity: 0.35 } : undefined
+                  }
+                >
+                  {customizing && (
+                    <div className="flex items-center gap-1 mb-1">
+                      <span
+                        className="text-[10px] flex-1 truncate"
+                        style={{ color: "var(--color-text-muted)" }}
+                      >
+                        {card.title}
+                      </span>
+                      {([-1, 1] as const).map((d) => (
+                        <button
+                          key={d}
+                          onClick={() =>
+                            persistCards({
+                              hidden: cardPref?.hidden ?? [],
+                              order: moveTitle(
+                                cardPref?.order ?? [],
+                                allTitles,
+                                card.title,
+                                d,
+                              ),
+                            })
+                          }
+                          className="text-[10px] px-1.5"
+                          style={{
+                            backgroundColor: "var(--color-elevated)",
+                            border: "1px solid var(--color-border)",
+                            color: "var(--color-text-secondary)",
+                          }}
+                        >
+                          {d === -1 ? "<" : ">"}
+                        </button>
+                      ))}
+                      <button
+                        onClick={() =>
+                          persistCards({
+                            hidden: toggleHidden(
+                              cardPref?.hidden ?? [],
+                              card.title,
+                            ),
+                            order: cardPref?.order ?? [],
+                          })
+                        }
+                        className="text-[10px] px-1.5"
+                        style={{
+                          backgroundColor: "var(--color-elevated)",
+                          border: "1px solid var(--color-border)",
+                          color: isHidden
+                            ? "var(--color-ok)"
+                            : "var(--color-warn)",
+                        }}
+                      >
+                        {isHidden ? "Show" : "Hide"}
+                      </button>
+                    </div>
+                  )}
+                  <MetricCard card={card} />
+                </div>
+              );
+            })}
+          </div>
+        </>
       ) : !isConnected ? (
         <div
           className="rounded-lg p-8 mb-5 text-center text-sm"

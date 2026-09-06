@@ -307,6 +307,12 @@ GET    /api/targets/{id}/telemetry/csv
 GET    /api/telemetry/stats                      # totals, cap, net fill rate, time-to-cap projection
 POST   /api/telemetry/downsample
 
+# Operator Preferences (display policy; per target or global)
+GET    /api/prefs/{scope}/{kind}                 # scope: global | target:{id}
+GET    /api/prefs/{scope}/{kind}/{name}
+PUT    /api/prefs/{scope}/{kind}/{name}          # JSON value, 32KB cap
+DELETE /api/prefs/{scope}/{kind}/{name}
+
 # Telemetry Layouts
 GET    /api/targets/{id}/telemetry/layouts
 POST   /api/targets/{id}/telemetry/layouts/save

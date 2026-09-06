@@ -613,6 +613,23 @@ async fn upload_file(
         .decode(&body.content_base64)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid base64: {}", e)))?;
 
+    // RTS destinations get the author-time sequence check.
+    if body.remote_path.contains("rts/") {
+        let dicts = {
+            state
+                .read()
+                .await
+                .targets
+                .get(&id)
+                .map(|t| t.struct_dicts.clone())
+        };
+        if let Some(dicts) = dicts {
+            if let Err(reason) = crate::core::sequence::validate_rts_upload(&dicts, &data) {
+                return Err((StatusCode::UNPROCESSABLE_ENTITY, reason));
+            }
+        }
+    }
+
     let detail = format!("path={} bytes={}", body.remote_path, data.len());
     let ip_str = addr.ip().to_string();
 
@@ -1739,6 +1756,110 @@ async fn tprm_verify_staged(
         "declared_layout_hash": format!("0x{:08X}", v.declared_layout_hash),
         "declared_payload_crc": format!("0x{:08X}", v.declared_payload_crc),
     })))
+}
+
+/// Guard a preference key triple. Scope is "global" or a live
+/// "target:<id>"; kind and name are short slug identifiers. Bounded
+/// so junk scopes cannot pile rows into the shared database file.
+async fn validate_pref_key(
+    state: &AppState,
+    scope: &str,
+    kind: &str,
+    name: &str,
+) -> Result<(), (StatusCode, String)> {
+    let slug_ok = |s: &str| {
+        !s.is_empty()
+            && s.len() <= 64
+            && s.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+    };
+    if !slug_ok(kind) || !slug_ok(name) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "kind and name must be short lowercase slugs".to_string(),
+        ));
+    }
+    if scope == "global" {
+        return Ok(());
+    }
+    if let Some(id) = scope.strip_prefix("target:") {
+        let st = state.read().await;
+        if st.targets.contains_key(id) {
+            return Ok(());
+        }
+        return Err((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)));
+    }
+    Err((
+        StatusCode::BAD_REQUEST,
+        "scope must be 'global' or 'target:<id>'".to_string(),
+    ))
+}
+
+async fn list_prefs(
+    State(state): State<AppState>,
+    Path((scope, kind)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    validate_pref_key(&state, &scope, &kind, "x").await?;
+    let db = { state.read().await.db.clone() };
+    let rows = db
+        .list_prefs(&scope, &kind)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+    let mut prefs = serde_json::Map::new();
+    for (name, value) in rows {
+        prefs.insert(
+            name,
+            serde_json::from_str(&value).unwrap_or(serde_json::Value::Null),
+        );
+    }
+    Ok(Json(serde_json::json!({ "prefs": prefs })))
+}
+
+async fn get_pref_value(
+    State(state): State<AppState>,
+    Path((scope, kind, name)): Path<(String, String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    validate_pref_key(&state, &scope, &kind, &name).await?;
+    let db = { state.read().await.db.clone() };
+    match db
+        .get_pref(&scope, &kind, &name)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?
+    {
+        Some(text) => Ok(Json(
+            serde_json::from_str(&text).unwrap_or(serde_json::Value::Null),
+        )),
+        None => Err((StatusCode::NOT_FOUND, "no such preference".to_string())),
+    }
+}
+
+async fn put_pref(
+    State(state): State<AppState>,
+    Path((scope, kind, name)): Path<(String, String, String)>,
+    Json(value): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    validate_pref_key(&state, &scope, &kind, &name).await?;
+    let text = serde_json::to_string(&value).unwrap_or_default();
+    if text.len() > 32 * 1024 {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "preference value exceeds 32KB".to_string(),
+        ));
+    }
+    let db = { state.read().await.db.clone() };
+    db.set_pref(&scope, &kind, &name, &text)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+    Ok(Json(serde_json::json!({ "saved": true })))
+}
+
+async fn delete_pref(
+    State(state): State<AppState>,
+    Path((scope, kind, name)): Path<(String, String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    validate_pref_key(&state, &scope, &kind, &name).await?;
+    let db = { state.read().await.db.clone() };
+    let existed = db
+        .delete_pref(&scope, &kind, &name)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("{}", e)))?;
+    Ok(Json(serde_json::json!({ "deleted": existed })))
 }
 
 /// Validate edited values against the dictionary's constraint rails
@@ -3213,6 +3334,11 @@ fn build_router(state: AppState, cors_origins: &[String], upload_max_mb: u32) ->
             post(tprm_verify_staged),
         )
         .route("/targets/{id}/tprm/staged", get(tprm_staged_digest))
+        .route("/prefs/{scope}/{kind}", get(list_prefs))
+        .route(
+            "/prefs/{scope}/{kind}/{name}",
+            get(get_pref_value).put(put_pref).delete(delete_pref),
+        )
         .route("/targets/{id}/registry", get(target_registry))
         .route("/targets/{id}/telemetry/live", get(telemetry_ws))
         .route("/targets/{id}/telemetry/history", get(telemetry_history))
