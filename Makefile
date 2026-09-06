@@ -122,7 +122,7 @@ hooks:
 ## cold cache. Run this manually before pushing or in CI.
 lint:
 	$(COMPOSE) run --rm -T dev bash -c \
-		'cd backend && cargo clippy --lib --bins -- -D warnings'
+		'cd backend && cargo clippy --all-targets -- -D warnings'
 	$(COMPOSE) run --rm -T dev bash -c \
 		'cd frontend && npx eslint . --max-warnings 200'
 
