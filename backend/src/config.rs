@@ -330,6 +330,28 @@ impl Default for StorageSection {
     }
 }
 
+/// Find the first local listen port claimed by two target
+/// definitions. Distinct targets binding one port cannot both hear
+/// their telemetry, and the loser would only find out at connect
+/// time -- so this is a boot refusal, same discipline as protocol
+/// and carrier typos.
+pub fn duplicate_listen_port(targets: &[TargetSection]) -> Option<(u16, &str, &str)> {
+    let mut seen: Vec<(u16, &str)> = Vec::new();
+    for t in targets {
+        if t.carrier != "udp" {
+            continue;
+        }
+        let Some(port) = t.udp_listen_port else {
+            continue;
+        };
+        if let Some((_, first)) = seen.iter().find(|(p, _)| *p == port) {
+            return Some((port, first, t.name.as_str()));
+        }
+        seen.push((port, t.name.as_str()));
+    }
+    None
+}
+
 /* ----------------------------- Loading ----------------------------- */
 
 /// Parse a TOML config file from disk into a `ServerConfig`. Returns
@@ -338,4 +360,55 @@ pub fn load(path: &Path) -> Result<ServerConfig, String> {
     let content =
         std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path.display(), e))?;
     toml::from_str(&content).map_err(|e| format!("parse error: {}", e))
+}
+
+/* ----------------------------- Tests ----------------------------- */
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(name: &str, carrier: &str, listen: Option<u16>) -> TargetSection {
+        TargetSection {
+            name: name.to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 9000,
+            protocol: "ccsds-spp".to_string(),
+            health_nonzero_bad: Vec::new(),
+            apid_map: None,
+            raw_uid: None,
+            carrier: carrier.to_string(),
+            udp_listen_port: listen,
+            arm_hex: Vec::new(),
+            manifest: None,
+            structs_dir: None,
+            telemetry_config: None,
+            commands_config: None,
+            auto_connect: false,
+        }
+    }
+
+    /// @test Two UDP targets on one listen port are named in the
+    /// refusal; distinct ports, TCP targets, and portless entries
+    /// (caught separately at carrier validation) all pass.
+    #[test]
+    fn duplicate_listen_ports_are_refused_by_name() {
+        let dup = [
+            target("a", "udp", Some(2234)),
+            target("b", "tcp", None),
+            target("c", "udp", Some(2235)),
+            target("d", "udp", Some(2234)),
+        ];
+        assert_eq!(duplicate_listen_port(&dup), Some((2234, "a", "d")));
+
+        let ok = [
+            target("a", "udp", Some(2234)),
+            target("b", "udp", Some(2235)),
+            // TCP targets share nothing local; a port collision with
+            // a UDP listener is impossible across protocols here.
+            target("c", "tcp", None),
+            target("d", "udp", None),
+        ];
+        assert_eq!(duplicate_listen_port(&ok), None);
+    }
 }

@@ -3672,6 +3672,18 @@ async fn main() {
         Arc::new(StructDictionary::default())
     };
 
+    // Cross-target definition check: two targets binding one local
+    // listen port cannot both hear their telemetry, and the loser
+    // would only find out at connect time. Boot refusal instead.
+    if let Some((port, first, second)) = config::duplicate_listen_port(&config.targets) {
+        eprintln!(
+            "FATAL: targets '{}' and '{}' both declare udp_listen_port {}; \
+             distinct targets cannot share a local listen port",
+            first, second, port
+        );
+        std::process::exit(1);
+    }
+
     // Initialize targets with per-target or global struct dicts
     let mut targets = HashMap::new();
     for (i, tc) in config.targets.iter().enumerate() {
