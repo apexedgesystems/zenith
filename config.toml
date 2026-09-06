@@ -73,14 +73,14 @@ retention_hours = 24
 # raw_uid = "0x00D000"
 # structs_dir = "/data/targets/my-target/structs"
 
-# Target: local cFS cpu1 (dev; the flight/rig-cfs rig on the host
-# network). Commands go to CI_LAB via the compose gateway; TO_LAB
-# sends telemetry to 127.0.0.1:2234 on the host, which compose
-# publishes through to zenith's udp_listen_port. The arm bytes are
-# TO_LAB OUTPUT_ENABLE (CC=6, dest "127.0.0.1"), sent on connect.
+# Target: local cFS cpu1 (dev; the flight/rig-cfs rig). The whole
+# transport is this definition: udp carrier + ccsds-spp packets,
+# commands dialed out to CI_LAB at host:port, telemetry heard on
+# udp_listen_port, downlink armed on connect with TO_LAB
+# OUTPUT_ENABLE (CC=6, dest "127.0.0.1").
 [[targets]]
 name = "cFS cpu1"
-host = "172.21.0.1"
+host = "127.0.0.1"
 port = 1234
 protocol = "ccsds-spp"
 carrier = "udp"
@@ -92,11 +92,10 @@ auto_connect = false
 "0x083" = "0x00830000" # CFE_SB housekeeping
 "0x085" = "0x00850000" # CFE_TIME housekeeping
 
-# Target: Local SIL ops demo (dev only; 172.21.0.1 is the compose
-# network gateway, i.e. this host as seen from the zenith container)
+# Target: Local SIL ops demo (dev only)
 [[targets]]
 name = "Local SIL - Ops Demo"
-host = "172.21.0.1"
+host = "127.0.0.1"
 port = 9000
 # protocol = "aproto-slip"   # wire protocol (default; validated at boot)
 # health_nonzero_bad = [...]  # dashboard fields flagged bad when nonzero
@@ -144,7 +143,7 @@ commands_config = "/data/targets/thor-ops-demo-b/commands.json"
 # Target: Local SIL spec demo (dev only; published on host port 9002)
 [[targets]]
 name = "Local SIL - Spec Demo"
-host = "172.21.0.1"
+host = "127.0.0.1"
 port = 9002
 auto_connect = false
 manifest = "/data/targets/sil-spec-demo/app_manifest.json"
