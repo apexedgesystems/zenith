@@ -1,0 +1,10 @@
+# Deployment-owned companion to config.toml: whatever UDP-carrier
+# targets that file declares, the container runtime must let their
+# inbound telemetry datagrams through (compose merges this file into
+# docker-compose.yml automatically). The base compose file stays
+# target-neutral on purpose -- port numbers here mirror the
+# udp_listen_port values of the targets THIS deployment defines.
+services:
+  zenith:
+    ports:
+      - "2234:2234/udp" # "cFS cpu1" target's udp_listen_port

@@ -4,10 +4,11 @@ services:
     build: .
     ports:
       - "8080:8080"
-      # UDP-carrier telemetry ingress: targets on the host network
-      # send datagrams to the host's port, published through to the
-      # same port in the container (udp_listen_port in config.toml).
-      - "2234:2234/udp"
+      # UDP-carrier targets need their inbound telemetry port
+      # published (each udp_listen_port in config.toml). Those are
+      # deployment details, not product: declare them alongside your
+      # targets in docker-compose.override.yml, which compose merges
+      # automatically -- see the example file.
     volumes:
       - zenith-data:/var/lib/zenith
       - ./config.toml:/etc/zenith/config.toml:ro
