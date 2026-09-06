@@ -12,7 +12,8 @@
 # ------------------------------------------------------------------------------
 # Stage 1: Rust backend
 # ------------------------------------------------------------------------------
-FROM rust:bookworm AS backend
+# Pinned to match docker/dev.Dockerfile -- one toolchain everywhere.
+FROM rust:1.97-bookworm AS backend
 
 WORKDIR /build
 COPY Cargo.toml Cargo.toml
