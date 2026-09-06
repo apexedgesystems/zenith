@@ -11,7 +11,7 @@
 # images sit cached, so the same Dockerfile yields different clippy
 # versions. Bump deliberately (dependabot proposes updates); keep in
 # step with the backend stage in ../Dockerfile.
-FROM rust:1.97-bookworm
+FROM rust:1.98-bookworm
 
 # Install Node.js 22
 RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
