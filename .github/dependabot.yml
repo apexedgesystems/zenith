@@ -22,8 +22,14 @@ updates:
     cooldown:
       default-days: 7
     groups:
+      # Minor+patch only: majors fall out of the group and arrive as
+      # individual PRs, each proving itself against CI alone. Keeps
+      # us current without letting one incompatible major (or a
+      # peer conflict dependabot never cross-solves) sink a bundle
+      # of routine updates.
       cargo:
         patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   - package-ecosystem: npm
     directory: /frontend
@@ -32,8 +38,13 @@ updates:
     cooldown:
       default-days: 7
     groups:
+      # Same minor+patch scoping as cargo, and for the same reason:
+      # the first grouped npm PR died on an unsolvable peer conflict
+      # (typescript 7 vs typescript-eslint <6.1.0) that took 18
+      # innocent updates down with it.
       npm:
         patterns: ["*"]
+        update-types: ["minor", "patch"]
 
   # The pinned rust/node/debian base images: bumps arrive as PRs
   # instead of silently via floating tags.
