@@ -13,7 +13,7 @@
 # Stage 1: Rust backend
 # ------------------------------------------------------------------------------
 # Pinned to match docker/dev.Dockerfile -- one toolchain everywhere.
-FROM rust:1.97-bookworm AS backend
+FROM rust:1.98-bookworm AS backend
 
 WORKDIR /build
 COPY Cargo.toml Cargo.toml
@@ -24,7 +24,7 @@ RUN cargo build --release
 # ------------------------------------------------------------------------------
 # Stage 2: React frontend
 # ------------------------------------------------------------------------------
-FROM node:22-bookworm-slim AS frontend
+FROM node:26-bookworm-slim AS frontend
 
 WORKDIR /build
 COPY frontend/package.json frontend/package-lock.json* ./

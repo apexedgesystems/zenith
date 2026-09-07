@@ -11,10 +11,13 @@
 # images sit cached, so the same Dockerfile yields different clippy
 # versions. Bump deliberately (dependabot proposes updates); keep in
 # step with the backend stage in ../Dockerfile.
-FROM rust:1.97-bookworm
+FROM rust:1.98-bookworm
 
-# Install Node.js 22
-RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && \
+# Install Node.js 26 -- keep in step with the frontend stage in
+# ../Dockerfile (node:26-bookworm-slim): the node that runs tests
+# must be the node that builds the shipped bundle. Dependabot bumps
+# the prod stage; this line moves with it by hand.
+RUN curl -fsSL https://deb.nodesource.com/setup_26.x | bash - && \
     apt-get install -y --no-install-recommends nodejs && \
     rm -rf /var/lib/apt/lists/*
 
