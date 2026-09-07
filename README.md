@@ -252,7 +252,7 @@ host = "127.0.0.1"             # Commands dial out to CI_LAB here
 port = 1234
 protocol = "ccsds-spp"         # Space packets...
 carrier = "udp"                # ...as datagrams (default: "tcp")
-udp_listen_port = 2234         # Local port TO_LAB pushes telemetry to
+listen_port = 2234             # Local port TO_LAB pushes telemetry to
 connect_init = "/data/targets/cfs-cpu1/on_connect.json"
                                # Named init steps sent on connect
                                # (e.g. enable the downlink); generated
@@ -266,8 +266,11 @@ telemetry_config = "/data/targets/cfs-cpu1/telemetry.json"
 A target's definition fully describes its transport: the protocol
 (`aproto-slip`, `ccsds-spp`, `slip+ccsds-spp`, `raw-slip`), the
 carrier (`tcp` dials host:port and reads the stream; `udp` binds
-`udp_listen_port` for inbound datagrams and sends outbound ones to
-host:port), and an optional `connect_init` sequence -- a generated
+`listen_port` for inbound datagrams and sends outbound ones to
+host:port; `tcp-listen` accepts the target dialing in to
+`listen_port` -- the push-to-ground pattern, with the connected
+state tracking the live session), and an optional `connect_init`
+sequence -- a generated
 on_connect.json of named steps (bytes + per-step delays) sent in
 order on every connect, for stacks that emit nothing until a ground
 message enables their downlink. Steps are opaque bytes to zenith;

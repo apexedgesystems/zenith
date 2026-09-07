@@ -43,6 +43,12 @@ pub enum Carrier {
     /// OS-assigned, useful only when the peer replies to the source
     /// address.
     Udp { listen_port: u16 },
+    /// Accept the target dialing IN to listen_port -- the
+    /// push-to-ground pattern: some flight stacks initiate the
+    /// connection to their ground system. One session at a time;
+    /// when the peer drops, the link goes back to accepting, and
+    /// the connected flag tracks a live session, not the listener.
+    TcpListen { listen_port: u16 },
 }
 
 /// What to build a pipeline from -- config data, kept so each connect
@@ -339,6 +345,95 @@ impl StreamLink {
         let gen_flag = self.generation.clone();
         let proto_name = self.protocol.name();
 
+        // Listen-mode: bind now, serve sessions as the target dials
+        // in. Structurally inverted from the dial carriers (sessions
+        // arrive over time, each with a fresh pipeline and its own
+        // init pass), so it owns its whole lifecycle here.
+        if let Carrier::TcpListen { listen_port } = self.carrier {
+            let listener = tokio::net::TcpListener::bind(("0.0.0.0", listen_port))
+                .await
+                .map_err(ClientError::Connect)?;
+            let spec = self.spec.clone();
+            let init = self.init.clone();
+            let push_tx = self.push_tlm_tx.clone();
+            let handle = tokio::spawn(async move {
+                loop {
+                    let (stream, peer) = match listener.accept().await {
+                        Ok(x) => x,
+                        Err(e) => {
+                            tracing::error!("{proto_name} accept error: {e}");
+                            if gen_flag.load(Ordering::Acquire) == gen {
+                                conn_flag.store(false, Ordering::Release);
+                            }
+                            break;
+                        }
+                    };
+                    let _ = stream.set_nodelay(true);
+                    tracing::info!("{proto_name} target dialed in from {peer}");
+                    if gen_flag.load(Ordering::Acquire) == gen {
+                        conn_flag.store(true, Ordering::Release);
+                    } else {
+                        break;
+                    }
+                    // Fresh pipeline per session: no residue from a
+                    // dropped predecessor.
+                    let mut ingest = Ingest {
+                        pipeline: PacketPipeline::build(&spec),
+                        push_tx: push_tx.clone(),
+                        proto_name,
+                        last_warn: None,
+                    };
+                    let (mut rd, mut wr) = stream.into_split();
+                    // Init steps inline before reading: the session
+                    // is fresh and TCP buffers whatever the peer
+                    // sends meanwhile. A failed step drops the
+                    // session, not the listener.
+                    let mut init_ok = true;
+                    for step in &init {
+                        if step.delay_ms > 0 {
+                            tokio::time::sleep(Duration::from_millis(step.delay_ms)).await;
+                        }
+                        if let Err(e) = wr.write_all(&step.bytes).await {
+                            tracing::error!(
+                                "{proto_name} init step '{}' failed: {e}; dropping session",
+                                step.name
+                            );
+                            init_ok = false;
+                            break;
+                        }
+                        tracing::info!("{proto_name} init step sent: {}", step.name);
+                    }
+                    if init_ok {
+                        let mut buf = vec![0u8; 65536];
+                        loop {
+                            match rd.read(&mut buf).await {
+                                Ok(0) => {
+                                    tracing::info!("{proto_name} session closed by peer");
+                                    break;
+                                }
+                                Ok(n) => ingest.feed(&buf[..n]),
+                                Err(e) => {
+                                    tracing::error!("{proto_name} session read error: {e}");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if gen_flag.load(Ordering::Acquire) == gen {
+                        conn_flag.store(false, Ordering::Release);
+                    } else {
+                        break;
+                    }
+                }
+            });
+            self.reader_handle = Some(handle);
+            // The connected flag stays FALSE until a session
+            // attaches: it reports a live peer, not a bound
+            // listener.
+            tracing::info!("Listening ({proto_name}) on :{listen_port}");
+            return Ok(());
+        }
+
         let (reader_handle, sender) = match self.carrier {
             Carrier::Tcp => {
                 let stream = timeout(Duration::from_secs(5), TcpStream::connect(&addr))
@@ -410,6 +505,7 @@ impl StreamLink {
                     },
                 )
             }
+            Carrier::TcpListen { .. } => unreachable!("handled by the early return above"),
         };
 
         self.init_handle = spawn_init(
@@ -829,6 +925,78 @@ mod tests {
             !link.is_connected(),
             "link must report disconnected after an init step fails"
         );
+        link.disconnect();
+    }
+
+    /// @test The listen-mode carrier end to end, shaped like the
+    /// push-to-ground pattern: zenith binds and waits, the fake
+    /// deployment dials IN, receives the init step, and its
+    /// telemetry parses through the same SPP pipeline as every
+    /// other carrier. The connected flag tracks the live session --
+    /// false while merely listening, true after the peer attaches,
+    /// false again after it hangs up -- and a second session gets a
+    /// fresh pipeline (a packet split across the reconnect must NOT
+    /// reassemble from stale residue).
+    #[tokio::test]
+    async fn tcp_listen_serves_dialing_target() {
+        // Reserve a port the fake deployment can dial (bind + drop).
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        let (push_tx, mut push_rx) = broadcast::channel(16);
+        let mut link = StreamLink::new(
+            Protocol::CcsdsSpp,
+            PipelineSpec::Spp {
+                apid_map: HashMap::from([(0x0D0u16, 0x00D000u32)]),
+            },
+            Carrier::TcpListen { listen_port: port },
+            vec![InitStep {
+                name: "hello".into(),
+                delay_ms: 0,
+                bytes: b"HI".to_vec(),
+            }],
+            push_tx,
+        );
+        link.connect("0.0.0.0", 0).await.unwrap();
+        assert!(!link.is_connected(), "listening is not connected");
+
+        // Session 1: dial in, read the init step, then hang up
+        // mid-packet -- leaving a header that PROMISES 4000 more
+        // bytes. A pipeline that survived into the next session
+        // would swallow everything into that pending frame.
+        let mut s1 = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let mut greet = [0u8; 2];
+        tokio::io::AsyncReadExt::read_exact(&mut s1, &mut greet)
+            .await
+            .unwrap();
+        assert_eq!(&greet, b"HI", "init step reaches the dialing target");
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !link.is_connected() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(link.is_connected(), "session attach flips the flag");
+        let giant = ccsds_spp::pack(0x0D0, 1, &vec![0u8; 4000]);
+        s1.write_all(&giant[..6]).await.unwrap();
+        drop(s1);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while link.is_connected() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(!link.is_connected(), "peer hangup clears the flag");
+
+        // Session 2: a whole real packet. It only arrives if the
+        // pipeline was rebuilt fresh -- stale residue would still be
+        // waiting on session 1's promised 4000 bytes.
+        let wire = ccsds_spp::pack(0x0D0, 2, &[1, 2, 3, 4]);
+        let mut s2 = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        tokio::io::AsyncReadExt::read_exact(&mut s2, &mut greet)
+            .await
+            .unwrap();
+        s2.write_all(&wire).await.unwrap();
+        let pkt = recv_one(&mut push_rx).await;
+        assert_eq!(pkt.full_uid, 0x00D000);
+        assert_eq!(pkt.payload, vec![1, 2, 3, 4]);
         link.disconnect();
     }
 

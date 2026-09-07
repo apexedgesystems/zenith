@@ -322,7 +322,10 @@ fn carrier_from_config(
                     .into()),
             }
         }
-        other => Err(format!("unknown carrier '{}' (supported: tcp, udp)", other)),
+        other => Err(format!(
+            "unknown carrier '{}' (supported: tcp, udp, tcp-listen)",
+            other
+        )),
     }
 }
 
@@ -2703,7 +2706,7 @@ async fn add_target(
         apid_map: None,
         raw_uid: None,
         carrier: "tcp".to_string(),
-        udp_listen_port: None,
+        listen_port: None,
         connect_init: None,
         auto_connect: false,
     };

@@ -117,7 +117,7 @@ commands_config = "/data/targets/sil-spec-demo/commands.json"
 # Target: local cFS cpu1 (dev; the flight/rig-cfs rig). The whole
 # transport is this definition: udp carrier + ccsds-spp packets,
 # commands dialed out to CI_LAB at host:port, telemetry heard on
-# udp_listen_port, downlink armed on connect by the generated
+# listen_port, downlink armed on connect by the generated
 # connect-init sequence (named, audited steps).
 [[targets]]
 name = "cFS cpu1"
@@ -125,7 +125,7 @@ host = "127.0.0.1"
 port = 1234
 protocol = "ccsds-spp"
 carrier = "udp"
-udp_listen_port = 2234
+listen_port = 2234
 auto_connect = false
 manifest = "/data/targets/cfs-cpu1/app_manifest.json"
 connect_init = "/data/targets/cfs-cpu1/on_connect.json"
