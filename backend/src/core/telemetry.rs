@@ -55,6 +55,8 @@ struct CachedField {
     /// "{component_name}.{field_name}" stored once, cloned per sample.
     channel: Arc<str>,
     field: FieldDef,
+    /// From the owning dictionary's byte_order stamp.
+    big_endian: bool,
 }
 
 /// Pre-built lookup table for decoding push telemetry using struct definitions.
@@ -95,7 +97,7 @@ impl TelemetryDecoder {
             let bn = base_name.to_lowercase();
 
             // Collect all matching structs, sorted by priority (OUTPUT first)
-            let mut candidates: Vec<(u8, usize, Vec<FieldDef>)> = Vec::new();
+            let mut candidates: Vec<(u8, usize, Vec<FieldDef>, bool)> = Vec::new();
 
             let matching_dicts: Vec<&crate::core::config_manager::ComponentDict> = match dict_key {
                 // Exact join on the manifest's dataFile stem.
@@ -117,12 +119,13 @@ impl TelemetryDecoder {
             };
 
             for dict in matching_dicts {
+                let big_endian = dict.big_endian();
                 for sdef in dict.structs.values() {
                     if sdef.fields.is_empty() || sdef.size == 0 {
                         continue;
                     }
                     let prio = category_priority(&sdef.category);
-                    candidates.push((prio, sdef.size, sdef.fields.clone()));
+                    candidates.push((prio, sdef.size, sdef.fields.clone(), big_endian));
                 }
             }
 
@@ -131,7 +134,7 @@ impl TelemetryDecoder {
 
             let claimed = claimed_fields.entry(uid).or_default();
 
-            for (prio, size, mut fields) in candidates {
+            for (prio, size, mut fields, big_endian) in candidates {
                 let before = fields.len();
                 // Remove fields already claimed by a higher-priority struct
                 fields.retain(|f| !claimed.contains(&f.name));
@@ -165,7 +168,11 @@ impl TelemetryDecoder {
                         claimed.insert(f.name.clone());
                         let channel: Arc<str> =
                             Arc::from(format!("{}.{}", comp_name, f.name).as_str());
-                        CachedField { channel, field: f }
+                        CachedField {
+                            channel,
+                            field: f,
+                            big_endian,
+                        }
                     })
                     .collect();
 
@@ -217,7 +224,7 @@ impl TelemetryDecoder {
             if cf.field.offset + cf.field.size > data.len() {
                 continue;
             }
-            if let Some(v) = decode_numeric(data, &cf.field) {
+            if let Some(v) = decode_numeric(data, &cf.field, cf.big_endian) {
                 samples.push(TelemetrySample {
                     target_id: Arc::clone(target_id),
                     timestamp_ms,
@@ -277,35 +284,31 @@ impl TelemetryDecoder {
 }
 
 /// Decode a single numeric field from raw bytes, returning f64.
-fn decode_numeric(data: &[u8], field: &FieldDef) -> Option<f64> {
-    let off = field.offset;
+/// Decode one numeric field honoring the dictionary's declared byte
+/// order. Wire values arrive in whatever order the producing build
+/// serialized them (the generator stamps it); the wrong assumption
+/// here decodes plausible-looking garbage, which is why the flag is
+/// per-dictionary evidence, not a global.
+fn decode_numeric(data: &[u8], field: &FieldDef, big_endian: bool) -> Option<f64> {
+    let bytes = data.get(field.offset..field.offset + field.size)?;
+    // Normalize to little-endian once; single-byte types are
+    // order-free.
+    let mut buf = [0u8; 8];
+    buf[..bytes.len()].copy_from_slice(bytes);
+    if big_endian {
+        buf[..bytes.len()].reverse();
+    }
     match (field.field_type.as_str(), field.size) {
-        ("uint", 1) => Some(data[off] as f64),
-        ("uint", 2) => Some(u16::from_le_bytes([data[off], data[off + 1]]) as f64),
-        ("uint", 4) => {
-            Some(
-                u32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]) as f64,
-            )
-        }
-        ("uint", 8) => Some(u64::from_le_bytes([
-            data[off],
-            data[off + 1],
-            data[off + 2],
-            data[off + 3],
-            data[off + 4],
-            data[off + 5],
-            data[off + 6],
-            data[off + 7],
-        ]) as f64),
-        ("int", 1) => Some(data[off] as i8 as f64),
-        ("int", 2) => Some(i16::from_le_bytes([data[off], data[off + 1]]) as f64),
-        ("int", 4) => {
-            Some(
-                i32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]) as f64,
-            )
-        }
+        ("uint", 1) => Some(buf[0] as f64),
+        ("uint", 2) => Some(u16::from_le_bytes([buf[0], buf[1]]) as f64),
+        ("uint", 4) => Some(u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as f64),
+        ("uint", 8) => Some(u64::from_le_bytes(buf) as f64),
+        ("int", 1) => Some(buf[0] as i8 as f64),
+        ("int", 2) => Some(i16::from_le_bytes([buf[0], buf[1]]) as f64),
+        ("int", 4) => Some(i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as f64),
+        ("int", 8) => Some(i64::from_le_bytes(buf) as f64),
         ("float", 4) => {
-            let v = f32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+            let v = f32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
             if v.is_finite() {
                 Some(v as f64)
             } else {
@@ -313,23 +316,14 @@ fn decode_numeric(data: &[u8], field: &FieldDef) -> Option<f64> {
             }
         }
         ("float", 8) => {
-            let v = f64::from_le_bytes([
-                data[off],
-                data[off + 1],
-                data[off + 2],
-                data[off + 3],
-                data[off + 4],
-                data[off + 5],
-                data[off + 6],
-                data[off + 7],
-            ]);
+            let v = f64::from_le_bytes(buf);
             if v.is_finite() {
                 Some(v)
             } else {
                 None
             }
         }
-        ("bool", 1) => Some(if data[off] != 0 { 1.0 } else { 0.0 }),
+        ("bool", 1) => Some(if buf[0] != 0 { 1.0 } else { 0.0 }),
         _ => None,
     }
 }
@@ -478,6 +472,7 @@ mod tests {
         };
         let comp = ComponentDict {
             component: "WaveGenerator".to_string(),
+            byte_order: None,
             structs: HashMap::from([
                 (
                     "Output".to_string(),
@@ -542,6 +537,7 @@ mod tests {
         };
         let make = |comp: &str, field: &str| ComponentDict {
             component: comp.to_string(),
+            byte_order: None,
             structs: HashMap::from([(
                 "Output".to_string(),
                 StructDef {
@@ -576,6 +572,92 @@ mod tests {
             !names.iter().any(|n| n.contains("imposter")),
             "fuzzy-matched imposter dict must not decode: {names:?}"
         );
+    }
+
+    /// @test The dictionary's byte_order stamp drives value decode:
+    /// the same field specs decode big-endian wire bytes when the
+    /// producing dictionary says "be" -- across uint, int, and float
+    /// -- and the unstamped default remains little-endian (every
+    /// existing dictionary is valid unchanged).
+    #[test]
+    fn byte_order_stamp_drives_decode() {
+        let f = |name: &str, ftype: &str, off: usize, size: usize| FieldDef {
+            name: name.to_string(),
+            field_type: ftype.to_string(),
+            offset: off,
+            size,
+            value: serde_json::Value::Null,
+            element_type: None,
+            dims: None,
+            constraints: None,
+            struct_ref: None,
+        };
+        let comp = |byte_order: Option<&str>| ComponentDict {
+            component: "Imu".to_string(),
+            byte_order: byte_order.map(String::from),
+            structs: HashMap::from([(
+                "Output".to_string(),
+                StructDef {
+                    category: "OUTPUT".to_string(),
+                    size: 10,
+                    opcode: None,
+                    fields: vec![
+                        f("count", "uint", 0, 4),
+                        f("temp", "float", 4, 4),
+                        f("bias", "int", 8, 2),
+                    ],
+                    layout_hash: None,
+                    canonical_spec: None,
+                    packed: None,
+                },
+            )]),
+            enums: HashMap::new(),
+            capabilities: Vec::new(),
+        };
+
+        // Big-endian wire bytes: count=258, temp=1.5, bias=-2.
+        let mut be_payload = Vec::new();
+        be_payload.extend_from_slice(&258u32.to_be_bytes());
+        be_payload.extend_from_slice(&1.5f32.to_be_bytes());
+        be_payload.extend_from_slice(&(-2i16).to_be_bytes());
+
+        for (stamp, payload, label) in [
+            (Some("be"), be_payload.clone(), "big-endian stamped"),
+            (
+                None,
+                {
+                    let mut p = Vec::new();
+                    p.extend_from_slice(&258u32.to_le_bytes());
+                    p.extend_from_slice(&1.5f32.to_le_bytes());
+                    p.extend_from_slice(&(-2i16).to_le_bytes());
+                    p
+                },
+                "unstamped default little-endian",
+            ),
+        ] {
+            let dict = StructDictionary {
+                components: HashMap::from([("Imu".to_string(), comp(stamp))]),
+            };
+            let decoder = TelemetryDecoder::new(&dict, &[(0x42, "Imu", Some("Imu"))]);
+            let samples = decoder.decode(
+                &target_id(),
+                1000,
+                &PushTelemetryPacket {
+                    full_uid: 0x42,
+                    payload,
+                },
+            );
+            let get = |n: &str| {
+                samples
+                    .iter()
+                    .find(|s| &*s.channel == n)
+                    .unwrap_or_else(|| panic!("{label}: missing {n}"))
+                    .value
+            };
+            assert_eq!(get("Imu.count"), 258.0, "{label}");
+            assert!((get("Imu.temp") - 1.5).abs() < 1e-6, "{label}");
+            assert_eq!(get("Imu.bias"), -2.0, "{label}");
+        }
     }
 
     /// @test 8-byte WaveGen OUTPUT struct decodes into the two
@@ -678,6 +760,7 @@ mod tests {
         };
         let comp = ComponentDict {
             component: "X".to_string(),
+            byte_order: None,
             structs: HashMap::from([(
                 "S".to_string(),
                 StructDef {

@@ -471,6 +471,7 @@ mod tests {
         };
         let comp = ComponentDict {
             component: "WaveGenerator".to_string(),
+            byte_order: None,
             structs: std::collections::HashMap::from([(
                 "Output".to_string(),
                 StructDef {

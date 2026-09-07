@@ -126,6 +126,14 @@ impl StructDef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComponentDict {
     pub component: String,
+    /// Byte order of payload field values AS THEY ARRIVE at this
+    /// system's boundary: "le" (default) or "be". Stamped by the
+    /// producing generator from evidence -- an ELF's own ident
+    /// byte, a serialization spec -- never hand-set. Describes the
+    /// wire, not the target CPU: a boundary proxy that normalizes
+    /// order changes what gets stamped.
+    #[serde(default)]
+    pub byte_order: Option<String>,
     #[serde(default)]
     pub structs: HashMap<String, StructDef>,
     #[serde(default)]
@@ -135,6 +143,13 @@ pub struct ComponentDict {
     /// on older dictionaries; treated as empty.
     #[serde(default)]
     pub capabilities: Vec<String>,
+}
+
+impl ComponentDict {
+    /// True when this dictionary's payload values are big-endian.
+    pub fn big_endian(&self) -> bool {
+        matches!(self.byte_order.as_deref(), Some("be"))
+    }
 }
 
 /// Inline a struct's nested fields: a `type = "nested"` field with a
@@ -998,6 +1013,7 @@ mod nested_tests {
 
         let dict = ComponentDict {
             component: "C".to_string(),
+            byte_order: None,
             structs: HashMap::from([
                 ("Sub".to_string(), sub),
                 ("Deep".to_string(), deep),

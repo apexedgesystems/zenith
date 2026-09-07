@@ -79,6 +79,11 @@ def main() -> None:
         r = results[e["component"]]
         dict_json = {
             "component": e["component"],
+            # Stamped from the same binary the layouts come from: the
+            # ELF ident declares its own byte order (EI_DATA), so a
+            # big-endian flight build generates correct dictionaries
+            # with no configuration.
+            "byte_order": elf_byte_order(e["elf"]),
             "structs": {
                 "Housekeeping": {
                     "category": "TELEMETRY",
@@ -160,6 +165,17 @@ def main() -> None:
     print("\napid_map for config.toml:")
     for e in spec["entries"]:
         print(f'"{e["apid"]}" = "{e["uid"]}" # {e["name"]}')
+
+
+def elf_byte_order(elf: str) -> str:
+    """Read the ELF ident's EI_DATA byte: 1 = little-endian, 2 = big."""
+    with open(elf, "rb") as f:
+        ident = f.read(6)
+    if len(ident) < 6 or ident[:4] != b"\x7fELF":
+        sys.exit(f"{elf}: not an ELF file")
+    if ident[5] == 2:
+        return "be"
+    return "le"
 
 
 def cmd_packet_hex(step: dict) -> str:
