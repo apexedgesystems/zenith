@@ -3814,10 +3814,24 @@ async fn main() {
             eprintln!("FATAL: target '{}': {}", tc.name, e);
             std::process::exit(1);
         }
-        // Connect-time init sequence: a broken file means every
-        // connect comes up half-armed, so it refuses boot like any
-        // other definition bug (contrast the display-only artifacts
-        // above, which degrade to warnings).
+        // Connect-time init sequence: stream links only, for now.
+        // The APROTO family's connect-time behavior belongs to its
+        // command machine (catalog-named commands with real ACK
+        // handling), not raw bytes injected under it -- until that
+        // exists, declaring the file there must refuse rather than
+        // load-log-audit a sequence that never gets sent.
+        if protocol == Protocol::AprotoSlip && tc.connect_init.is_some() {
+            eprintln!(
+                "FATAL: target '{}': connect_init is not supported on aproto-slip \
+                 (stream protocols only; the aproto command path owns connect-time behavior)",
+                tc.name
+            );
+            std::process::exit(1);
+        }
+        // A broken file means every connect comes up half-armed, so
+        // it refuses boot like any other definition bug (contrast
+        // the display-only artifacts above, which degrade to
+        // warnings).
         let connect_init =
             tc.connect_init.as_ref().map(
                 |path| match crate::core::config_manager::ConnectInit::load(std::path::Path::new(
