@@ -179,9 +179,9 @@ pub struct TargetSection {
     pub raw_uid: Option<String>,
     /// Stream targets: how bytes reach zenith. "tcp" (default) dials
     /// host:port and reads the stream; "udp" binds `udp_listen_port`
-    /// for inbound telemetry datagrams and sends outbound (arm)
-    /// datagrams to host:port. aproto-slip is TCP-only; validated at
-    /// boot.
+    /// for inbound telemetry datagrams and sends outbound
+    /// (init-step) datagrams to host:port. aproto-slip is TCP-only;
+    /// validated at boot.
     #[serde(default = "default_carrier")]
     pub carrier: String,
     /// UDP carrier: local port bound for inbound telemetry. Required
@@ -189,13 +189,12 @@ pub struct TargetSection {
     /// so an OS-assigned one would never hear it.
     #[serde(default)]
     pub udp_listen_port: Option<u16>,
-    /// Hex-encoded raw byte strings sent to the target on every
-    /// connect, in order, before telemetry reading starts -- the
-    /// downlink-arm step for targets that emit nothing until a
-    /// ground message enables their output. Protocol-neutral by
-    /// design: bytes on the carrier, not commands zenith interprets.
+    /// Path to this target's connect-time init sequence
+    /// (on_connect.json): named steps of raw bytes sent, in order
+    /// with optional delays, when the link comes up. Generated into
+    /// the target config directory like every other artifact there.
     #[serde(default)]
-    pub arm_hex: Vec<String>,
+    pub connect_init: Option<String>,
     #[serde(default)]
     pub manifest: Option<String>,
     #[serde(default)]
@@ -379,7 +378,7 @@ mod tests {
             raw_uid: None,
             carrier: carrier.to_string(),
             udp_listen_port: listen,
-            arm_hex: Vec::new(),
+            connect_init: None,
             manifest: None,
             structs_dir: None,
             telemetry_config: None,

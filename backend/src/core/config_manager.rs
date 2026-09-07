@@ -724,11 +724,156 @@ impl TelemetryConfig {
     }
 }
 
+/* ----------------------------- Connect Init ----------------------------- */
+
+/// A connect-time init sequence (`on_connect.json` in the target
+/// config directory): named steps of raw bytes sent to the target,
+/// in order, when its link comes up. The definition-level answer to
+/// targets that emit nothing until a ground message enables their
+/// downlink -- generator-emitted like every other artifact in the
+/// directory, and opaque to zenith (sent, never interpreted).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConnectInit {
+    pub on_connect: Vec<InitStepDef>,
+}
+
+/// One step: display/audit name, a wait before sending, hex bytes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InitStepDef {
+    pub name: String,
+    #[serde(default)]
+    pub delay_ms: u64,
+    pub hex: String,
+}
+
+/// Ceilings that keep a bad file from wedging a connect: a step may
+/// wait at most this long, and the whole sequence must fit in it too.
+pub const INIT_MAX_STEP_DELAY_MS: u64 = 60_000;
+/// Steps are commands, not file transfers.
+pub const INIT_MAX_STEP_BYTES: usize = 4096;
+/// A sequence is bring-up, not a mission plan.
+pub const INIT_MAX_STEPS: usize = 32;
+
+impl ConnectInit {
+    /// Load and validate. Errors (not warnings): a broken init file
+    /// means a link that comes up half-armed, so the target refuses
+    /// to load it at boot rather than discovering it at connect.
+    pub fn load(path: &Path) -> Result<Self, String> {
+        let content =
+            std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path.display(), e))?;
+        let init: ConnectInit =
+            serde_json::from_str(&content).map_err(|e| format!("{}: {}", path.display(), e))?;
+        init.validate()
+            .map_err(|e| format!("{}: {}", path.display(), e))?;
+        Ok(init)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.on_connect.len() > INIT_MAX_STEPS {
+            return Err(format!(
+                "{} steps exceeds the {} step ceiling",
+                self.on_connect.len(),
+                INIT_MAX_STEPS
+            ));
+        }
+        for (i, step) in self.on_connect.iter().enumerate() {
+            if step.name.trim().is_empty() {
+                return Err(format!("step {} has no name", i));
+            }
+            if step.delay_ms > INIT_MAX_STEP_DELAY_MS {
+                return Err(format!(
+                    "step '{}' delay {}ms exceeds the {}ms ceiling",
+                    step.name, step.delay_ms, INIT_MAX_STEP_DELAY_MS
+                ));
+            }
+            let bytes = hex::decode(step.hex.trim())
+                .map_err(|e| format!("step '{}' hex is invalid: {}", step.name, e))?;
+            if bytes.is_empty() {
+                return Err(format!("step '{}' has empty bytes", step.name));
+            }
+            if bytes.len() > INIT_MAX_STEP_BYTES {
+                return Err(format!(
+                    "step '{}' is {} bytes, over the {} byte ceiling",
+                    step.name,
+                    bytes.len(),
+                    INIT_MAX_STEP_BYTES
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The decoded (name, delay, bytes) sequence for the link layer.
+    /// Infallible after validate: load refuses files this would fail
+    /// on.
+    pub fn steps(&self) -> Vec<(String, u64, Vec<u8>)> {
+        self.on_connect
+            .iter()
+            .filter_map(|s| {
+                hex::decode(s.hex.trim())
+                    .ok()
+                    .map(|b| (s.name.clone(), s.delay_ms, b))
+            })
+            .collect()
+    }
+
+    /// Step names joined for audit details.
+    pub fn step_names(&self) -> String {
+        self.on_connect
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
 /* ----------------------------- Tests ----------------------------- */
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// @test Connect-init validation: a good sequence loads and
+    /// decodes to (name, delay, bytes); bad hex, an empty name, an
+    /// over-ceiling delay, and empty bytes each refuse with the
+    /// step named -- load-time refusals so a connect can never come
+    /// up half-armed on a broken file.
+    #[test]
+    fn connect_init_validates_each_rail() {
+        let parse = |j: &str| -> Result<ConnectInit, String> {
+            let ci: ConnectInit = serde_json::from_str(j).map_err(|e| e.to_string())?;
+            ci.validate()?;
+            Ok(ci)
+        };
+
+        let good = parse(
+            r#"{"on_connect": [
+                {"name": "enable", "hex": "1880c000"},
+                {"name": "subscribe", "delay_ms": 250, "hex": "aabb"}
+            ]}"#,
+        )
+        .unwrap();
+        let steps = good.steps();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(
+            steps[0],
+            ("enable".to_string(), 0, vec![0x18, 0x80, 0xC0, 0x00])
+        );
+        assert_eq!(steps[1], ("subscribe".to_string(), 250, vec![0xAA, 0xBB]));
+        assert_eq!(good.step_names(), "enable, subscribe");
+
+        let bad_hex = parse(r#"{"on_connect": [{"name": "x", "hex": "zz"}]}"#);
+        assert!(bad_hex.unwrap_err().contains("'x' hex is invalid"));
+
+        let no_name = parse(r#"{"on_connect": [{"name": "  ", "hex": "aa"}]}"#);
+        assert!(no_name.unwrap_err().contains("no name"));
+
+        let slow = parse(r#"{"on_connect": [{"name": "x", "delay_ms": 999999, "hex": "aa"}]}"#);
+        assert!(slow.unwrap_err().contains("ceiling"));
+
+        let empty = parse(r#"{"on_connect": [{"name": "x", "hex": ""}]}"#);
+        assert!(empty.unwrap_err().contains("empty bytes"));
+    }
 
     /// @test Constraint rails: min, max, step-from-min, and allowed
     /// sets each reject out-of-rail values and accept in-rail ones,

@@ -1,0 +1,9 @@
+{
+  "on_connect": [
+    {
+      "name": "Enable TO downlink",
+      "delay_ms": 0,
+      "hex": "1880c000001106003132372e302e302e3100000000000000"
+    }
+  ]
+}

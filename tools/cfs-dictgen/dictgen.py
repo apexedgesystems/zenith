@@ -128,9 +128,50 @@ def main() -> None:
         json.dump({"layouts": layouts}, f, indent=2)
         f.write("\n")
 
+    # Connect-time init sequence: the spec declares steps at command
+    # level (mid/cc/payload) and the generator packs the wire bytes,
+    # so nobody hand-hexes packets. Raw "hex" is accepted for bytes
+    # the generator has no builder for.
+    if "on_connect" in spec:
+        steps = []
+        for step in spec["on_connect"]:
+            out_step = {"name": step["name"], "delay_ms": step.get("delay_ms", 0)}
+            if "hex" in step:
+                out_step["hex"] = step["hex"]
+            else:
+                out_step["hex"] = cmd_packet_hex(step)
+            steps.append(out_step)
+        with open(os.path.join(out_dir, "on_connect.json"), "w") as f:
+            json.dump({"on_connect": steps}, f, indent=2)
+            f.write("\n")
+        print(f"\non_connect.json: {len(steps)} step(s): "
+              + ", ".join(s["name"] for s in steps))
+
     print("\napid_map for config.toml:")
     for e in spec["entries"]:
         print(f'"{e["apid"]}" = "{e["uid"]}" # {e["name"]}')
+
+
+def cmd_packet_hex(step: dict) -> str:
+    """Pack a CCSDS command packet: 6-byte primary header (stream id,
+    unsegmented sequence flags, length) + [function code, checksum 0]
+    + payload. Checksum stays 0: length is what the lab apps
+    validate."""
+    mid = int(step["cmd_mid"], 0)
+    cc = int(step["cc"])
+    if "payload_ascii" in step:
+        payload = step["payload_ascii"].encode("ascii")
+        payload = payload.ljust(int(step.get("pad_to", len(payload))), b"\0")
+    else:
+        payload = bytes.fromhex(step.get("payload_hex", ""))
+    data_len = 2 + len(payload)
+    pkt = bytes([
+        (mid >> 8) & 0xFF, mid & 0xFF,
+        0xC0, 0x00,
+        ((data_len - 1) >> 8) & 0xFF, (data_len - 1) & 0xFF,
+        cc, 0,
+    ]) + payload
+    return pkt.hex()
 
 
 if __name__ == "__main__":
