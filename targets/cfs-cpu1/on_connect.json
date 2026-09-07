@@ -1,0 +1,15 @@
+{
+  "on_connect": [
+    {
+      "name": "Enable TO downlink",
+      "delay_ms": 0,
+      "definition": {
+        "cmd_mid": "0x1880",
+        "cc": 6,
+        "payload_ascii": "127.0.0.1",
+        "pad_to": 16
+      },
+      "hex": "1880c000001106003132372e302e302e3100000000000000"
+    }
+  ]
+}

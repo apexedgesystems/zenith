@@ -11,8 +11,8 @@ component knowledge -- all application-specific behavior comes from
 per-target build artifacts (struct dictionaries, app manifest, plot
 layouts, command catalog) loaded at deploy time, and the layers above
 the transport are protocol-neutral by construction: each target
-declares its full transport (protocol, carrier, ports, arm bytes) in
-config, command surfaces a protocol lacks answer 501, and a CI
+declares its full transport (protocol, carrier, ports, connect-time
+init) in config, command surfaces a protocol lacks answer 501, and a CI
 boundary test forbids generic code from referencing any one protocol
 family or flight framework.
 
@@ -253,7 +253,9 @@ port = 1234
 protocol = "ccsds-spp"         # Space packets...
 carrier = "udp"                # ...as datagrams (default: "tcp")
 udp_listen_port = 2234         # Local port TO_LAB pushes telemetry to
-arm_hex = ["1880c000..."]      # Sent on connect: enables the downlink
+connect_init = "/data/targets/cfs-cpu1/on_connect.json"
+                               # Named init steps sent on connect
+                               # (e.g. enable the downlink); generated
 manifest = "/data/targets/cfs-cpu1/app_manifest.json"
 structs_dir = "/data/targets/cfs-cpu1/structs"
 telemetry_config = "/data/targets/cfs-cpu1/telemetry.json"
@@ -265,11 +267,15 @@ A target's definition fully describes its transport: the protocol
 (`aproto-slip`, `ccsds-spp`, `slip+ccsds-spp`, `raw-slip`), the
 carrier (`tcp` dials host:port and reads the stream; `udp` binds
 `udp_listen_port` for inbound datagrams and sends outbound ones to
-host:port), and optional `arm_hex` bytes sent on every connect for
-stacks that emit nothing until a ground message enables their
-downlink. Unknown protocols or carriers, a UDP carrier without a
-listen port, and two targets claiming one listen port all refuse to
-boot. The deployment needs no per-target network config: the
+host:port), and an optional `connect_init` sequence -- a generated
+on_connect.json of named steps (bytes + per-step delays) sent in
+order on every connect, for stacks that emit nothing until a ground
+message enables their downlink. Steps are opaque bytes to zenith;
+their names appear in logs and in the connect audit record, and a
+step that fails to send tears the link down rather than leaving it
+half-armed. Unknown protocols or carriers, a UDP carrier without a
+listen port, a broken connect_init file, and two targets claiming
+one listen port all refuse to boot. The deployment needs no per-target network config: the
 container runs on the host network and binds exactly what
 definitions declare.
 

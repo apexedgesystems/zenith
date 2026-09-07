@@ -84,6 +84,9 @@ struct TargetState {
     telemetry_config: Option<Arc<crate::core::config_manager::TelemetryConfig>>,
     /// Command definitions (quick commands + per-component commands)
     commands_config: Option<Arc<crate::core::config_manager::CommandConfig>>,
+    /// Connect-time init sequence (named steps; the link runs it,
+    /// this copy names the steps in connect audit records)
+    connect_init: Option<Arc<crate::core::config_manager::ConnectInit>>,
     _router_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -260,6 +263,7 @@ fn build_link(
     protocol: Protocol,
     push_tlm_tx: broadcast::Sender<PushTelemetryPacket>,
     config: &config::TargetSection,
+    connect_init: Option<&crate::core::config_manager::ConnectInit>,
 ) -> ProtocolLink {
     match protocol {
         Protocol::AprotoSlip => ProtocolLink::Aproto(AprotoClient::new(push_tlm_tx)),
@@ -272,7 +276,7 @@ fn build_link(
                 tracing::warn!("[{}] {e}; using tcp carrier", config.name);
                 crate::core::stream_link::Carrier::Tcp
             });
-            let arm = parse_arm_hex(&config.arm_hex, &config.name);
+            let init = init_steps(connect_init);
             let spec = match protocol {
                 Protocol::CcsdsSpp => PipelineSpec::Spp {
                     apid_map: parse_apid_map(config.apid_map.as_ref(), &config.name),
@@ -292,7 +296,7 @@ fn build_link(
                 },
                 Protocol::AprotoSlip => unreachable!("guarded by the outer match"),
             };
-            ProtocolLink::Stream(StreamLink::new(protocol, spec, carrier, arm, push_tlm_tx))
+            ProtocolLink::Stream(StreamLink::new(protocol, spec, carrier, init, push_tlm_tx))
         }
     }
 }
@@ -322,22 +326,26 @@ fn carrier_from_config(
     }
 }
 
-/// Decode the config's arm_hex entries. Bad entries are skipped with
-/// a warning naming them -- same policy as apid_map -- because a
-/// mangled arm string should cost that arm step, not the whole boot.
-fn parse_arm_hex(raw: &[String], target_name: &str) -> Vec<Vec<u8>> {
-    let mut out = Vec::new();
-    for entry in raw {
-        match hex::decode(entry.trim()) {
-            Ok(bytes) if !bytes.is_empty() => out.push(bytes),
-            _ => tracing::warn!(
-                "[{}] arm_hex entry '{}' is not valid hex; skipped",
-                target_name,
-                entry
-            ),
-        }
-    }
-    out
+/// The link-layer init sequence from a target's loaded
+/// on_connect.json (validated at load; names travel for logs and
+/// audit).
+fn init_steps(
+    connect_init: Option<&crate::core::config_manager::ConnectInit>,
+) -> Vec<crate::core::stream_link::InitStep> {
+    connect_init
+        .map(|ci| {
+            ci.steps()
+                .into_iter()
+                .map(
+                    |(name, delay_ms, bytes)| crate::core::stream_link::InitStep {
+                        name,
+                        delay_ms,
+                        bytes,
+                    },
+                )
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Parse the config's APID routing table. Bad entries are skipped
@@ -471,7 +479,7 @@ async fn connect_target(
     Path(id): Path<String>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (host, port, db_for_audit) = {
+    let (host, port, init_names, db_for_audit) = {
         let st = state.read().await;
         let target = st
             .targets
@@ -480,10 +488,17 @@ async fn connect_target(
         (
             target.config.host.clone(),
             target.config.port,
+            target.connect_init.as_ref().map(|ci| ci.step_names()),
             st.db.clone(),
         )
     };
     let ip_str = addr.ip().to_string();
+    // The init sequence is part of what "connect" DOES to this
+    // target, so the audit record names its steps.
+    let details = match &init_names {
+        Some(names) => format!("{}:{} (init: {})", host, port, names),
+        None => format!("{}:{}", host, port),
+    };
 
     match do_connect_target(&state, &id).await {
         Ok(false) => Ok(Json(
@@ -495,7 +510,7 @@ async fn connect_target(
                 &actor.0,
                 "connect_target",
                 Some(&id),
-                Some(&format!("{}:{}", host, port)),
+                Some(&details),
                 "ok",
                 Some(&ip_str),
             );
@@ -509,7 +524,7 @@ async fn connect_target(
                 &actor.0,
                 "connect_target",
                 Some(&id),
-                Some(&format!("{}:{}", host, port)),
+                Some(&details),
                 &format!("err: {}", err_msg),
                 Some(&ip_str),
             );
@@ -2689,7 +2704,7 @@ async fn add_target(
         raw_uid: None,
         carrier: "tcp".to_string(),
         udp_listen_port: None,
-        arm_hex: Vec::new(),
+        connect_init: None,
         auto_connect: false,
     };
 
@@ -2703,7 +2718,7 @@ async fn add_target(
         metrics.clone(),
     );
 
-    let mut new_client = build_link(Protocol::AprotoSlip, push_tlm_tx.clone(), &tc);
+    let mut new_client = build_link(Protocol::AprotoSlip, push_tlm_tx.clone(), &tc, None);
     new_client.set_metrics(metrics.clone());
     let connected = new_client.connected_handle();
     st.targets.insert(
@@ -2719,6 +2734,7 @@ async fn add_target(
             manifest: None,
             telemetry_config: None,
             commands_config: None,
+            connect_init: None,
             _router_handle: None,
         },
     );
@@ -3798,7 +3814,45 @@ async fn main() {
             eprintln!("FATAL: target '{}': {}", tc.name, e);
             std::process::exit(1);
         }
-        let mut new_client = build_link(protocol, push_tlm_tx.clone(), tc);
+        // Connect-time init sequence: stream links only, for now.
+        // The APROTO family's connect-time behavior belongs to its
+        // command machine (catalog-named commands with real ACK
+        // handling), not raw bytes injected under it -- until that
+        // exists, declaring the file there must refuse rather than
+        // load-log-audit a sequence that never gets sent.
+        if protocol == Protocol::AprotoSlip && tc.connect_init.is_some() {
+            eprintln!(
+                "FATAL: target '{}': connect_init is not supported on aproto-slip \
+                 (stream protocols only; the aproto command path owns connect-time behavior)",
+                tc.name
+            );
+            std::process::exit(1);
+        }
+        // A broken file means every connect comes up half-armed, so
+        // it refuses boot like any other definition bug (contrast
+        // the display-only artifacts above, which degrade to
+        // warnings).
+        let connect_init =
+            tc.connect_init.as_ref().map(
+                |path| match crate::core::config_manager::ConnectInit::load(std::path::Path::new(
+                    path,
+                )) {
+                    Ok(ci) => {
+                        tracing::info!(
+                            "Loaded connect init for {}: {} step(s): {}",
+                            tc.name,
+                            ci.on_connect.len(),
+                            ci.step_names()
+                        );
+                        Arc::new(ci)
+                    }
+                    Err(e) => {
+                        eprintln!("FATAL: target '{}': connect_init: {}", tc.name, e);
+                        std::process::exit(1);
+                    }
+                },
+            );
+        let mut new_client = build_link(protocol, push_tlm_tx.clone(), tc, connect_init.as_deref());
         new_client.set_metrics(metrics.clone());
         let connected = new_client.connected_handle();
         targets.insert(
@@ -3814,6 +3868,7 @@ async fn main() {
                 manifest,
                 telemetry_config,
                 commands_config,
+                connect_init,
                 _router_handle: None,
             },
         );
