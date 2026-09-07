@@ -267,7 +267,7 @@ fn build_link(
 ) -> ProtocolLink {
     match protocol {
         Protocol::AprotoSlip => ProtocolLink::Aproto(AprotoClient::new(push_tlm_tx)),
-        Protocol::CcsdsSpp | Protocol::SlipCcsdsSpp | Protocol::RawSlip => {
+        Protocol::CcsdsSpp | Protocol::SlipCcsdsSpp | Protocol::TmCcsdsSpp | Protocol::RawSlip => {
             use crate::core::stream_link::{PipelineSpec, StreamLink};
             // Boot already validated the carrier (see carrier_from_config
             // at startup); a bad value on the dynamic-add path degrades
@@ -283,6 +283,10 @@ fn build_link(
                 },
                 Protocol::SlipCcsdsSpp => PipelineSpec::SlipSpp {
                     apid_map: parse_apid_map(config.apid_map.as_ref(), &config.name),
+                },
+                Protocol::TmCcsdsSpp => PipelineSpec::TmSpp {
+                    apid_map: parse_apid_map(config.apid_map.as_ref(), &config.name),
+                    frame_size: config.tm_frame_size,
                 },
                 Protocol::RawSlip => PipelineSpec::SlipRaw {
                     uid: config.raw_uid.as_deref().and_then(|s| {
@@ -311,15 +315,21 @@ fn carrier_from_config(
     use crate::core::stream_link::Carrier;
     match config.carrier.as_str() {
         "tcp" => Ok(Carrier::Tcp),
-        "udp" => {
+        "udp" | "tcp-listen" => {
             if protocol == Protocol::AprotoSlip {
-                return Err("carrier 'udp' is not supported for aproto-slip (TCP-only)".into());
+                return Err(format!(
+                    "carrier '{}' is not supported for aproto-slip (TCP-dial only)",
+                    config.carrier
+                ));
             }
-            match config.udp_listen_port {
-                Some(port) => Ok(Carrier::Udp { listen_port: port }),
-                None => Err("carrier 'udp' requires udp_listen_port (the local port \
-                     the target sends telemetry to)"
-                    .into()),
+            match config.listen_port {
+                Some(port) if config.carrier == "udp" => Ok(Carrier::Udp { listen_port: port }),
+                Some(port) => Ok(Carrier::TcpListen { listen_port: port }),
+                None => Err(format!(
+                    "carrier '{}' requires listen_port (the local port \
+                     the target sends or dials to)",
+                    config.carrier
+                )),
             }
         }
         other => Err(format!(
@@ -2707,6 +2717,7 @@ async fn add_target(
         raw_uid: None,
         carrier: "tcp".to_string(),
         listen_port: None,
+        tm_frame_size: 1024,
         connect_init: None,
         auto_connect: false,
     };

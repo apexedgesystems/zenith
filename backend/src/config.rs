@@ -192,6 +192,10 @@ pub struct TargetSection {
     /// never hear it.
     #[serde(default)]
     pub listen_port: Option<u16>,
+    /// tm+ccsds-spp targets: the fixed TM transfer frame length in
+    /// octets (a mission constant of the producing build).
+    #[serde(default = "default_tm_frame_size")]
+    pub tm_frame_size: usize,
     /// Path to this target's connect-time init sequence
     /// (on_connect.json): named steps of raw bytes sent, in order
     /// with optional delays, when the link comes up. Generated into
@@ -239,6 +243,9 @@ fn default_protocol() -> String {
 }
 fn default_carrier() -> String {
     "tcp".to_string()
+}
+fn default_tm_frame_size() -> usize {
+    1024
 }
 /// The default policy, callable from target-add paths that build a
 /// TargetSection literal.
@@ -385,6 +392,7 @@ mod tests {
             raw_uid: None,
             carrier: carrier.to_string(),
             listen_port: listen,
+            tm_frame_size: default_tm_frame_size(),
             connect_init: None,
             manifest: None,
             structs_dir: None,

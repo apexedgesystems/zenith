@@ -58,6 +58,9 @@ pub enum Protocol {
     /// SLIP-framed CCSDS Space Packets -- the layered stack
     /// (telemetry-only).
     SlipCcsdsSpp,
+    /// CCSDS TM Transfer Frames carrying Space Packets -- the
+    /// space-data-link stack (telemetry-only).
+    TmCcsdsSpp,
     /// Header-less SLIP frames over TCP (telemetry-only; fullUid
     /// from config -- the bare-instrument case).
     RawSlip,
@@ -71,10 +74,11 @@ impl Protocol {
             "aproto-slip" => Ok(Protocol::AprotoSlip),
             "ccsds-spp" => Ok(Protocol::CcsdsSpp),
             "slip+ccsds-spp" => Ok(Protocol::SlipCcsdsSpp),
+            "tm+ccsds-spp" => Ok(Protocol::TmCcsdsSpp),
             "raw-slip" => Ok(Protocol::RawSlip),
             other => Err(format!(
                 "unknown protocol '{}' (supported: aproto-slip, ccsds-spp, \
-                 slip+ccsds-spp, raw-slip)",
+                 slip+ccsds-spp, tm+ccsds-spp, raw-slip)",
                 other
             )),
         }
@@ -85,6 +89,7 @@ impl Protocol {
             Protocol::AprotoSlip => "aproto-slip",
             Protocol::CcsdsSpp => "ccsds-spp",
             Protocol::SlipCcsdsSpp => "slip+ccsds-spp",
+            Protocol::TmCcsdsSpp => "tm+ccsds-spp",
             Protocol::RawSlip => "raw-slip",
         }
     }

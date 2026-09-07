@@ -25,7 +25,7 @@ use tokio::sync::broadcast;
 use tokio::time::{timeout, Duration};
 
 use crate::core::transport::{ClientError, Protocol, PushTelemetryPacket};
-use crate::protocol::{ccsds_spp, slip};
+use crate::protocol::{ccsds_spp, ccsds_tm, slip};
 
 /// How bytes reach zenith -- a third composition axis, orthogonal to
 /// the framing and packet stages. TCP dials the target and reads a
@@ -60,6 +60,13 @@ pub enum PipelineSpec {
     Spp { apid_map: HashMap<u16, u32> },
     /// SLIP delimits; each frame is one SPP packet.
     SlipSpp { apid_map: HashMap<u16, u32> },
+    /// Fixed-size TM transfer frames delimit; verified data fields
+    /// concatenate into an SPP stream (idle-packet fill included,
+    /// which the router skips silently as protocol filler).
+    TmSpp {
+        apid_map: HashMap<u16, u32>,
+        frame_size: usize,
+    },
     /// SLIP delimits; each frame is one raw payload for the config uid.
     SlipRaw { uid: Option<u32> },
 }
@@ -72,6 +79,11 @@ enum PacketPipeline {
     },
     SlipSpp {
         slip: slip::Decoder,
+        apid_map: HashMap<u16, u32>,
+    },
+    TmSpp {
+        deframer: ccsds_tm::Deframer,
+        extractor: ccsds_spp::Extractor,
         apid_map: HashMap<u16, u32>,
     },
     SlipRaw {
@@ -89,6 +101,14 @@ impl PacketPipeline {
             },
             PipelineSpec::SlipSpp { apid_map } => PacketPipeline::SlipSpp {
                 slip: slip::Decoder::new(),
+                apid_map: apid_map.clone(),
+            },
+            PipelineSpec::TmSpp {
+                apid_map,
+                frame_size,
+            } => PacketPipeline::TmSpp {
+                deframer: ccsds_tm::Deframer::new(*frame_size),
+                extractor: ccsds_spp::Extractor::new(),
                 apid_map: apid_map.clone(),
             },
             PipelineSpec::SlipRaw { uid } => PacketPipeline::SlipRaw {
@@ -140,6 +160,28 @@ impl PacketPipeline {
                             None => unroutable += 1,
                         },
                         None => unroutable += 1,
+                    }
+                }
+            }
+            PacketPipeline::TmSpp {
+                deframer,
+                extractor,
+                apid_map,
+            } => {
+                let (fields, bad_frames) = deframer.feed(bytes);
+                unroutable += bad_frames;
+                for field in fields {
+                    for (hdr, payload) in extractor.feed(&field) {
+                        if hdr.apid == ccsds_spp::IDLE_APID {
+                            continue; // protocol fill, not data
+                        }
+                        match apid_map.get(&hdr.apid) {
+                            Some(&uid) => out.push(PushTelemetryPacket {
+                                full_uid: uid,
+                                payload,
+                            }),
+                            None => unroutable += 1,
+                        }
                     }
                 }
             }
@@ -616,13 +658,14 @@ mod tests {
             .unwrap()
     }
 
-    /// @test THE protocol-agnosticism proof, now across THREE stream
+    /// @test THE protocol-agnosticism proof, now across FOUR stream
     /// compositions: the same struct bytes delivered as (a) bare
-    /// self-delimiting SPP, (b) SLIP-framed SPP -- the layered stack
-    /// -- and (c) raw SLIP frames all decode to exactly the samples
-    /// the decoder produces for those bytes directly. One dictionary,
-    /// one decoder, one pipeline seam; the stacks differ only in
-    /// config.
+    /// self-delimiting SPP, (b) SLIP-framed SPP, (c) SPP inside
+    /// CRC-verified fixed-size TM transfer frames -- the space-data-
+    /// link stack -- and (d) raw SLIP frames all decode to exactly
+    /// the samples the decoder produces for those bytes directly.
+    /// One dictionary, one decoder, one pipeline seam; the stacks
+    /// differ only in config.
     #[tokio::test]
     async fn all_stream_compositions_decode_identically() {
         let dict = wavegen_dict();
@@ -660,6 +703,20 @@ mod tests {
                 {
                     let framed = slip::encode(&spp_wire);
                     vec![framed[..5].to_vec(), framed[5..].to_vec()]
+                },
+            ),
+            (
+                Protocol::TmCcsdsSpp,
+                PipelineSpec::TmSpp {
+                    apid_map: map.clone(),
+                    frame_size: 128,
+                },
+                // The space-data-link stack: the SPP packet inside a
+                // CRC-verified TM transfer frame with idle fill,
+                // split mid-frame.
+                {
+                    let framed = ccsds_tm::pack_frame(128, 0x044, 0, &spp_wire);
+                    vec![framed[..40].to_vec(), framed[40..].to_vec()]
                 },
             ),
             (
