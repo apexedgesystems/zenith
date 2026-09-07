@@ -1,8 +1,11 @@
-//! Struct dictionary and app manifest loading.
+//! Per-target artifact loading: struct dictionaries, app manifests,
+//! telemetry layouts, command catalogs, connect-init sequences.
 //!
-//! Loads JSON struct dictionaries produced by apex_data_gen and app
-//! manifests from a target's configuration directory. Provides field-level
-//! type information for decoding telemetry and generating command forms.
+//! Every artifact here is generator output -- each flight framework
+//! has its own dictionary generator that emits this one neutral
+//! format -- so this module knows layouts and schemas, never
+//! frameworks. Provides field-level type information for decoding
+//! telemetry and generating command forms.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -94,9 +97,10 @@ pub struct StructDef {
     pub opcode: Option<String>,
     #[serde(default)]
     pub fields: Vec<FieldDef>,
-    /// Producer-stated v3 layout hash ("0x" hex), exported by
-    /// apex_data_gen for spec-defined structs. When present it is THE
-    /// hash the vehicle verifies -- consumers must not recompute.
+    /// Producer-stated v3 layout hash ("0x" hex), exported by the
+    /// producing generator for spec-defined structs. When present it
+    /// is THE hash the vehicle verifies -- consumers must not
+    /// recompute.
     #[serde(default)]
     pub layout_hash: Option<String>,
     /// The canonical field-spec string the hash derives from
