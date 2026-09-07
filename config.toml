@@ -73,30 +73,6 @@ retention_hours = 24
 # raw_uid = "0x00D000"
 # structs_dir = "/data/targets/my-target/structs"
 
-# Target: local cFS cpu1 (dev; the flight/rig-cfs rig). The whole
-# transport is this definition: udp carrier + ccsds-spp packets,
-# commands dialed out to CI_LAB at host:port, telemetry heard on
-# udp_listen_port, downlink armed on connect with TO_LAB
-# OUTPUT_ENABLE (CC=6, dest "127.0.0.1").
-[[targets]]
-name = "cFS cpu1"
-host = "127.0.0.1"
-port = 1234
-protocol = "ccsds-spp"
-carrier = "udp"
-udp_listen_port = 2234
-arm_hex = ["1880c000001106003132372e302e302e3100000000000000"]
-auto_connect = false
-manifest = "/data/targets/cfs-cpu1/app_manifest.json"
-structs_dir = "/data/targets/cfs-cpu1/structs"
-[targets.apid_map]
-"0x000" = "0x00C00000" # CFE_ES
-"0x001" = "0x00C00001" # CFE_EVS
-"0x003" = "0x00C00003" # CFE_SB
-"0x005" = "0x00C00005" # CFE_TIME
-"0x080" = "0x00C00080" # TO_LAB
-"0x084" = "0x00C00084" # CI_LAB
-
 # Target: Local SIL ops demo (dev only)
 [[targets]]
 name = "Local SIL - Ops Demo"
@@ -155,3 +131,43 @@ manifest = "/data/targets/sil-spec-demo/app_manifest.json"
 structs_dir = "/data/targets/sil-spec-demo/structs"
 telemetry_config = "/data/targets/sil-spec-demo/telemetry.json"
 commands_config = "/data/targets/sil-spec-demo/commands.json"
+
+# Target: local cFS cpu1 (dev; the flight/rig-cfs rig). The whole
+# transport is this definition: udp carrier + ccsds-spp packets,
+# commands dialed out to CI_LAB at host:port, telemetry heard on
+# udp_listen_port, downlink armed on connect with TO_LAB
+# OUTPUT_ENABLE (CC=6, dest "127.0.0.1").
+[[targets]]
+name = "cFS cpu1"
+host = "127.0.0.1"
+port = 1234
+protocol = "ccsds-spp"
+carrier = "udp"
+udp_listen_port = 2234
+arm_hex = ["1880c000001106003132372e302e302e3100000000000000"]
+auto_connect = false
+manifest = "/data/targets/cfs-cpu1/app_manifest.json"
+structs_dir = "/data/targets/cfs-cpu1/structs"
+telemetry_config = "/data/targets/cfs-cpu1/telemetry.json"
+# Display policy for this target's health cards: which counters are
+# bad when nonzero. Chosen from the live surface -- error counters
+# only, not the ones that grow in normal stock operation.
+health_nonzero_bad = [
+  "commanderrorcounter",
+  "ingesterrors",
+  "internalerrorcounter",
+  "messagetrunccounter",
+  "unregisteredappcounter",
+  "processorresets",
+  "pipeoverflowerrorcounter",
+  "msgreceiveerrorcounter",
+  "subscribeerrorcounter",
+  "createpipeerrorcounter",
+]
+[targets.apid_map]
+"0x000" = "0x00C00000" # CFE_ES
+"0x001" = "0x00C00001" # CFE_EVS
+"0x003" = "0x00C00003" # CFE_SB
+"0x005" = "0x00C00005" # CFE_TIME
+"0x080" = "0x00C00080" # TO_LAB
+"0x084" = "0x00C00084" # CI_LAB

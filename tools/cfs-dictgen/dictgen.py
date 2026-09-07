@@ -106,6 +106,28 @@ def main() -> None:
         json.dump(manifest, f, indent=2)
         f.write("\n")
 
+    # Telemetry screen layouts: curated ones pass through from the
+    # spec verbatim; otherwise generate one default layout with each
+    # component's numeric channels chunked into readable plots. The
+    # output directory stays pure generator output either way --
+    # curation belongs in the spec, beside the deployment.
+    layouts = spec.get("layouts")
+    if not layouts:
+        plots = []
+        for e in spec["entries"]:
+            r = results[e["component"]]
+            chans = [f"{e['name']}.{f['name']}" for f in r["fields"]
+                     if f["type"] in ("uint", "int", "float")]
+            for i in range(0, len(chans), 8):
+                chunk = chans[i:i + 8]
+                n = f" ({i // 8 + 1})" if len(chans) > 8 else ""
+                plots.append({"title": f"{e['name']}{n}",
+                              "channels": chunk, "height": 200})
+        layouts = [{"name": "Default", "plots": plots}]
+    with open(os.path.join(out_dir, "telemetry.json"), "w") as f:
+        json.dump({"layouts": layouts}, f, indent=2)
+        f.write("\n")
+
     print("\napid_map for config.toml:")
     for e in spec["entries"]:
         print(f'"{e["apid"]}" = "{e["uid"]}" # {e["name"]}')
