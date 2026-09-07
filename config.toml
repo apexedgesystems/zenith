@@ -45,24 +45,6 @@ retention_hours = 24
 # [targets.apid_map]
 # "0x0D0" = "0x00D000"
 
-# cFS target example: CCSDS SPP over the UDP carrier. Zenith binds
-# udp_listen_port for TO_LAB's telemetry datagrams and sends each
-# arm_hex datagram to host:port (CI_LAB) on connect -- stock cFS
-# emits nothing until TO_LAB is told to output, so arming the
-# downlink is part of link bring-up. The example arm bytes are
-# TO_LAB OUTPUT_ENABLE (CC=6) with dest IP "127.0.0.1".
-# [[targets]]
-# name = "cFS cpu1"
-# host = "127.0.0.1"          # where CI_LAB listens
-# port = 1234
-# protocol = "ccsds-spp"
-# carrier = "udp"
-# udp_listen_port = 2234      # where TO_LAB sends
-# arm_hex = ["1880c000001106003132372e302e302e3100000000000000"]
-# structs_dir = "/data/targets/cfs-cpu1/structs"
-# [targets.apid_map]
-# "0x080" = "0x00800000"      # CFE_ES housekeeping, and so on
-
 # Raw SLIP target example (telemetry-only): header-less SLIP frames,
 # each frame one struct payload; the component uid comes from config.
 # [[targets]]
