@@ -136,6 +136,16 @@ def main() -> None:
         steps = []
         for step in spec["on_connect"]:
             out_step = {"name": step["name"], "delay_ms": step.get("delay_ms", 0)}
+            # The command-level fields ride along as provenance so a
+            # human opening the file sees WHAT the bytes say, not
+            # just the bytes -- same contract split as the struct
+            # dicts' layout_hash (contract) + canonical_spec
+            # (diagnostic surface). The ground system reads only the
+            # hex.
+            definition = {k: v for k, v in step.items()
+                          if k not in ("name", "delay_ms", "hex")}
+            if definition:
+                out_step["definition"] = definition
             if "hex" in step:
                 out_step["hex"] = step["hex"]
             else:

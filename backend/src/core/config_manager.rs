@@ -748,6 +748,12 @@ pub struct InitStepDef {
     #[serde(default)]
     pub delay_ms: u64,
     pub hex: String,
+    /// Provenance from the generator: the framework-level fields
+    /// the hex was packed from, for humans reading the file. The
+    /// hex is the contract; zenith never interprets this -- same
+    /// split as a struct dict's layout_hash vs canonical_spec.
+    #[serde(default)]
+    pub definition: Option<serde_json::Value>,
 }
 
 /// Ceilings that keep a bad file from wedging a connect: a step may
