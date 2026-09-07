@@ -1,0 +1,263 @@
+{
+  "component": "cfe_es",
+  "structs": {
+    "Housekeeping": {
+      "category": "TELEMETRY",
+      "size": 178,
+      "fields": [
+        {
+          "name": "CommandCounter",
+          "offset": 10,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "CommandErrorCounter",
+          "offset": 11,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "CFECoreChecksum",
+          "offset": 12,
+          "size": 2,
+          "type": "uint"
+        },
+        {
+          "name": "CFEMajorVersion",
+          "offset": 14,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "CFEMinorVersion",
+          "offset": 15,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "CFERevision",
+          "offset": 16,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "CFEMissionRevision",
+          "offset": 17,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "OSALMajorVersion",
+          "offset": 18,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "OSALMinorVersion",
+          "offset": 19,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "OSALRevision",
+          "offset": 20,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "OSALMissionRevision",
+          "offset": 21,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "PSPMajorVersion",
+          "offset": 22,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "PSPMinorVersion",
+          "offset": 23,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "PSPRevision",
+          "offset": 24,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "PSPMissionRevision",
+          "offset": 25,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "SysLogBytesUsed",
+          "offset": 26,
+          "size": 8,
+          "type": "uint"
+        },
+        {
+          "name": "SysLogSize",
+          "offset": 34,
+          "size": 8,
+          "type": "uint"
+        },
+        {
+          "name": "SysLogEntries",
+          "offset": 42,
+          "size": 4,
+          "type": "uint"
+        },
+        {
+          "name": "SysLogMode",
+          "offset": 46,
+          "size": 4,
+          "type": "uint"
+        },
+        {
+          "name": "ERLogIndex",
+          "offset": 50,
+          "size": 4,
+          "type": "uint"
+        },
+        {
+          "name": "ERLogEntries",
+          "offset": 54,
+          "size": 4,
+          "type": "uint"
+        },
+        {
+          "name": "RegisteredCoreApps",
+          "offset": 58,
+          "size": 4,
+          "type": "uint"
+        },
+        {
+          "name": "RegisteredExternalApps",
+          "offset": 62,
+          "size": 4,
+          "type": "uint"
+        },
+        {
+          "name": "RegisteredTasks",
+          "offset": 66,
+          "size": 4,
+          "type": "uint"
+        },
+        {
+          "name": "RegisteredLibs",
+          "offset": 70,
+          "size": 4,
+          "type": "uint"
+        },
+        {
+          "name": "ResetType",
+          "offset": 74,
+          "size": 4,
+          "type": "uint"
+        },
+        {
+          "name": "ResetSubtype",
+          "offset": 78,
+          "size": 4,
+          "type": "uint"
+        },
+        {
+          "name": "ProcessorResets",
+          "offset": 82,
+          "size": 4,
+          "type": "uint"
+        },
+        {
+          "name": "MaxProcessorResets",
+          "offset": 86,
+          "size": 4,
+          "type": "uint"
+        },
+        {
+          "name": "BootSource",
+          "offset": 90,
+          "size": 4,
+          "type": "uint"
+        },
+        {
+          "name": "PerfState",
+          "offset": 94,
+          "size": 4,
+          "type": "uint"
+        },
+        {
+          "name": "PerfMode",
+          "offset": 98,
+          "size": 4,
+          "type": "uint"
+        },
+        {
+          "name": "PerfTriggerCount",
+          "offset": 102,
+          "size": 4,
+          "type": "uint"
+        },
+        {
+          "name": "PerfFilterMask",
+          "offset": 106,
+          "size": 16,
+          "type": "string"
+        },
+        {
+          "name": "PerfTriggerMask",
+          "offset": 122,
+          "size": 16,
+          "type": "string"
+        },
+        {
+          "name": "PerfDataStart",
+          "offset": 138,
+          "size": 4,
+          "type": "uint"
+        },
+        {
+          "name": "PerfDataEnd",
+          "offset": 142,
+          "size": 4,
+          "type": "uint"
+        },
+        {
+          "name": "PerfDataCount",
+          "offset": 146,
+          "size": 4,
+          "type": "uint"
+        },
+        {
+          "name": "PerfDataToWrite",
+          "offset": 150,
+          "size": 4,
+          "type": "uint"
+        },
+        {
+          "name": "HeapBytesFree",
+          "offset": 154,
+          "size": 8,
+          "type": "uint"
+        },
+        {
+          "name": "HeapBlocksFree",
+          "offset": 162,
+          "size": 8,
+          "type": "uint"
+        },
+        {
+          "name": "HeapMaxBlockSize",
+          "offset": 170,
+          "size": 8,
+          "type": "uint"
+        }
+      ]
+    }
+  }
+}

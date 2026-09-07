@@ -3,17 +3,18 @@
 Real-time operations interface for [Apex CSF](https://github.com/apexedgesystems/apex_csf) applications.
 
 Zenith connects to targets over per-target wire protocols (TCP/APROTO
-for Apex executables; CCSDS SPP for telemetry-only space-packet
-sources), provides a REST API for commanding and telemetry, and serves
-a real-time web UI for visualization, configuration, and system
-management. Zero hardcoded component knowledge -- all
-application-specific behavior comes from per-target build artifacts
-(struct dictionaries, app manifest, plot layouts, command catalog)
-loaded at deploy time, and the layers above the transport are
-protocol-neutral by construction: each target declares its protocol in
+for Apex executables; CCSDS SPP for space-packet sources such as
+NASA cFS, over TCP or UDP carriers), provides a REST API for
+commanding and telemetry, and serves a real-time web UI for
+visualization, configuration, and system management. Zero hardcoded
+component knowledge -- all application-specific behavior comes from
+per-target build artifacts (struct dictionaries, app manifest, plot
+layouts, command catalog) loaded at deploy time, and the layers above
+the transport are protocol-neutral by construction: each target
+declares its full transport (protocol, carrier, ports, arm bytes) in
 config, command surfaces a protocol lacks answer 501, and a CI
 boundary test forbids generic code from referencing any one protocol
-family.
+family or flight framework.
 
 ```
 +--------------------+        TCP / APROTO         +--------------------------+
@@ -65,6 +66,13 @@ targets/
 The same backend binary serves any configured target. Adding a
 new target is a new entry in `config.toml` plus a new config
 directory.
+
+The config directory is always generator output. Apex targets use
+`apex_data_gen`; cFS targets use `tools/cfs-dictgen`, which extracts
+exact struct layouts from the flight build's DWARF debug info (the
+same binaries the software runs, so dictionaries cannot drift from
+the wire) and emits the manifest, struct dicts, and telemetry
+layouts in one pass.
 
 ## Pages
 
@@ -237,7 +245,33 @@ manifest = "/data/targets/pi-ops-demo/app_manifest.json"
 structs_dir = "/data/targets/pi-ops-demo/structs"
 telemetry_config = "/data/targets/pi-ops-demo/telemetry.json"
 commands_config = "/data/targets/pi-ops-demo/commands.json"
+
+[[targets]]
+name = "cFS cpu1"              # A NASA cFS instance, same engine
+host = "127.0.0.1"             # Commands dial out to CI_LAB here
+port = 1234
+protocol = "ccsds-spp"         # Space packets...
+carrier = "udp"                # ...as datagrams (default: "tcp")
+udp_listen_port = 2234         # Local port TO_LAB pushes telemetry to
+arm_hex = ["1880c000..."]      # Sent on connect: enables the downlink
+manifest = "/data/targets/cfs-cpu1/app_manifest.json"
+structs_dir = "/data/targets/cfs-cpu1/structs"
+telemetry_config = "/data/targets/cfs-cpu1/telemetry.json"
+[targets.apid_map]             # Wire APID -> component uid routing
+"0x000" = "0x00C00000"
 ```
+
+A target's definition fully describes its transport: the protocol
+(`aproto-slip`, `ccsds-spp`, `slip+ccsds-spp`, `raw-slip`), the
+carrier (`tcp` dials host:port and reads the stream; `udp` binds
+`udp_listen_port` for inbound datagrams and sends outbound ones to
+host:port), and optional `arm_hex` bytes sent on every connect for
+stacks that emit nothing until a ground message enables their
+downlink. Unknown protocols or carriers, a UDP carrier without a
+listen port, and two targets claiming one listen port all refuse to
+boot. The deployment needs no per-target network config: the
+container runs on the host network and binds exactly what
+definitions declare.
 
 ## Config Validation
 

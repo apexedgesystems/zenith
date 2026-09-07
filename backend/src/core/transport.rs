@@ -176,12 +176,26 @@ pub fn unsupported_op(op: &str, protocol: Protocol) -> String {
 mod tests {
     /// @test The protocol boundary, enforced: zenith's neutral modules
     /// (decoder/router, storage, metrics, and the SPP protocol module)
-    /// must never reference the APROTO family. A PR that re-couples a
-    /// generic layer to one protocol's types fails here, not in
-    /// review. transport.rs itself is the sanctioned dispatch point
-    /// and is deliberately absent from this list.
+    /// must never reference the APROTO family -- nor any specific
+    /// flight framework. Target specifics live at the definition
+    /// level (per-target config); a PR that re-couples a generic
+    /// layer to one protocol's types or one framework's names fails
+    /// here, not in review. Comments count: a framework-shaped
+    /// rationale in engine code is the first step toward a
+    /// framework-shaped mechanism. transport.rs itself is the
+    /// sanctioned dispatch point and is deliberately absent from
+    /// this list.
     #[test]
     fn neutral_modules_never_reference_aproto() {
+        const FORBIDDEN: &[(&str, &str)] = &[
+            ("aproto", "the APROTO family"),
+            ("apex", "the apex framework"),
+            ("cfs", "the cFS framework"),
+            ("to_lab", "a cFS app"),
+            ("ci_lab", "a cFS app"),
+            ("fprime", "the F-prime framework"),
+            ("f-prime", "the F-prime framework"),
+        ];
         for (name, source) in [
             ("core/telemetry.rs", include_str!("telemetry.rs")),
             (
@@ -196,11 +210,16 @@ mod tests {
             ("protocol/slip.rs", include_str!("../protocol/slip.rs")),
             ("core/stream_link.rs", include_str!("stream_link.rs")),
         ] {
-            assert!(
-                !source.to_lowercase().contains("aproto"),
-                "{name} references the APROTO family; generic layers must \
-                 stay protocol-neutral (route through core/transport.rs)"
-            );
+            let lower = source.to_lowercase();
+            for (token, what) in FORBIDDEN {
+                assert!(
+                    !lower.contains(token),
+                    "{name} references {what} ('{token}'); generic layers \
+                     stay protocol- and framework-neutral -- specifics \
+                     belong in per-target config, dispatch in \
+                     core/transport.rs"
+                );
+            }
         }
     }
 }

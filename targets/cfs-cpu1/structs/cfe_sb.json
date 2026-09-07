@@ -1,0 +1,113 @@
+{
+  "component": "cfe_sb",
+  "structs": {
+    "Housekeeping": {
+      "category": "TELEMETRY",
+      "size": 38,
+      "fields": [
+        {
+          "name": "CommandCounter",
+          "offset": 10,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "CommandErrorCounter",
+          "offset": 11,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "NoSubscribersCounter",
+          "offset": 12,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "MsgSendErrorCounter",
+          "offset": 13,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "MsgReceiveErrorCounter",
+          "offset": 14,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "InternalErrorCounter",
+          "offset": 15,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "CreatePipeErrorCounter",
+          "offset": 16,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "SubscribeErrorCounter",
+          "offset": 17,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "PipeOptsErrorCounter",
+          "offset": 18,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "DuplicateSubscriptionsCounter",
+          "offset": 19,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "GetPipeIdByNameErrorCounter",
+          "offset": 20,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "DeletePipeErrorCounter",
+          "offset": 21,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "PipeOverflowErrorCounter",
+          "offset": 22,
+          "size": 2,
+          "type": "uint"
+        },
+        {
+          "name": "MsgLimitErrorCounter",
+          "offset": 24,
+          "size": 2,
+          "type": "uint"
+        },
+        {
+          "name": "MemPoolHandle",
+          "offset": 26,
+          "size": 4,
+          "type": "uint"
+        },
+        {
+          "name": "MemInUse",
+          "offset": 30,
+          "size": 4,
+          "type": "uint"
+        },
+        {
+          "name": "UnmarkedMem",
+          "offset": 34,
+          "size": 4,
+          "type": "uint"
+        }
+      ]
+    }
+  }
+}

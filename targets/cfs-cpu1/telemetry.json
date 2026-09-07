@@ -1,0 +1,65 @@
+{
+  "layouts": [
+    {
+      "name": "Default",
+      "plots": [
+        {
+          "title": "Mission Time",
+          "channels": ["CFE_TIME.MET.Seconds", "CFE_TIME.LeapSeconds"],
+          "height": 200
+        },
+        {
+          "title": "Ground Link",
+          "channels": [
+            "CI_LAB.IngestPackets",
+            "CI_LAB.IngestErrors",
+            "TO_LAB.CommandCounter",
+            "TO_LAB.CommandErrorCounter"
+          ],
+          "height": 200
+        },
+        {
+          "title": "Event Services",
+          "channels": [
+            "CFE_EVS.MessageSendCounter",
+            "CFE_EVS.LogOverflowCounter",
+            "CFE_EVS.MessageTruncCounter"
+          ],
+          "height": 200
+        },
+        {
+          "title": "Software Bus",
+          "channels": [
+            "CFE_SB.NoSubscribersCounter",
+            "CFE_SB.MsgSendErrorCounter",
+            "CFE_SB.MsgLimitErrorCounter",
+            "CFE_SB.MemInUse"
+          ],
+          "height": 200
+        },
+        {
+          "title": "Executive Resources",
+          "channels": [
+            "CFE_ES.SysLogBytesUsed",
+            "CFE_ES.RegisteredTasks",
+            "CFE_ES.RegisteredExternalApps",
+            "CFE_ES.ProcessorResets"
+          ],
+          "height": 200
+        },
+        {
+          "title": "Command Counters",
+          "channels": [
+            "CFE_ES.CommandCounter",
+            "CFE_ES.CommandErrorCounter",
+            "CFE_TIME.CommandCounter",
+            "CFE_SB.CommandCounter",
+            "CFE_EVS.CommandCounter",
+            "CI_LAB.CommandCounter"
+          ],
+          "height": 200
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "component": "to_lab",
+  "structs": {
+    "Housekeeping": {
+      "category": "TELEMETRY",
+      "size": 12,
+      "fields": [
+        {
+          "name": "CommandCounter",
+          "offset": 10,
+          "size": 1,
+          "type": "uint"
+        },
+        {
+          "name": "CommandErrorCounter",
+          "offset": 11,
+          "size": 1,
+          "type": "uint"
+        }
+      ]
+    }
+  }
+}

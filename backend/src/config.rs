@@ -177,6 +177,25 @@ pub struct TargetSection {
     /// stream speaks for ("0x" hex or decimal).
     #[serde(default)]
     pub raw_uid: Option<String>,
+    /// Stream targets: how bytes reach zenith. "tcp" (default) dials
+    /// host:port and reads the stream; "udp" binds `udp_listen_port`
+    /// for inbound telemetry datagrams and sends outbound (arm)
+    /// datagrams to host:port. aproto-slip is TCP-only; validated at
+    /// boot.
+    #[serde(default = "default_carrier")]
+    pub carrier: String,
+    /// UDP carrier: local port bound for inbound telemetry. Required
+    /// when carrier = "udp" -- the target sends to a configured port,
+    /// so an OS-assigned one would never hear it.
+    #[serde(default)]
+    pub udp_listen_port: Option<u16>,
+    /// Hex-encoded raw byte strings sent to the target on every
+    /// connect, in order, before telemetry reading starts -- the
+    /// downlink-arm step for targets that emit nothing until a
+    /// ground message enables their output. Protocol-neutral by
+    /// design: bytes on the carrier, not commands zenith interprets.
+    #[serde(default)]
+    pub arm_hex: Vec<String>,
     #[serde(default)]
     pub manifest: Option<String>,
     #[serde(default)]
@@ -215,6 +234,9 @@ fn default_target_port() -> u16 {
 }
 fn default_protocol() -> String {
     "aproto-slip".to_string()
+}
+fn default_carrier() -> String {
+    "tcp".to_string()
 }
 /// The default policy, callable from target-add paths that build a
 /// TargetSection literal.
@@ -308,6 +330,28 @@ impl Default for StorageSection {
     }
 }
 
+/// Find the first local listen port claimed by two target
+/// definitions. Distinct targets binding one port cannot both hear
+/// their telemetry, and the loser would only find out at connect
+/// time -- so this is a boot refusal, same discipline as protocol
+/// and carrier typos.
+pub fn duplicate_listen_port(targets: &[TargetSection]) -> Option<(u16, &str, &str)> {
+    let mut seen: Vec<(u16, &str)> = Vec::new();
+    for t in targets {
+        if t.carrier != "udp" {
+            continue;
+        }
+        let Some(port) = t.udp_listen_port else {
+            continue;
+        };
+        if let Some((_, first)) = seen.iter().find(|(p, _)| *p == port) {
+            return Some((port, first, t.name.as_str()));
+        }
+        seen.push((port, t.name.as_str()));
+    }
+    None
+}
+
 /* ----------------------------- Loading ----------------------------- */
 
 /// Parse a TOML config file from disk into a `ServerConfig`. Returns
@@ -316,4 +360,55 @@ pub fn load(path: &Path) -> Result<ServerConfig, String> {
     let content =
         std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path.display(), e))?;
     toml::from_str(&content).map_err(|e| format!("parse error: {}", e))
+}
+
+/* ----------------------------- Tests ----------------------------- */
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(name: &str, carrier: &str, listen: Option<u16>) -> TargetSection {
+        TargetSection {
+            name: name.to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 9000,
+            protocol: "ccsds-spp".to_string(),
+            health_nonzero_bad: Vec::new(),
+            apid_map: None,
+            raw_uid: None,
+            carrier: carrier.to_string(),
+            udp_listen_port: listen,
+            arm_hex: Vec::new(),
+            manifest: None,
+            structs_dir: None,
+            telemetry_config: None,
+            commands_config: None,
+            auto_connect: false,
+        }
+    }
+
+    /// @test Two UDP targets on one listen port are named in the
+    /// refusal; distinct ports, TCP targets, and portless entries
+    /// (caught separately at carrier validation) all pass.
+    #[test]
+    fn duplicate_listen_ports_are_refused_by_name() {
+        let dup = [
+            target("a", "udp", Some(2234)),
+            target("b", "tcp", None),
+            target("c", "udp", Some(2235)),
+            target("d", "udp", Some(2234)),
+        ];
+        assert_eq!(duplicate_listen_port(&dup), Some((2234, "a", "d")));
+
+        let ok = [
+            target("a", "udp", Some(2234)),
+            target("b", "udp", Some(2235)),
+            // TCP targets share nothing local; a port collision with
+            // a UDP listener is impossible across protocols here.
+            target("c", "tcp", None),
+            target("d", "udp", None),
+        ];
+        assert_eq!(duplicate_listen_port(&ok), None);
+    }
 }

@@ -2,8 +2,13 @@ services:
   # Production runtime
   zenith:
     build: .
-    ports:
-      - "8080:8080"
+    # Host networking: target definitions in config.toml fully
+    # describe each link's transport (dials, listens, ports), and
+    # the transport layer binds exactly what they declare -- no
+    # per-target deployment config here, ever. Zenith itself serves
+    # one port, the HTTP/WebSocket front door ([server] in
+    # config.toml, default 8080).
+    network_mode: host
     volumes:
       - zenith-data:/var/lib/zenith
       - ./config.toml:/etc/zenith/config.toml:ro
