@@ -264,10 +264,15 @@ fn build_link(
     push_tlm_tx: broadcast::Sender<PushTelemetryPacket>,
     config: &config::TargetSection,
     connect_init: Option<&crate::core::config_manager::ConnectInit>,
+    record_spec: Option<crate::core::stream_link::RecordSpec>,
 ) -> ProtocolLink {
     match protocol {
         Protocol::AprotoSlip => ProtocolLink::Aproto(AprotoClient::new(push_tlm_tx)),
-        Protocol::CcsdsSpp | Protocol::SlipCcsdsSpp | Protocol::TmCcsdsSpp | Protocol::RawSlip => {
+        Protocol::CcsdsSpp
+        | Protocol::SlipCcsdsSpp
+        | Protocol::TmCcsdsSpp
+        | Protocol::TmCcsdsSppRecords
+        | Protocol::RawSlip => {
             use crate::core::stream_link::{PipelineSpec, StreamLink};
             // Boot already validated the carrier (see carrier_from_config
             // at startup); a bad value on the dynamic-add path degrades
@@ -287,6 +292,10 @@ fn build_link(
                 Protocol::TmCcsdsSpp => PipelineSpec::TmSpp {
                     apid_map: parse_apid_map(config.apid_map.as_ref(), &config.name),
                     frame_size: config.tm_frame_size,
+                },
+                Protocol::TmCcsdsSppRecords => PipelineSpec::TmSppRecords {
+                    frame_size: config.tm_frame_size,
+                    records: record_spec.expect("boot validated records_config for this protocol"),
                 },
                 Protocol::RawSlip => PipelineSpec::SlipRaw {
                     uid: config.raw_uid.as_deref().and_then(|s| {
@@ -336,6 +345,30 @@ fn carrier_from_config(
             "unknown carrier '{}' (supported: tcp, udp, tcp-listen)",
             other
         )),
+    }
+}
+
+/// A loaded record table as the engine consumes it: numeric
+/// addresses parsed, ids mapped to (value size, uid).
+fn record_spec_from_table(
+    table: &crate::core::config_manager::RecordTable,
+) -> crate::core::stream_link::RecordSpec {
+    use crate::core::config_manager::parse_num_u32;
+    crate::core::stream_link::RecordSpec {
+        record_apid: parse_num_u32(&table.record_apid).unwrap_or(0) as u16,
+        id_offset: table.id_offset,
+        id_size: table.id_size,
+        header_size: table.header_size,
+        by_id: table
+            .records
+            .iter()
+            .filter_map(|r| parse_num_u32(&r.uid).map(|uid| (r.id, (r.size, uid))))
+            .collect(),
+        skip_apids: table
+            .skip_apids
+            .iter()
+            .filter_map(|a| parse_num_u32(a).map(|v| v as u16))
+            .collect(),
     }
 }
 
@@ -2718,6 +2751,7 @@ async fn add_target(
         carrier: "tcp".to_string(),
         listen_port: None,
         tm_frame_size: 1024,
+        records_config: None,
         connect_init: None,
         auto_connect: false,
     };
@@ -2732,7 +2766,7 @@ async fn add_target(
         metrics.clone(),
     );
 
-    let mut new_client = build_link(Protocol::AprotoSlip, push_tlm_tx.clone(), &tc, None);
+    let mut new_client = build_link(Protocol::AprotoSlip, push_tlm_tx.clone(), &tc, None, None);
     new_client.set_metrics(metrics.clone());
     let connected = new_client.connected_handle();
     st.targets.insert(
@@ -3866,7 +3900,41 @@ async fn main() {
                     }
                 },
             );
-        let mut new_client = build_link(protocol, push_tlm_tx.clone(), tc, connect_init.as_deref());
+        // Record-stage protocols need their generated table; a
+        // missing or broken one is a definition bug -> boot refusal.
+        let record_spec = if protocol == Protocol::TmCcsdsSppRecords {
+            let Some(path) = tc.records_config.as_ref() else {
+                eprintln!(
+                    "FATAL: target '{}': protocol '{}' requires records_config \
+                     (the generated record table)",
+                    tc.name, tc.protocol
+                );
+                std::process::exit(1);
+            };
+            match crate::core::config_manager::RecordTable::load(std::path::Path::new(path)) {
+                Ok(table) => {
+                    tracing::info!(
+                        "Loaded record table for {}: {} record types",
+                        tc.name,
+                        table.records.len()
+                    );
+                    Some(record_spec_from_table(&table))
+                }
+                Err(e) => {
+                    eprintln!("FATAL: target '{}': records_config: {}", tc.name, e);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            None
+        };
+        let mut new_client = build_link(
+            protocol,
+            push_tlm_tx.clone(),
+            tc,
+            connect_init.as_deref(),
+            record_spec,
+        );
         new_client.set_metrics(metrics.clone());
         let connected = new_client.connected_handle();
         targets.insert(

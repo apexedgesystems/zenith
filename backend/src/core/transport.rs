@@ -61,6 +61,10 @@ pub enum Protocol {
     /// CCSDS TM Transfer Frames carrying Space Packets -- the
     /// space-data-link stack (telemetry-only).
     TmCcsdsSpp,
+    /// The TM stack with a record stage on top: packets on the
+    /// generated table's record APID carry concatenated
+    /// variable-length records (telemetry-only).
+    TmCcsdsSppRecords,
     /// Header-less SLIP frames over TCP (telemetry-only; fullUid
     /// from config -- the bare-instrument case).
     RawSlip,
@@ -75,10 +79,12 @@ impl Protocol {
             "ccsds-spp" => Ok(Protocol::CcsdsSpp),
             "slip+ccsds-spp" => Ok(Protocol::SlipCcsdsSpp),
             "tm+ccsds-spp" => Ok(Protocol::TmCcsdsSpp),
+            "tm+ccsds-spp+records" => Ok(Protocol::TmCcsdsSppRecords),
             "raw-slip" => Ok(Protocol::RawSlip),
             other => Err(format!(
                 "unknown protocol '{}' (supported: aproto-slip, ccsds-spp, \
-                 slip+ccsds-spp, tm+ccsds-spp, raw-slip)",
+                 slip+ccsds-spp, tm+ccsds-spp, tm+ccsds-spp+records, \
+                 raw-slip)",
                 other
             )),
         }
@@ -90,6 +96,7 @@ impl Protocol {
             Protocol::CcsdsSpp => "ccsds-spp",
             Protocol::SlipCcsdsSpp => "slip+ccsds-spp",
             Protocol::TmCcsdsSpp => "tm+ccsds-spp",
+            Protocol::TmCcsdsSppRecords => "tm+ccsds-spp+records",
             Protocol::RawSlip => "raw-slip",
         }
     }

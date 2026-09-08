@@ -743,6 +743,93 @@ impl TelemetryConfig {
     }
 }
 
+/* ----------------------------- Record Table ----------------------------- */
+
+/// A generated record-routing table (`records.json` in the target
+/// config directory) for wires whose packets carry concatenated
+/// variable-length records addressed by an id field -- apid_map's
+/// richer sibling. The producing generator knows the record header
+/// shape and every id's value size; this table is how that
+/// knowledge reaches the engine without the engine learning the
+/// framework.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordTable {
+    /// Packet address (APID) whose payloads are record streams.
+    pub record_apid: String,
+    /// Byte offset of the id field within a record.
+    pub id_offset: usize,
+    /// Width of the id field (2 or 4, big-endian per the wire).
+    pub id_size: usize,
+    /// Total fixed header bytes before each record's value.
+    pub header_size: usize,
+    /// Packet addresses that are known-but-not-decoded (skipped
+    /// silently, not counted unroutable -- deliberate non-decode is
+    /// not noise).
+    #[serde(default)]
+    pub skip_apids: Vec<String>,
+    pub records: Vec<RecordDef>,
+}
+
+/// One record type: its id on the wire, its value length, and the
+/// uid its whole record routes to.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordDef {
+    pub id: u32,
+    pub size: usize,
+    pub uid: String,
+}
+
+impl RecordTable {
+    pub fn load(path: &Path) -> Result<Self, String> {
+        let content =
+            std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path.display(), e))?;
+        let table: RecordTable =
+            serde_json::from_str(&content).map_err(|e| format!("{}: {}", path.display(), e))?;
+        table
+            .validate()
+            .map_err(|e| format!("{}: {}", path.display(), e))?;
+        Ok(table)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.id_size != 2 && self.id_size != 4 {
+            return Err(format!("id_size {} is not 2 or 4", self.id_size));
+        }
+        if self.id_offset + self.id_size > self.header_size {
+            return Err(format!(
+                "id field ({}+{}) does not fit in the {}-byte header",
+                self.id_offset, self.id_size, self.header_size
+            ));
+        }
+        if self.records.is_empty() {
+            return Err("no records declared".to_string());
+        }
+        let mut seen = std::collections::HashSet::new();
+        for r in &self.records {
+            if !seen.insert(r.id) {
+                return Err(format!("record id {} declared twice", r.id));
+            }
+            parse_num_u32(&r.uid)
+                .ok_or(format!("record id {} has invalid uid '{}'", r.id, r.uid))?;
+        }
+        parse_num_u32(&self.record_apid).ok_or(format!(
+            "record_apid '{}' is not a number",
+            self.record_apid
+        ))?;
+        Ok(())
+    }
+}
+
+/// "0x" hex or decimal, the target-config number convention.
+pub fn parse_num_u32(s: &str) -> Option<u32> {
+    let t = s.trim();
+    if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16).ok()
+    } else {
+        t.parse().ok()
+    }
+}
+
 /* ----------------------------- Connect Init ----------------------------- */
 
 /// A connect-time init sequence (`on_connect.json` in the target

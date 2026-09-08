@@ -67,8 +67,66 @@ pub enum PipelineSpec {
         apid_map: HashMap<u16, u32>,
         frame_size: usize,
     },
+    /// TM frames -> SPP packets -> record streams: packets on the
+    /// record APID carry concatenated variable-length records
+    /// addressed by an id field, walked with the generated table.
+    TmSppRecords {
+        frame_size: usize,
+        records: RecordSpec,
+    },
     /// SLIP delimits; each frame is one raw payload for the config uid.
     SlipRaw { uid: Option<u32> },
+}
+
+/// The engine's view of a generated record table: byte shape of the
+/// header, id -> (value size, uid) routing, and which packet
+/// addresses are deliberately not decoded.
+#[derive(Debug, Clone)]
+pub struct RecordSpec {
+    pub record_apid: u16,
+    pub id_offset: usize,
+    pub id_size: usize,
+    pub header_size: usize,
+    pub by_id: HashMap<u32, (usize, u32)>,
+    pub skip_apids: std::collections::HashSet<u16>,
+}
+
+impl RecordSpec {
+    /// Walk one packet payload: emit each known record whole
+    /// (header + value, so dictionaries can also expose time
+    /// fields). An unknown id ends the walk -- record lengths come
+    /// from the table, so past an unknown record there is no
+    /// alignment. Returns (records, dropped-tail flag).
+    fn walk(&self, payload: &[u8]) -> (Vec<(u32, Vec<u8>)>, bool) {
+        let mut out = Vec::new();
+        let mut pos = 0usize;
+        while payload.len() - pos >= self.header_size {
+            let id_at = pos + self.id_offset;
+            let id = if self.id_size == 2 {
+                u16::from_be_bytes([payload[id_at], payload[id_at + 1]]) as u32
+            } else {
+                u32::from_be_bytes([
+                    payload[id_at],
+                    payload[id_at + 1],
+                    payload[id_at + 2],
+                    payload[id_at + 3],
+                ])
+            };
+            let Some(&(value_size, uid)) = self.by_id.get(&id) else {
+                return (out, true);
+            };
+            let total = self.header_size + value_size;
+            if payload.len() - pos < total {
+                // Truncated final record: aggregation never splits a
+                // record across packets, so this is damage, not
+                // continuation.
+                return (out, true);
+            }
+            out.push((uid, payload[pos..pos + total].to_vec()));
+            pos += total;
+        }
+        (out, false)
+    }
 }
 
 /// A live pipeline: stream bytes -> addressed packets.
@@ -85,6 +143,11 @@ enum PacketPipeline {
         deframer: ccsds_tm::Deframer,
         extractor: ccsds_spp::Extractor,
         apid_map: HashMap<u16, u32>,
+    },
+    TmSppRecords {
+        deframer: ccsds_tm::Deframer,
+        extractor: ccsds_spp::Extractor,
+        records: RecordSpec,
     },
     SlipRaw {
         slip: slip::Decoder,
@@ -110,6 +173,14 @@ impl PacketPipeline {
                 deframer: ccsds_tm::Deframer::new(*frame_size),
                 extractor: ccsds_spp::Extractor::new(),
                 apid_map: apid_map.clone(),
+            },
+            PipelineSpec::TmSppRecords {
+                frame_size,
+                records,
+            } => PacketPipeline::TmSppRecords {
+                deframer: ccsds_tm::Deframer::new(*frame_size),
+                extractor: ccsds_spp::Extractor::new(),
+                records: records.clone(),
             },
             PipelineSpec::SlipRaw { uid } => PacketPipeline::SlipRaw {
                 slip: slip::Decoder::new(),
@@ -181,6 +252,37 @@ impl PacketPipeline {
                                 payload,
                             }),
                             None => unroutable += 1,
+                        }
+                    }
+                }
+            }
+            PacketPipeline::TmSppRecords {
+                deframer,
+                extractor,
+                records,
+            } => {
+                let (fields, bad_frames) = deframer.feed(bytes);
+                unroutable += bad_frames;
+                for field in fields {
+                    for (hdr, payload) in extractor.feed(&field) {
+                        if hdr.apid == ccsds_spp::IDLE_APID
+                            || records.skip_apids.contains(&hdr.apid)
+                        {
+                            continue; // fill, or deliberately not decoded
+                        }
+                        if hdr.apid != records.record_apid {
+                            unroutable += 1;
+                            continue;
+                        }
+                        let (recs, dropped_tail) = records.walk(&payload);
+                        for (uid, record) in recs {
+                            out.push(PushTelemetryPacket {
+                                full_uid: uid,
+                                payload: record,
+                            });
+                        }
+                        if dropped_tail {
+                            unroutable += 1;
                         }
                     }
                 }
@@ -982,6 +1084,72 @@ mod tests {
             !link.is_connected(),
             "link must report disconnected after an init step fails"
         );
+        link.disconnect();
+    }
+
+    /// @test The record stage end to end through the full TM stack:
+    /// two known records aggregated in one packet route whole
+    /// (header + value) to their table uids; an unknown id drops
+    /// the aggregate's tail but not what came before it; packets on
+    /// a skip APID vanish silently; and the whole walk survives the
+    /// frame being split mid-stream.
+    #[tokio::test]
+    async fn record_stage_walks_aggregates_through_tm_stack() {
+        // Record shape mirroring a typical id-addressed wire: 2B
+        // discriminator, 4B id, 11B time, then the value.
+        let rec = |id: u32, value: &[u8]| -> Vec<u8> {
+            let mut r = vec![0x00, 0x01];
+            r.extend_from_slice(&id.to_be_bytes());
+            r.extend_from_slice(&[0u8; 11]);
+            r.extend_from_slice(value);
+            r
+        };
+        let spec = RecordSpec {
+            record_apid: 0x001,
+            id_offset: 2,
+            id_size: 4,
+            header_size: 17,
+            by_id: HashMap::from([(100, (4, 0xA100u32)), (200, (1, 0xA200u32))]),
+            skip_apids: [0x002u16].into_iter().collect(),
+        };
+
+        // Aggregate: known(100), known(200), unknown(999) + junk.
+        let mut agg = rec(100, &[1, 2, 3, 4]);
+        agg.extend_from_slice(&rec(200, &[7]));
+        agg.extend_from_slice(&rec(999, &[0xEE; 3]));
+        let tlm_pkt = ccsds_spp::pack(0x001, 1, &agg);
+        let event_pkt = ccsds_spp::pack(0x002, 1, &[0xBB; 10]);
+        let mut content = tlm_pkt.clone();
+        content.extend_from_slice(&event_pkt);
+        let frame = ccsds_tm::pack_frame(256, 0x044, 0, &content);
+
+        let addr = serve_bytes(vec![frame[..100].to_vec(), frame[100..].to_vec()]).await;
+        let (push_tx, mut push_rx) = broadcast::channel(16);
+        let mut link = StreamLink::new(
+            Protocol::TmCcsdsSppRecords,
+            PipelineSpec::TmSppRecords {
+                frame_size: 256,
+                records: spec,
+            },
+            Carrier::Tcp,
+            Vec::new(),
+            push_tx,
+        );
+        link.connect(&addr.ip().to_string(), addr.port())
+            .await
+            .unwrap();
+
+        let first = recv_one(&mut push_rx).await;
+        assert_eq!(first.full_uid, 0xA100);
+        assert_eq!(first.payload.len(), 17 + 4);
+        assert_eq!(&first.payload[17..], &[1, 2, 3, 4]);
+        let second = recv_one(&mut push_rx).await;
+        assert_eq!(second.full_uid, 0xA200);
+        assert_eq!(&second.payload[17..], &[7]);
+        // Unknown-id tail and the skip-APID event packet: nothing
+        // further arrives.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(push_rx.try_recv().is_err());
         link.disconnect();
     }
 

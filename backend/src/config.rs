@@ -196,6 +196,11 @@ pub struct TargetSection {
     /// octets (a mission constant of the producing build).
     #[serde(default = "default_tm_frame_size")]
     pub tm_frame_size: usize,
+    /// Record-stage targets (tm+ccsds-spp+records): path to the
+    /// generated record table (records.json in the target config
+    /// directory).
+    #[serde(default)]
+    pub records_config: Option<String>,
     /// Path to this target's connect-time init sequence
     /// (on_connect.json): named steps of raw bytes sent, in order
     /// with optional delays, when the link comes up. Generated into
@@ -393,6 +398,7 @@ mod tests {
             carrier: carrier.to_string(),
             listen_port: listen,
             tm_frame_size: default_tm_frame_size(),
+            records_config: None,
             connect_init: None,
             manifest: None,
             structs_dir: None,
