@@ -1,0 +1,18 @@
+{
+  "component": "ch_0x10001001",
+  "byte_order": "be",
+  "structs": {
+    "Record": {
+      "category": "TELEMETRY",
+      "size": 21,
+      "fields": [
+        {
+          "name": "RgCycleSlips",
+          "type": "uint",
+          "offset": 17,
+          "size": 4
+        }
+      ]
+    }
+  }
+}

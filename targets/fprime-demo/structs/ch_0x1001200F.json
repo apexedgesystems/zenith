@@ -1,0 +1,18 @@
+{
+  "component": "ch_0x1001200F",
+  "byte_order": "be",
+  "structs": {
+    "Record": {
+      "category": "TELEMETRY",
+      "size": 21,
+      "fields": [
+        {
+          "name": "CPU_10",
+          "type": "float",
+          "offset": 17,
+          "size": 4
+        }
+      ]
+    }
+  }
+}

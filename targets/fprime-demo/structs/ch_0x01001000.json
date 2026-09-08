@@ -1,0 +1,18 @@
+{
+  "component": "ch_0x01001000",
+  "byte_order": "be",
+  "structs": {
+    "Record": {
+      "category": "TELEMETRY",
+      "size": 25,
+      "fields": [
+        {
+          "name": "EventsDropped",
+          "type": "uint",
+          "offset": 17,
+          "size": 8
+        }
+      ]
+    }
+  }
+}

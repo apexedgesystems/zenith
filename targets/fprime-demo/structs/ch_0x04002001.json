@@ -1,0 +1,18 @@
+{
+  "component": "ch_0x04002001",
+  "byte_order": "be",
+  "structs": {
+    "Record": {
+      "category": "TELEMETRY",
+      "size": 25,
+      "fields": [
+        {
+          "name": "NumBytesWritten",
+          "type": "uint",
+          "offset": 17,
+          "size": 8
+        }
+      ]
+    }
+  }
+}

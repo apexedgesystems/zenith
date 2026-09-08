@@ -1,0 +1,18 @@
+{
+  "component": "ch_0x10004000",
+  "byte_order": "be",
+  "structs": {
+    "Record": {
+      "category": "TELEMETRY",
+      "size": 21,
+      "fields": [
+        {
+          "name": "CS_LoadCommands",
+          "type": "uint",
+          "offset": 17,
+          "size": 4
+        }
+      ]
+    }
+  }
+}

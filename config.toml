@@ -153,3 +153,23 @@ health_nonzero_bad = [
 "0x005" = "0x00C00005" # CFE_TIME
 "0x080" = "0x00C00080" # TO_LAB
 "0x084" = "0x00C00084" # CI_LAB
+
+# Target: local F-prime demo (dev; the flight/rig-fprime rig). The
+# deployment DIALS IN: zenith listens on listen_port and the
+# connected state tracks the live session. Stock wire is CCSDS TM
+# frames wrapping space packets whose telemetry APID carries
+# id-addressed channel records -- all described by the generated
+# records.json and per-channel dictionaries.
+[[targets]]
+name = "F-prime Demo"
+host = "127.0.0.1"
+port = 50050
+protocol = "tm+ccsds-spp+records"
+carrier = "tcp-listen"
+listen_port = 50050
+tm_frame_size = 1024
+auto_connect = false
+manifest = "/data/targets/fprime-demo/app_manifest.json"
+structs_dir = "/data/targets/fprime-demo/structs"
+telemetry_config = "/data/targets/fprime-demo/telemetry.json"
+records_config = "/data/targets/fprime-demo/records.json"

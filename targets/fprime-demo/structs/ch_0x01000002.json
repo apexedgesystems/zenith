@@ -1,0 +1,18 @@
+{
+  "component": "ch_0x01000002",
+  "byte_order": "be",
+  "structs": {
+    "Record": {
+      "category": "TELEMETRY",
+      "size": 21,
+      "fields": [
+        {
+          "name": "CommandsDropped",
+          "type": "uint",
+          "offset": 17,
+          "size": 4
+        }
+      ]
+    }
+  }
+}
