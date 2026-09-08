@@ -75,7 +75,9 @@ exact struct layouts from the flight build's DWARF debug info --
 the same binaries the software runs, so dictionaries cannot drift
 from the wire); F-prime targets use `tools/fprime-dictgen` (a pure
 transform of the deployment's build-generated JSON dictionary into
-per-channel dictionaries, a record-routing table, and layouts).
+a record dictionary -- record-shaped telemetry is a first-class
+dictionary form, one readable table of channel ids, names, types,
+and sizes -- plus display layouts).
 Dictionaries carry a generator-measured `byte_order` stamp, so
 big-endian wires (F-prime by spec, big-endian flight processors by
 ELF ident) decode correctly with zero configuration.
@@ -277,9 +279,8 @@ protocol = "tm+ccsds-spp+records"  # CCSDS TM frames -> space
 carrier = "tcp-listen"         # The deployment dials IN to zenith
 listen_port = 50050
 tm_frame_size = 1024           # Mission constant of the build
-manifest = "/data/targets/fprime-demo/app_manifest.json"
-structs_dir = "/data/targets/fprime-demo/structs"
 records_config = "/data/targets/fprime-demo/records.json"
+telemetry_config = "/data/targets/fprime-demo/telemetry.json"
 ```
 
 A target's definition fully describes its transport: the protocol
