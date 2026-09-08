@@ -87,6 +87,9 @@ struct TargetState {
     /// Connect-time init sequence (named steps; the link runs it,
     /// this copy names the steps in connect audit records)
     connect_init: Option<Arc<crate::core::config_manager::ConnectInit>>,
+    /// Record dictionary (the decode source for record-shaped
+    /// telemetry; the link's RecordSpec derives from it)
+    record_table: Option<Arc<crate::core::config_manager::RecordTable>>,
     _router_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -359,11 +362,7 @@ fn record_spec_from_table(
         id_offset: table.id_offset,
         id_size: table.id_size,
         header_size: table.header_size,
-        by_id: table
-            .records
-            .iter()
-            .filter_map(|r| parse_num_u32(&r.uid).map(|uid| (r.id, (r.size, uid))))
-            .collect(),
+        by_id: table.records.iter().map(|r| (r.id, r.size)).collect(),
         skip_apids: table
             .skip_apids
             .iter()
@@ -487,6 +486,7 @@ async fn do_connect_target(state: &AppState, id: &str) -> Result<bool, (StatusCo
             target.sample_tx.clone(),
             target.struct_dicts.clone(),
             target.manifest.clone(),
+            target.record_table.clone(),
             target.metrics.clone(),
         );
         if let Some(old) = target._router_handle.replace(handle) {
@@ -2235,7 +2235,7 @@ async fn telemetry_layouts(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (db, dicts, manifest) = {
+    let (db, dicts, manifest, record_table) = {
         let st = state.read().await;
         let target = st
             .targets
@@ -2245,6 +2245,7 @@ async fn telemetry_layouts(
             st.db.clone(),
             target.struct_dicts.clone(),
             target.manifest.clone(),
+            target.record_table.clone(),
         )
     };
 
@@ -2265,11 +2266,13 @@ async fn telemetry_layouts(
         .iter()
         .map(|(u, n, k)| (*u, n.as_str(), k.as_deref()))
         .collect();
-    let known: std::collections::HashSet<String> =
-        telemetry::TelemetryDecoder::new(&dicts, &uid_refs)
-            .channel_names()
-            .into_iter()
-            .collect();
+    let known: std::collections::HashSet<String> = {
+        let mut d = telemetry::TelemetryDecoder::new(&dicts, &uid_refs);
+        if let Some(table) = &record_table {
+            d.add_record_table(table);
+        }
+        d.channel_names().into_iter().collect()
+    };
 
     let annotated: Vec<serde_json::Value> = layouts
         .iter()
@@ -2783,6 +2786,7 @@ async fn add_target(
             telemetry_config: None,
             commands_config: None,
             connect_init: None,
+            record_table: None,
             _router_handle: None,
         },
     );
@@ -3902,7 +3906,7 @@ async fn main() {
             );
         // Record-stage protocols need their generated table; a
         // missing or broken one is a definition bug -> boot refusal.
-        let record_spec = if protocol == Protocol::TmCcsdsSppRecords {
+        let record_table = if protocol == Protocol::TmCcsdsSppRecords {
             let Some(path) = tc.records_config.as_ref() else {
                 eprintln!(
                     "FATAL: target '{}': protocol '{}' requires records_config \
@@ -3914,11 +3918,11 @@ async fn main() {
             match crate::core::config_manager::RecordTable::load(std::path::Path::new(path)) {
                 Ok(table) => {
                     tracing::info!(
-                        "Loaded record table for {}: {} record types",
+                        "Loaded record dictionary for {}: {} channels",
                         tc.name,
                         table.records.len()
                     );
-                    Some(record_spec_from_table(&table))
+                    Some(Arc::new(table))
                 }
                 Err(e) => {
                     eprintln!("FATAL: target '{}': records_config: {}", tc.name, e);
@@ -3928,6 +3932,7 @@ async fn main() {
         } else {
             None
         };
+        let record_spec = record_table.as_ref().map(|t| record_spec_from_table(t));
         let mut new_client = build_link(
             protocol,
             push_tlm_tx.clone(),
@@ -3951,6 +3956,7 @@ async fn main() {
                 telemetry_config,
                 commands_config,
                 connect_init,
+                record_table,
                 _router_handle: None,
             },
         );

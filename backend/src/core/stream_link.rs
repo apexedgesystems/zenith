@@ -87,7 +87,9 @@ pub struct RecordSpec {
     pub id_offset: usize,
     pub id_size: usize,
     pub header_size: usize,
-    pub by_id: HashMap<u32, (usize, u32)>,
+    /// id -> value size; the id itself is the routing uid (the
+    /// record dictionary keys decode by the same id).
+    pub by_id: HashMap<u32, usize>,
     pub skip_apids: std::collections::HashSet<u16>,
 }
 
@@ -112,7 +114,7 @@ impl RecordSpec {
                     payload[id_at + 3],
                 ])
             };
-            let Some(&(value_size, uid)) = self.by_id.get(&id) else {
+            let Some(&value_size) = self.by_id.get(&id) else {
                 return (out, true);
             };
             let total = self.header_size + value_size;
@@ -122,7 +124,7 @@ impl RecordSpec {
                 // continuation.
                 return (out, true);
             }
-            out.push((uid, payload[pos..pos + total].to_vec()));
+            out.push((id, payload[pos..pos + total].to_vec()));
             pos += total;
         }
         (out, false)
@@ -1109,7 +1111,7 @@ mod tests {
             id_offset: 2,
             id_size: 4,
             header_size: 17,
-            by_id: HashMap::from([(100, (4, 0xA100u32)), (200, (1, 0xA200u32))]),
+            by_id: HashMap::from([(100, 4), (200, 1)]),
             skip_apids: [0x002u16].into_iter().collect(),
         };
 
@@ -1140,11 +1142,11 @@ mod tests {
             .unwrap();
 
         let first = recv_one(&mut push_rx).await;
-        assert_eq!(first.full_uid, 0xA100);
+        assert_eq!(first.full_uid, 100);
         assert_eq!(first.payload.len(), 17 + 4);
         assert_eq!(&first.payload[17..], &[1, 2, 3, 4]);
         let second = recv_one(&mut push_rx).await;
-        assert_eq!(second.full_uid, 0xA200);
+        assert_eq!(second.full_uid, 200);
         assert_eq!(&second.payload[17..], &[7]);
         // Unknown-id tail and the skip-APID event packet: nothing
         // further arrives.

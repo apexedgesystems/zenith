@@ -1,8 +1,10 @@
 {
+  "_generated_by": "fprime-dictgen from FprimeDemoDeployment.FprimeDemoDeployment (framework v4.3.0, dictionary spec 1.0.0)",
   "record_apid": "0x001",
   "id_offset": 2,
   "id_size": 4,
   "header_size": 17,
+  "byte_order": "be",
   "skip_apids": [
     "0x002",
     "0x003",
@@ -16,343 +18,479 @@
   "records": [
     {
       "id": 16777216,
+      "channel": "CdhCore.cmdDisp.CommandsDispatched",
+      "type": "uint",
       "size": 4,
-      "uid": "0x01000000"
+      "annotation": "Number of commands dispatched"
     },
     {
       "id": 16777217,
+      "channel": "CdhCore.cmdDisp.CommandErrors",
+      "type": "uint",
       "size": 4,
-      "uid": "0x01000001"
+      "annotation": "Number of command errors"
     },
     {
       "id": 16777218,
+      "channel": "CdhCore.cmdDisp.CommandsDropped",
+      "type": "uint",
       "size": 4,
-      "uid": "0x01000002"
+      "annotation": "Number of commands drooped due to buffer overflow"
     },
     {
       "id": 16781312,
+      "channel": "CdhCore.events.EventsDropped",
+      "type": "uint",
       "size": 8,
-      "uid": "0x01001000"
+      "annotation": "Number of events dropped due to queue full"
     },
     {
       "id": 16785408,
+      "channel": "CdhCore.health.PingLateWarnings",
+      "type": "uint",
       "size": 4,
-      "uid": "0x01002000"
+      "annotation": "Number of overrun warnings"
     },
     {
       "id": 33562624,
+      "channel": "ComCcsds.commsBufferManager.TotalBuffs",
+      "type": "uint",
       "size": 4,
-      "uid": "0x02002000"
+      "annotation": "The total buffers allocated"
     },
     {
       "id": 33562625,
+      "channel": "ComCcsds.commsBufferManager.CurrBuffs",
+      "type": "uint",
       "size": 4,
-      "uid": "0x02002001"
+      "annotation": "The current number of allocated buffers"
     },
     {
       "id": 33562626,
+      "channel": "ComCcsds.commsBufferManager.HiBuffs",
+      "type": "uint",
       "size": 4,
-      "uid": "0x02002002"
+      "annotation": "The high water mark of allocated buffers"
     },
     {
       "id": 33562627,
+      "channel": "ComCcsds.commsBufferManager.NoBuffs",
+      "type": "uint",
       "size": 4,
-      "uid": "0x02002003"
+      "annotation": "The number of requests that couldn't return a buffer"
     },
     {
       "id": 33562628,
+      "channel": "ComCcsds.commsBufferManager.EmptyBuffs",
+      "type": "uint",
       "size": 4,
-      "uid": "0x02002004"
+      "annotation": "The number of empty buffers returned"
     },
     {
       "id": 67108864,
+      "channel": "DataProducts.dpCat.CatalogDps",
+      "type": "uint",
       "size": 4,
-      "uid": "0x04000000"
+      "annotation": "Number of data products in catalog"
     },
     {
       "id": 67108865,
+      "channel": "DataProducts.dpCat.DpsSent",
+      "type": "uint",
       "size": 4,
-      "uid": "0x04000001"
+      "annotation": "Number of data products sent"
     },
     {
       "id": 67112960,
+      "channel": "DataProducts.dpMgr.NumSuccessfulAllocations",
+      "type": "uint",
       "size": 4,
-      "uid": "0x04001000"
+      "annotation": "The number of successful buffer allocations"
     },
     {
       "id": 67112961,
+      "channel": "DataProducts.dpMgr.NumFailedAllocations",
+      "type": "uint",
       "size": 4,
-      "uid": "0x04001001"
+      "annotation": "The number of failed buffer allocations"
     },
     {
       "id": 67112962,
+      "channel": "DataProducts.dpMgr.NumDataProducts",
+      "type": "uint",
       "size": 4,
-      "uid": "0x04001002"
+      "annotation": "Number of data products handled"
     },
     {
       "id": 67112963,
+      "channel": "DataProducts.dpMgr.NumBytes",
+      "type": "uint",
       "size": 8,
-      "uid": "0x04001003"
+      "annotation": "Number of bytes handled"
     },
     {
       "id": 67117056,
+      "channel": "DataProducts.dpWriter.NumBuffersReceived",
+      "type": "uint",
       "size": 4,
-      "uid": "0x04002000"
+      "annotation": "The number of buffers received"
     },
     {
       "id": 67117057,
+      "channel": "DataProducts.dpWriter.NumBytesWritten",
+      "type": "uint",
       "size": 8,
-      "uid": "0x04002001"
+      "annotation": "The number of bytes written"
     },
     {
       "id": 67117058,
+      "channel": "DataProducts.dpWriter.NumSuccessfulWrites",
+      "type": "uint",
       "size": 4,
-      "uid": "0x04002002"
+      "annotation": "The number of successful writes"
     },
     {
       "id": 67117059,
+      "channel": "DataProducts.dpWriter.NumFailedWrites",
+      "type": "uint",
       "size": 4,
-      "uid": "0x04002003"
+      "annotation": "The number of failed writes"
     },
     {
       "id": 67117060,
+      "channel": "DataProducts.dpWriter.NumErrors",
+      "type": "uint",
       "size": 4,
-      "uid": "0x04002004"
+      "annotation": "The number of errors"
     },
     {
       "id": 67121152,
+      "channel": "DataProducts.dpBufferManager.TotalBuffs",
+      "type": "uint",
       "size": 4,
-      "uid": "0x04003000"
+      "annotation": "The total buffers allocated"
     },
     {
       "id": 67121153,
+      "channel": "DataProducts.dpBufferManager.CurrBuffs",
+      "type": "uint",
       "size": 4,
-      "uid": "0x04003001"
+      "annotation": "The current number of allocated buffers"
     },
     {
       "id": 67121154,
+      "channel": "DataProducts.dpBufferManager.HiBuffs",
+      "type": "uint",
       "size": 4,
-      "uid": "0x04003002"
+      "annotation": "The high water mark of allocated buffers"
     },
     {
       "id": 67121155,
+      "channel": "DataProducts.dpBufferManager.NoBuffs",
+      "type": "uint",
       "size": 4,
-      "uid": "0x04003003"
+      "annotation": "The number of requests that couldn't return a buffer"
     },
     {
       "id": 67121156,
+      "channel": "DataProducts.dpBufferManager.EmptyBuffs",
+      "type": "uint",
       "size": 4,
-      "uid": "0x04003004"
+      "annotation": "The number of empty buffers returned"
     },
     {
       "id": 67125248,
+      "channel": "DataProducts.dpBufferAccumulator.BA_NumQueuedBuffers",
+      "type": "uint",
       "size": 4,
-      "uid": "0x04004000"
+      "annotation": "The number of buffers queued"
     },
     {
       "id": 83886080,
+      "channel": "FileHandling.fileUplink.FilesReceived",
+      "type": "uint",
       "size": 4,
-      "uid": "0x05000000"
+      "annotation": "The total number of complete files received"
     },
     {
       "id": 83886081,
+      "channel": "FileHandling.fileUplink.PacketsReceived",
+      "type": "uint",
       "size": 4,
-      "uid": "0x05000001"
+      "annotation": "The total number of packets received"
     },
     {
       "id": 83886082,
+      "channel": "FileHandling.fileUplink.Warnings",
+      "type": "uint",
       "size": 4,
-      "uid": "0x05000002"
+      "annotation": "The total number of warnings issued"
     },
     {
       "id": 83886083,
+      "channel": "FileHandling.fileUplink.FilesReceivedFailed",
+      "type": "uint",
       "size": 4,
-      "uid": "0x05000003"
+      "annotation": "The total number of files rejected because the computed checksum did not match the value in the END packet"
     },
     {
       "id": 83890176,
+      "channel": "FileHandling.fileDownlink.FilesSent",
+      "type": "uint",
       "size": 4,
-      "uid": "0x05001000"
+      "annotation": "The total number of files sent"
     },
     {
       "id": 83890177,
+      "channel": "FileHandling.fileDownlink.PacketsSent",
+      "type": "uint",
       "size": 4,
-      "uid": "0x05001001"
+      "annotation": "The total number of packets sent"
     },
     {
       "id": 83890178,
+      "channel": "FileHandling.fileDownlink.Warnings",
+      "type": "uint",
       "size": 4,
-      "uid": "0x05001002"
+      "annotation": "The total number of warnings"
     },
     {
       "id": 83894272,
+      "channel": "FileHandling.fileManager.CommandsExecuted",
+      "type": "uint",
       "size": 4,
-      "uid": "0x05002000"
+      "annotation": "The total number of commands successfully executed"
     },
     {
       "id": 83894273,
+      "channel": "FileHandling.fileManager.Errors",
+      "type": "uint",
       "size": 4,
-      "uid": "0x05002001"
+      "annotation": "The total number of errors"
     },
     {
       "id": 268439552,
+      "channel": "FprimeDemoDeployment.rateGroup_1Hz.RgMaxTime",
+      "type": "uint",
       "size": 4,
-      "uid": "0x10001000"
+      "annotation": "Max execution time rate group"
     },
     {
       "id": 268439553,
+      "channel": "FprimeDemoDeployment.rateGroup_1Hz.RgCycleSlips",
+      "type": "uint",
       "size": 4,
-      "uid": "0x10001001"
+      "annotation": "Cycle slips for rate group"
     },
     {
       "id": 268443648,
+      "channel": "FprimeDemoDeployment.rateGroup_0_5Hz.RgMaxTime",
+      "type": "uint",
       "size": 4,
-      "uid": "0x10002000"
+      "annotation": "Max execution time rate group"
     },
     {
       "id": 268443649,
+      "channel": "FprimeDemoDeployment.rateGroup_0_5Hz.RgCycleSlips",
+      "type": "uint",
       "size": 4,
-      "uid": "0x10002001"
+      "annotation": "Cycle slips for rate group"
     },
     {
       "id": 268447744,
+      "channel": "FprimeDemoDeployment.rateGroup_0_25Hz.RgMaxTime",
+      "type": "uint",
       "size": 4,
-      "uid": "0x10003000"
+      "annotation": "Max execution time rate group"
     },
     {
       "id": 268447745,
+      "channel": "FprimeDemoDeployment.rateGroup_0_25Hz.RgCycleSlips",
+      "type": "uint",
       "size": 4,
-      "uid": "0x10003001"
+      "annotation": "Cycle slips for rate group"
     },
     {
       "id": 268451840,
+      "channel": "FprimeDemoDeployment.cmdSeq.CS_LoadCommands",
+      "type": "uint",
       "size": 4,
-      "uid": "0x10004000"
+      "annotation": "The number of Load commands executed"
     },
     {
       "id": 268451841,
+      "channel": "FprimeDemoDeployment.cmdSeq.CS_CancelCommands",
+      "type": "uint",
       "size": 4,
-      "uid": "0x10004001"
+      "annotation": "The number of Cancel commands executed"
     },
     {
       "id": 268451842,
+      "channel": "FprimeDemoDeployment.cmdSeq.CS_Errors",
+      "type": "uint",
       "size": 4,
-      "uid": "0x10004002"
+      "annotation": "The number of errors that have occurred"
     },
     {
       "id": 268451843,
+      "channel": "FprimeDemoDeployment.cmdSeq.CS_CommandsExecuted",
+      "type": "uint",
       "size": 4,
-      "uid": "0x10004003"
+      "annotation": "The number of commands executed across all sequences."
     },
     {
       "id": 268451844,
+      "channel": "FprimeDemoDeployment.cmdSeq.CS_SequencesCompleted",
+      "type": "uint",
       "size": 4,
-      "uid": "0x10004004"
+      "annotation": "The number of sequences completed."
     },
     {
       "id": 268509184,
+      "channel": "FprimeDemoDeployment.systemResources.MEMORY_TOTAL",
+      "type": "uint",
       "size": 8,
-      "uid": "0x10012000"
+      "annotation": "Total system memory in KB"
     },
     {
       "id": 268509185,
+      "channel": "FprimeDemoDeployment.systemResources.MEMORY_USED",
+      "type": "uint",
       "size": 8,
-      "uid": "0x10012001"
+      "annotation": "System memory used in KB"
     },
     {
       "id": 268509186,
+      "channel": "FprimeDemoDeployment.systemResources.NON_VOLATILE_TOTAL",
+      "type": "uint",
       "size": 8,
-      "uid": "0x10012002"
+      "annotation": "System non-volatile available in KB"
     },
     {
       "id": 268509187,
+      "channel": "FprimeDemoDeployment.systemResources.NON_VOLATILE_FREE",
+      "type": "uint",
       "size": 8,
-      "uid": "0x10012003"
+      "annotation": "System non-volatile available in KB"
     },
     {
       "id": 268509188,
+      "channel": "FprimeDemoDeployment.systemResources.CPU",
+      "type": "float",
       "size": 4,
-      "uid": "0x10012004"
+      "annotation": "System's CPU Percentage"
     },
     {
       "id": 268509189,
+      "channel": "FprimeDemoDeployment.systemResources.CPU_00",
+      "type": "float",
       "size": 4,
-      "uid": "0x10012005"
+      "annotation": "System's CPU Percentage"
     },
     {
       "id": 268509190,
+      "channel": "FprimeDemoDeployment.systemResources.CPU_01",
+      "type": "float",
       "size": 4,
-      "uid": "0x10012006"
+      "annotation": "System's CPU Percentage"
     },
     {
       "id": 268509191,
+      "channel": "FprimeDemoDeployment.systemResources.CPU_02",
+      "type": "float",
       "size": 4,
-      "uid": "0x10012007"
+      "annotation": "System's CPU Percentage"
     },
     {
       "id": 268509192,
+      "channel": "FprimeDemoDeployment.systemResources.CPU_03",
+      "type": "float",
       "size": 4,
-      "uid": "0x10012008"
+      "annotation": "System's CPU Percentage"
     },
     {
       "id": 268509193,
+      "channel": "FprimeDemoDeployment.systemResources.CPU_04",
+      "type": "float",
       "size": 4,
-      "uid": "0x10012009"
+      "annotation": "System's CPU Percentage"
     },
     {
       "id": 268509194,
+      "channel": "FprimeDemoDeployment.systemResources.CPU_05",
+      "type": "float",
       "size": 4,
-      "uid": "0x1001200A"
+      "annotation": "System's CPU Percentage"
     },
     {
       "id": 268509195,
+      "channel": "FprimeDemoDeployment.systemResources.CPU_06",
+      "type": "float",
       "size": 4,
-      "uid": "0x1001200B"
+      "annotation": "System's CPU Percentage"
     },
     {
       "id": 268509196,
+      "channel": "FprimeDemoDeployment.systemResources.CPU_07",
+      "type": "float",
       "size": 4,
-      "uid": "0x1001200C"
+      "annotation": "System's CPU Percentage"
     },
     {
       "id": 268509197,
+      "channel": "FprimeDemoDeployment.systemResources.CPU_08",
+      "type": "float",
       "size": 4,
-      "uid": "0x1001200D"
+      "annotation": "System's CPU Percentage"
     },
     {
       "id": 268509198,
+      "channel": "FprimeDemoDeployment.systemResources.CPU_09",
+      "type": "float",
       "size": 4,
-      "uid": "0x1001200E"
+      "annotation": "System's CPU Percentage"
     },
     {
       "id": 268509199,
+      "channel": "FprimeDemoDeployment.systemResources.CPU_10",
+      "type": "float",
       "size": 4,
-      "uid": "0x1001200F"
+      "annotation": "System's CPU Percentage"
     },
     {
       "id": 268509200,
+      "channel": "FprimeDemoDeployment.systemResources.CPU_11",
+      "type": "float",
       "size": 4,
-      "uid": "0x10012010"
+      "annotation": "System's CPU Percentage"
     },
     {
       "id": 268509201,
+      "channel": "FprimeDemoDeployment.systemResources.CPU_12",
+      "type": "float",
       "size": 4,
-      "uid": "0x10012011"
+      "annotation": "System's CPU Percentage"
     },
     {
       "id": 268509202,
+      "channel": "FprimeDemoDeployment.systemResources.CPU_13",
+      "type": "float",
       "size": 4,
-      "uid": "0x10012012"
+      "annotation": "System's CPU Percentage"
     },
     {
       "id": 268509203,
+      "channel": "FprimeDemoDeployment.systemResources.CPU_14",
+      "type": "float",
       "size": 4,
-      "uid": "0x10012013"
+      "annotation": "System's CPU Percentage"
     },
     {
       "id": 268509204,
+      "channel": "FprimeDemoDeployment.systemResources.CPU_15",
+      "type": "float",
       "size": 4,
-      "uid": "0x10012014"
+      "annotation": "System's CPU Percentage"
     }
   ]
 }

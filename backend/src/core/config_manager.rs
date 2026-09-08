@@ -745,13 +745,16 @@ impl TelemetryConfig {
 
 /* ----------------------------- Record Table ----------------------------- */
 
-/// A generated record-routing table (`records.json` in the target
+/// A generated record dictionary (`records.json` in the target
 /// config directory) for wires whose packets carry concatenated
-/// variable-length records addressed by an id field -- apid_map's
-/// richer sibling. The producing generator knows the record header
-/// shape and every id's value size; this table is how that
-/// knowledge reaches the engine without the engine learning the
-/// framework.
+/// variable-length records addressed by an id field. This IS the
+/// dictionary for record-shaped telemetry -- some frameworks
+/// downlink per-channel records rather than fixed structs, and
+/// forcing that shape through struct dictionaries shreds one clean
+/// generated file into dozens of single-field fakes. One table
+/// carries the record header shape, every channel's id, name,
+/// type, and value size, and the wire byte order; the engine reads
+/// it without learning the framework.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordTable {
     /// Packet address (APID) whose payloads are record streams.
@@ -762,6 +765,10 @@ pub struct RecordTable {
     pub id_size: usize,
     /// Total fixed header bytes before each record's value.
     pub header_size: usize,
+    /// Byte order of record values ("le" default) -- same semantics
+    /// as a struct dictionary's stamp.
+    #[serde(default)]
+    pub byte_order: Option<String>,
     /// Packet addresses that are known-but-not-decoded (skipped
     /// silently, not counted unroutable -- deliberate non-decode is
     /// not noise).
@@ -770,13 +777,18 @@ pub struct RecordTable {
     pub records: Vec<RecordDef>,
 }
 
-/// One record type: its id on the wire, its value length, and the
-/// uid its whole record routes to.
+/// One channel: its record id on the wire, its display name, and
+/// its value type/size.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecordDef {
     pub id: u32,
+    pub channel: String,
+    #[serde(rename = "type")]
+    pub field_type: String,
     pub size: usize,
-    pub uid: String,
+    /// Producer commentary carried for humans; never interpreted.
+    #[serde(default)]
+    pub annotation: Option<String>,
 }
 
 impl RecordTable {
@@ -809,14 +821,23 @@ impl RecordTable {
             if !seen.insert(r.id) {
                 return Err(format!("record id {} declared twice", r.id));
             }
-            parse_num_u32(&r.uid)
-                .ok_or(format!("record id {} has invalid uid '{}'", r.id, r.uid))?;
+            if r.channel.trim().is_empty() {
+                return Err(format!("record id {} has no channel name", r.id));
+            }
+            if r.size == 0 {
+                return Err(format!("channel '{}' has zero size", r.channel));
+            }
         }
         parse_num_u32(&self.record_apid).ok_or(format!(
             "record_apid '{}' is not a number",
             self.record_apid
         ))?;
         Ok(())
+    }
+
+    /// True when this table's record values are big-endian.
+    pub fn big_endian(&self) -> bool {
+        matches!(self.byte_order.as_deref(), Some("be"))
     }
 }
 

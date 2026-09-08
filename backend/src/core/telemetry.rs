@@ -13,7 +13,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use tokio::sync::broadcast;
 
-use crate::core::config_manager::{FieldDef, StructDictionary};
+use crate::core::config_manager::{FieldDef, RecordTable, StructDictionary};
 use crate::core::transport::PushTelemetryPacket;
 
 /* ----------------------------- Types ----------------------------- */
@@ -185,6 +185,40 @@ impl TelemetryDecoder {
         }
 
         Self { lookup, uid_names }
+    }
+
+    /// Extend the lookup from a record dictionary: each channel
+    /// becomes one (id, record-length) entry whose single cached
+    /// field reads the typed value past the record header, in the
+    /// table's declared byte order. Channel names come whole from
+    /// the table -- record dictionaries name their channels
+    /// directly rather than composing component.field.
+    pub fn add_record_table(&mut self, table: &RecordTable) {
+        let big_endian = table.big_endian();
+        for r in &table.records {
+            let leaf = r.channel.rsplit('.').next().unwrap_or(&r.channel);
+            let field = FieldDef {
+                name: leaf.to_string(),
+                field_type: r.field_type.clone(),
+                offset: table.header_size,
+                size: r.size,
+                value: serde_json::Value::Null,
+                element_type: None,
+                dims: None,
+                constraints: None,
+                struct_ref: None,
+            };
+            let channel: Arc<str> = Arc::from(r.channel.as_str());
+            self.uid_names.insert(r.id, channel.clone());
+            self.lookup.insert(
+                (r.id, table.header_size + r.size),
+                vec![CachedField {
+                    channel,
+                    field,
+                    big_endian,
+                }],
+            );
+        }
     }
 
     /// Decode a push telemetry packet into named samples.
@@ -366,6 +400,7 @@ pub fn spawn_router(
     sample_tx: broadcast::Sender<TelemetrySample>,
     dicts: Arc<StructDictionary>,
     manifest: Option<Arc<crate::core::config_manager::AppManifest>>,
+    records: Option<Arc<RecordTable>>,
     metrics: Arc<crate::core::metrics::TargetMetrics>,
 ) -> tokio::task::JoinHandle<()> {
     use std::sync::atomic::Ordering;
@@ -383,7 +418,10 @@ pub fn spawn_router(
             .iter()
             .map(|(u, n, k)| (*u, n.as_str(), k.as_deref()))
             .collect();
-        let decoder = TelemetryDecoder::new(&dicts, &uid_refs);
+        let mut decoder = TelemetryDecoder::new(&dicts, &uid_refs);
+        if let Some(table) = &records {
+            decoder.add_record_table(table);
+        }
         let mut push_rx = push_rx;
         // Dedup: track last timestamp per channel to filter duplicate writes.
         // If the same channel gets a sample within MIN_INTERVAL_MS of the last,
@@ -660,6 +698,42 @@ mod tests {
         }
     }
 
+    /// @test A record dictionary is a first-class decode source: a
+    /// whole record (header + value) decodes to a sample named by
+    /// the table's full channel string, honoring the table's byte
+    /// order -- no struct dictionaries involved at all.
+    #[test]
+    fn record_dictionary_decodes_channels() {
+        let table: crate::core::config_manager::RecordTable = serde_json::from_str(
+            r#"{
+                "record_apid": "0x001",
+                "id_offset": 2, "id_size": 4, "header_size": 17,
+                "byte_order": "be",
+                "records": [
+                    {"id": 4660, "channel": "Sys.res.CPU", "type": "float", "size": 4}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let mut decoder = TelemetryDecoder::new(&StructDictionary::default(), &[]);
+        decoder.add_record_table(&table);
+
+        let mut record = vec![0u8; 17];
+        record[2..6].copy_from_slice(&4660u32.to_be_bytes());
+        record.extend_from_slice(&42.5f32.to_be_bytes());
+        let samples = decoder.decode(
+            &target_id(),
+            1000,
+            &PushTelemetryPacket {
+                full_uid: 4660,
+                payload: record,
+            },
+        );
+        assert_eq!(samples.len(), 1);
+        assert_eq!(&*samples[0].channel, "Sys.res.CPU");
+        assert!((samples[0].value - 42.5).abs() < 1e-6);
+    }
+
     /// @test 8-byte WaveGen OUTPUT struct decodes into the two
     /// expected float samples (output, phase) with correct values.
     #[test]
@@ -858,6 +932,7 @@ mod tests {
             sample_tx,
             dicts,
             Some(Arc::new(manifest)),
+            None,
             metrics.clone(),
         );
 

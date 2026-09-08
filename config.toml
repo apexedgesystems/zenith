@@ -169,7 +169,5 @@ carrier = "tcp-listen"
 listen_port = 50050
 tm_frame_size = 1024
 auto_connect = false
-manifest = "/data/targets/fprime-demo/app_manifest.json"
-structs_dir = "/data/targets/fprime-demo/structs"
 telemetry_config = "/data/targets/fprime-demo/telemetry.json"
 records_config = "/data/targets/fprime-demo/records.json"
