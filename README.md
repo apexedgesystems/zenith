@@ -2,11 +2,12 @@
 
 Real-time operations interface for [Apex CSF](https://github.com/apexedgesystems/apex_csf) applications.
 
-Zenith connects to targets over per-target wire protocols (TCP/APROTO
-for Apex executables; CCSDS SPP for space-packet sources such as
-NASA cFS, over TCP or UDP carriers), provides a REST API for
-commanding and telemetry, and serves a real-time web UI for
-visualization, configuration, and system management. Zero hardcoded
+Zenith connects to targets over per-target wire protocols -- one
+console for Apex CSF (TCP/APROTO), NASA cFS (CCSDS SPP over UDP),
+and F-prime (CCSDS TM frames over a listening TCP port), all
+running side by side -- provides a REST API for commanding and
+telemetry, and serves a real-time web UI for visualization,
+configuration, and system management. Zero hardcoded
 component knowledge -- all application-specific behavior comes from
 per-target build artifacts (struct dictionaries, app manifest, plot
 layouts, command catalog) loaded at deploy time, and the layers above
@@ -67,12 +68,17 @@ The same backend binary serves any configured target. Adding a
 new target is a new entry in `config.toml` plus a new config
 directory.
 
-The config directory is always generator output. Apex targets use
-`apex_data_gen`; cFS targets use `tools/cfs-dictgen`, which extracts
-exact struct layouts from the flight build's DWARF debug info (the
-same binaries the software runs, so dictionaries cannot drift from
-the wire) and emits the manifest, struct dicts, and telemetry
-layouts in one pass.
+The config directory is always generator output, one generator per
+framework, all emitting the same neutral format: apex targets use
+`apex_data_gen`; cFS targets use `tools/cfs-dictgen` (extracts
+exact struct layouts from the flight build's DWARF debug info --
+the same binaries the software runs, so dictionaries cannot drift
+from the wire); F-prime targets use `tools/fprime-dictgen` (a pure
+transform of the deployment's build-generated JSON dictionary into
+per-channel dictionaries, a record-routing table, and layouts).
+Dictionaries carry a generator-measured `byte_order` stamp, so
+big-endian wires (F-prime by spec, big-endian flight processors by
+ELF ident) decode correctly with zero configuration.
 
 ## Pages
 
@@ -261,10 +267,24 @@ structs_dir = "/data/targets/cfs-cpu1/structs"
 telemetry_config = "/data/targets/cfs-cpu1/telemetry.json"
 [targets.apid_map]             # Wire APID -> component uid routing
 "0x000" = "0x00C00000"
+
+[[targets]]
+name = "F-prime Demo"          # An F-prime deployment, same engine
+host = "127.0.0.1"
+port = 50050
+protocol = "tm+ccsds-spp+records"  # CCSDS TM frames -> space
+                               # packets -> id-addressed records
+carrier = "tcp-listen"         # The deployment dials IN to zenith
+listen_port = 50050
+tm_frame_size = 1024           # Mission constant of the build
+manifest = "/data/targets/fprime-demo/app_manifest.json"
+structs_dir = "/data/targets/fprime-demo/structs"
+records_config = "/data/targets/fprime-demo/records.json"
 ```
 
 A target's definition fully describes its transport: the protocol
-(`aproto-slip`, `ccsds-spp`, `slip+ccsds-spp`, `raw-slip`), the
+(`aproto-slip`, `ccsds-spp`, `slip+ccsds-spp`, `tm+ccsds-spp`,
+`tm+ccsds-spp+records`, `raw-slip`), the
 carrier (`tcp` dials host:port and reads the stream; `udp` binds
 `listen_port` for inbound datagrams and sends outbound ones to
 host:port; `tcp-listen` accepts the target dialing in to
