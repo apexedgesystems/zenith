@@ -87,6 +87,9 @@ struct TargetState {
     /// Connect-time init sequence (named steps; the link runs it,
     /// this copy names the steps in connect audit records)
     connect_init: Option<Arc<crate::core::config_manager::ConnectInit>>,
+    /// Record dictionary (the decode source for record-shaped
+    /// telemetry; the link's RecordSpec derives from it)
+    record_table: Option<Arc<crate::core::config_manager::RecordTable>>,
     _router_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -264,10 +267,15 @@ fn build_link(
     push_tlm_tx: broadcast::Sender<PushTelemetryPacket>,
     config: &config::TargetSection,
     connect_init: Option<&crate::core::config_manager::ConnectInit>,
+    record_spec: Option<crate::core::stream_link::RecordSpec>,
 ) -> ProtocolLink {
     match protocol {
         Protocol::AprotoSlip => ProtocolLink::Aproto(AprotoClient::new(push_tlm_tx)),
-        Protocol::CcsdsSpp | Protocol::SlipCcsdsSpp | Protocol::RawSlip => {
+        Protocol::CcsdsSpp
+        | Protocol::SlipCcsdsSpp
+        | Protocol::TmCcsdsSpp
+        | Protocol::TmCcsdsSppRecords
+        | Protocol::RawSlip => {
             use crate::core::stream_link::{PipelineSpec, StreamLink};
             // Boot already validated the carrier (see carrier_from_config
             // at startup); a bad value on the dynamic-add path degrades
@@ -283,6 +291,14 @@ fn build_link(
                 },
                 Protocol::SlipCcsdsSpp => PipelineSpec::SlipSpp {
                     apid_map: parse_apid_map(config.apid_map.as_ref(), &config.name),
+                },
+                Protocol::TmCcsdsSpp => PipelineSpec::TmSpp {
+                    apid_map: parse_apid_map(config.apid_map.as_ref(), &config.name),
+                    frame_size: config.tm_frame_size,
+                },
+                Protocol::TmCcsdsSppRecords => PipelineSpec::TmSppRecords {
+                    frame_size: config.tm_frame_size,
+                    records: record_spec.expect("boot validated records_config for this protocol"),
                 },
                 Protocol::RawSlip => PipelineSpec::SlipRaw {
                     uid: config.raw_uid.as_deref().and_then(|s| {
@@ -311,18 +327,47 @@ fn carrier_from_config(
     use crate::core::stream_link::Carrier;
     match config.carrier.as_str() {
         "tcp" => Ok(Carrier::Tcp),
-        "udp" => {
+        "udp" | "tcp-listen" => {
             if protocol == Protocol::AprotoSlip {
-                return Err("carrier 'udp' is not supported for aproto-slip (TCP-only)".into());
+                return Err(format!(
+                    "carrier '{}' is not supported for aproto-slip (TCP-dial only)",
+                    config.carrier
+                ));
             }
-            match config.udp_listen_port {
-                Some(port) => Ok(Carrier::Udp { listen_port: port }),
-                None => Err("carrier 'udp' requires udp_listen_port (the local port \
-                     the target sends telemetry to)"
-                    .into()),
+            match config.listen_port {
+                Some(port) if config.carrier == "udp" => Ok(Carrier::Udp { listen_port: port }),
+                Some(port) => Ok(Carrier::TcpListen { listen_port: port }),
+                None => Err(format!(
+                    "carrier '{}' requires listen_port (the local port \
+                     the target sends or dials to)",
+                    config.carrier
+                )),
             }
         }
-        other => Err(format!("unknown carrier '{}' (supported: tcp, udp)", other)),
+        other => Err(format!(
+            "unknown carrier '{}' (supported: tcp, udp, tcp-listen)",
+            other
+        )),
+    }
+}
+
+/// A loaded record table as the engine consumes it: numeric
+/// addresses parsed, ids mapped to (value size, uid).
+fn record_spec_from_table(
+    table: &crate::core::config_manager::RecordTable,
+) -> crate::core::stream_link::RecordSpec {
+    use crate::core::config_manager::parse_num_u32;
+    crate::core::stream_link::RecordSpec {
+        record_apid: parse_num_u32(&table.record_apid).unwrap_or(0) as u16,
+        id_offset: table.id_offset,
+        id_size: table.id_size,
+        header_size: table.header_size,
+        by_id: table.records.iter().map(|r| (r.id, r.size)).collect(),
+        skip_apids: table
+            .skip_apids
+            .iter()
+            .filter_map(|a| parse_num_u32(a).map(|v| v as u16))
+            .collect(),
     }
 }
 
@@ -441,6 +486,7 @@ async fn do_connect_target(state: &AppState, id: &str) -> Result<bool, (StatusCo
             target.sample_tx.clone(),
             target.struct_dicts.clone(),
             target.manifest.clone(),
+            target.record_table.clone(),
             target.metrics.clone(),
         );
         if let Some(old) = target._router_handle.replace(handle) {
@@ -2189,7 +2235,7 @@ async fn telemetry_layouts(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (db, dicts, manifest) = {
+    let (db, dicts, manifest, record_table) = {
         let st = state.read().await;
         let target = st
             .targets
@@ -2199,6 +2245,7 @@ async fn telemetry_layouts(
             st.db.clone(),
             target.struct_dicts.clone(),
             target.manifest.clone(),
+            target.record_table.clone(),
         )
     };
 
@@ -2219,11 +2266,13 @@ async fn telemetry_layouts(
         .iter()
         .map(|(u, n, k)| (*u, n.as_str(), k.as_deref()))
         .collect();
-    let known: std::collections::HashSet<String> =
-        telemetry::TelemetryDecoder::new(&dicts, &uid_refs)
-            .channel_names()
-            .into_iter()
-            .collect();
+    let known: std::collections::HashSet<String> = {
+        let mut d = telemetry::TelemetryDecoder::new(&dicts, &uid_refs);
+        if let Some(table) = &record_table {
+            d.add_record_table(table);
+        }
+        d.channel_names().into_iter().collect()
+    };
 
     let annotated: Vec<serde_json::Value> = layouts
         .iter()
@@ -2703,7 +2752,9 @@ async fn add_target(
         apid_map: None,
         raw_uid: None,
         carrier: "tcp".to_string(),
-        udp_listen_port: None,
+        listen_port: None,
+        tm_frame_size: 1024,
+        records_config: None,
         connect_init: None,
         auto_connect: false,
     };
@@ -2718,7 +2769,7 @@ async fn add_target(
         metrics.clone(),
     );
 
-    let mut new_client = build_link(Protocol::AprotoSlip, push_tlm_tx.clone(), &tc, None);
+    let mut new_client = build_link(Protocol::AprotoSlip, push_tlm_tx.clone(), &tc, None, None);
     new_client.set_metrics(metrics.clone());
     let connected = new_client.connected_handle();
     st.targets.insert(
@@ -2735,6 +2786,7 @@ async fn add_target(
             telemetry_config: None,
             commands_config: None,
             connect_init: None,
+            record_table: None,
             _router_handle: None,
         },
     );
@@ -3852,7 +3904,42 @@ async fn main() {
                     }
                 },
             );
-        let mut new_client = build_link(protocol, push_tlm_tx.clone(), tc, connect_init.as_deref());
+        // Record-stage protocols need their generated table; a
+        // missing or broken one is a definition bug -> boot refusal.
+        let record_table = if protocol == Protocol::TmCcsdsSppRecords {
+            let Some(path) = tc.records_config.as_ref() else {
+                eprintln!(
+                    "FATAL: target '{}': protocol '{}' requires records_config \
+                     (the generated record table)",
+                    tc.name, tc.protocol
+                );
+                std::process::exit(1);
+            };
+            match crate::core::config_manager::RecordTable::load(std::path::Path::new(path)) {
+                Ok(table) => {
+                    tracing::info!(
+                        "Loaded record dictionary for {}: {} channels",
+                        tc.name,
+                        table.records.len()
+                    );
+                    Some(Arc::new(table))
+                }
+                Err(e) => {
+                    eprintln!("FATAL: target '{}': records_config: {}", tc.name, e);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            None
+        };
+        let record_spec = record_table.as_ref().map(|t| record_spec_from_table(t));
+        let mut new_client = build_link(
+            protocol,
+            push_tlm_tx.clone(),
+            tc,
+            connect_init.as_deref(),
+            record_spec,
+        );
         new_client.set_metrics(metrics.clone());
         let connected = new_client.connected_handle();
         targets.insert(
@@ -3869,6 +3956,7 @@ async fn main() {
                 telemetry_config,
                 commands_config,
                 connect_init,
+                record_table,
                 _router_handle: None,
             },
         );

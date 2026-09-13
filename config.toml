@@ -117,7 +117,7 @@ commands_config = "/data/targets/sil-spec-demo/commands.json"
 # Target: local cFS cpu1 (dev; the flight/rig-cfs rig). The whole
 # transport is this definition: udp carrier + ccsds-spp packets,
 # commands dialed out to CI_LAB at host:port, telemetry heard on
-# udp_listen_port, downlink armed on connect by the generated
+# listen_port, downlink armed on connect by the generated
 # connect-init sequence (named, audited steps).
 [[targets]]
 name = "cFS cpu1"
@@ -125,7 +125,7 @@ host = "127.0.0.1"
 port = 1234
 protocol = "ccsds-spp"
 carrier = "udp"
-udp_listen_port = 2234
+listen_port = 2234
 auto_connect = false
 manifest = "/data/targets/cfs-cpu1/app_manifest.json"
 connect_init = "/data/targets/cfs-cpu1/on_connect.json"
@@ -153,3 +153,21 @@ health_nonzero_bad = [
 "0x005" = "0x00C00005" # CFE_TIME
 "0x080" = "0x00C00080" # TO_LAB
 "0x084" = "0x00C00084" # CI_LAB
+
+# Target: local F-prime demo (dev; the flight/rig-fprime rig). The
+# deployment DIALS IN: zenith listens on listen_port and the
+# connected state tracks the live session. Stock wire is CCSDS TM
+# frames wrapping space packets whose telemetry APID carries
+# id-addressed channel records -- all described by the generated
+# records.json and per-channel dictionaries.
+[[targets]]
+name = "F-prime Demo"
+host = "127.0.0.1"
+port = 50050
+protocol = "tm+ccsds-spp+records"
+carrier = "tcp-listen"
+listen_port = 50050
+tm_frame_size = 1024
+auto_connect = false
+telemetry_config = "/data/targets/fprime-demo/telemetry.json"
+records_config = "/data/targets/fprime-demo/records.json"

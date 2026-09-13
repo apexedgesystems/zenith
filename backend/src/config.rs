@@ -177,18 +177,30 @@ pub struct TargetSection {
     /// stream speaks for ("0x" hex or decimal).
     #[serde(default)]
     pub raw_uid: Option<String>,
-    /// Stream targets: how bytes reach zenith. "tcp" (default) dials
-    /// host:port and reads the stream; "udp" binds `udp_listen_port`
-    /// for inbound telemetry datagrams and sends outbound
-    /// (init-step) datagrams to host:port. aproto-slip is TCP-only;
-    /// validated at boot.
+    /// Stream targets: how bytes reach zenith. "tcp" (default)
+    /// dials host:port and reads the stream; "udp" binds
+    /// `listen_port` for inbound telemetry datagrams and sends
+    /// outbound (init-step) datagrams to host:port; "tcp-listen"
+    /// accepts the target dialing IN to `listen_port` (the
+    /// push-to-ground pattern some flight stacks use). aproto-slip
+    /// is TCP-dial only; validated at boot.
     #[serde(default = "default_carrier")]
     pub carrier: String,
-    /// UDP carrier: local port bound for inbound telemetry. Required
-    /// when carrier = "udp" -- the target sends to a configured port,
-    /// so an OS-assigned one would never hear it.
+    /// Listening carriers (udp, tcp-listen): the local port bound
+    /// for inbound traffic. Required for both -- the target sends
+    /// or dials to a configured port, so an OS-assigned one would
+    /// never hear it.
     #[serde(default)]
-    pub udp_listen_port: Option<u16>,
+    pub listen_port: Option<u16>,
+    /// tm+ccsds-spp targets: the fixed TM transfer frame length in
+    /// octets (a mission constant of the producing build).
+    #[serde(default = "default_tm_frame_size")]
+    pub tm_frame_size: usize,
+    /// Record-stage targets (tm+ccsds-spp+records): path to the
+    /// generated record table (records.json in the target config
+    /// directory).
+    #[serde(default)]
+    pub records_config: Option<String>,
     /// Path to this target's connect-time init sequence
     /// (on_connect.json): named steps of raw bytes sent, in order
     /// with optional delays, when the link comes up. Generated into
@@ -236,6 +248,9 @@ fn default_protocol() -> String {
 }
 fn default_carrier() -> String {
     "tcp".to_string()
+}
+fn default_tm_frame_size() -> usize {
+    1024
 }
 /// The default policy, callable from target-add paths that build a
 /// TargetSection literal.
@@ -330,23 +345,27 @@ impl Default for StorageSection {
 }
 
 /// Find the first local listen port claimed by two target
-/// definitions. Distinct targets binding one port cannot both hear
-/// their telemetry, and the loser would only find out at connect
-/// time -- so this is a boot refusal, same discipline as protocol
-/// and carrier typos.
+/// definitions of the same transport kind (TCP and UDP port spaces
+/// are distinct). Distinct targets binding one port cannot both
+/// hear their telemetry, and the loser would only find out at
+/// connect time -- so this is a boot refusal, same discipline as
+/// protocol and carrier typos.
 pub fn duplicate_listen_port(targets: &[TargetSection]) -> Option<(u16, &str, &str)> {
-    let mut seen: Vec<(u16, &str)> = Vec::new();
+    let mut seen: Vec<(&str, u16, &str)> = Vec::new();
     for t in targets {
-        if t.carrier != "udp" {
+        if t.carrier != "udp" && t.carrier != "tcp-listen" {
             continue;
         }
-        let Some(port) = t.udp_listen_port else {
+        let Some(port) = t.listen_port else {
             continue;
         };
-        if let Some((_, first)) = seen.iter().find(|(p, _)| *p == port) {
+        if let Some((_, _, first)) = seen
+            .iter()
+            .find(|(c, p, _)| *c == t.carrier.as_str() && *p == port)
+        {
             return Some((port, first, t.name.as_str()));
         }
-        seen.push((port, t.name.as_str()));
+        seen.push((t.carrier.as_str(), port, t.name.as_str()));
     }
     None
 }
@@ -377,7 +396,9 @@ mod tests {
             apid_map: None,
             raw_uid: None,
             carrier: carrier.to_string(),
-            udp_listen_port: listen,
+            listen_port: listen,
+            tm_frame_size: default_tm_frame_size(),
+            records_config: None,
             connect_init: None,
             manifest: None,
             structs_dir: None,

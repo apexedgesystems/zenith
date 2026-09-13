@@ -1,5 +1,6 @@
 {
   "component": "cfe_evs",
+  "byte_order": "le",
   "structs": {
     "Housekeeping": {
       "category": "TELEMETRY",

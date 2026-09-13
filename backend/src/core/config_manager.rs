@@ -126,6 +126,14 @@ impl StructDef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComponentDict {
     pub component: String,
+    /// Byte order of payload field values AS THEY ARRIVE at this
+    /// system's boundary: "le" (default) or "be". Stamped by the
+    /// producing generator from evidence -- an ELF's own ident
+    /// byte, a serialization spec -- never hand-set. Describes the
+    /// wire, not the target CPU: a boundary proxy that normalizes
+    /// order changes what gets stamped.
+    #[serde(default)]
+    pub byte_order: Option<String>,
     #[serde(default)]
     pub structs: HashMap<String, StructDef>,
     #[serde(default)]
@@ -135,6 +143,13 @@ pub struct ComponentDict {
     /// on older dictionaries; treated as empty.
     #[serde(default)]
     pub capabilities: Vec<String>,
+}
+
+impl ComponentDict {
+    /// True when this dictionary's payload values are big-endian.
+    pub fn big_endian(&self) -> bool {
+        matches!(self.byte_order.as_deref(), Some("be"))
+    }
 }
 
 /// Inline a struct's nested fields: a `type = "nested"` field with a
@@ -728,6 +743,114 @@ impl TelemetryConfig {
     }
 }
 
+/* ----------------------------- Record Table ----------------------------- */
+
+/// A generated record dictionary (`records.json` in the target
+/// config directory) for wires whose packets carry concatenated
+/// variable-length records addressed by an id field. This IS the
+/// dictionary for record-shaped telemetry -- some frameworks
+/// downlink per-channel records rather than fixed structs, and
+/// forcing that shape through struct dictionaries shreds one clean
+/// generated file into dozens of single-field fakes. One table
+/// carries the record header shape, every channel's id, name,
+/// type, and value size, and the wire byte order; the engine reads
+/// it without learning the framework.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordTable {
+    /// Packet address (APID) whose payloads are record streams.
+    pub record_apid: String,
+    /// Byte offset of the id field within a record.
+    pub id_offset: usize,
+    /// Width of the id field (2 or 4, big-endian per the wire).
+    pub id_size: usize,
+    /// Total fixed header bytes before each record's value.
+    pub header_size: usize,
+    /// Byte order of record values ("le" default) -- same semantics
+    /// as a struct dictionary's stamp.
+    #[serde(default)]
+    pub byte_order: Option<String>,
+    /// Packet addresses that are known-but-not-decoded (skipped
+    /// silently, not counted unroutable -- deliberate non-decode is
+    /// not noise).
+    #[serde(default)]
+    pub skip_apids: Vec<String>,
+    pub records: Vec<RecordDef>,
+}
+
+/// One channel: its record id on the wire, its display name, and
+/// its value type/size.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordDef {
+    pub id: u32,
+    pub channel: String,
+    #[serde(rename = "type")]
+    pub field_type: String,
+    pub size: usize,
+    /// Producer commentary carried for humans; never interpreted.
+    #[serde(default)]
+    pub annotation: Option<String>,
+}
+
+impl RecordTable {
+    pub fn load(path: &Path) -> Result<Self, String> {
+        let content =
+            std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path.display(), e))?;
+        let table: RecordTable =
+            serde_json::from_str(&content).map_err(|e| format!("{}: {}", path.display(), e))?;
+        table
+            .validate()
+            .map_err(|e| format!("{}: {}", path.display(), e))?;
+        Ok(table)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.id_size != 2 && self.id_size != 4 {
+            return Err(format!("id_size {} is not 2 or 4", self.id_size));
+        }
+        if self.id_offset + self.id_size > self.header_size {
+            return Err(format!(
+                "id field ({}+{}) does not fit in the {}-byte header",
+                self.id_offset, self.id_size, self.header_size
+            ));
+        }
+        if self.records.is_empty() {
+            return Err("no records declared".to_string());
+        }
+        let mut seen = std::collections::HashSet::new();
+        for r in &self.records {
+            if !seen.insert(r.id) {
+                return Err(format!("record id {} declared twice", r.id));
+            }
+            if r.channel.trim().is_empty() {
+                return Err(format!("record id {} has no channel name", r.id));
+            }
+            if r.size == 0 {
+                return Err(format!("channel '{}' has zero size", r.channel));
+            }
+        }
+        parse_num_u32(&self.record_apid).ok_or(format!(
+            "record_apid '{}' is not a number",
+            self.record_apid
+        ))?;
+        Ok(())
+    }
+
+    /// True when this table's record values are big-endian.
+    pub fn big_endian(&self) -> bool {
+        matches!(self.byte_order.as_deref(), Some("be"))
+    }
+}
+
+/// "0x" hex or decimal, the target-config number convention.
+pub fn parse_num_u32(s: &str) -> Option<u32> {
+    let t = s.trim();
+    if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16).ok()
+    } else {
+        t.parse().ok()
+    }
+}
+
 /* ----------------------------- Connect Init ----------------------------- */
 
 /// A connect-time init sequence (`on_connect.json` in the target
@@ -998,6 +1121,7 @@ mod nested_tests {
 
         let dict = ComponentDict {
             component: "C".to_string(),
+            byte_order: None,
             structs: HashMap::from([
                 ("Sub".to_string(), sub),
                 ("Deep".to_string(), deep),

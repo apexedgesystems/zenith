@@ -1,0 +1,61 @@
+{
+  "layouts": [
+    {
+      "name": "Default",
+      "plots": [
+        {
+          "title": "System Resources",
+          "channels": [
+            "FprimeDemoDeployment.systemResources.CPU",
+            "FprimeDemoDeployment.systemResources.MEMORY_USED",
+            "FprimeDemoDeployment.systemResources.NON_VOLATILE_FREE"
+          ],
+          "height": 200
+        },
+        {
+          "title": "CPU Cores",
+          "channels": [
+            "FprimeDemoDeployment.systemResources.CPU_00",
+            "FprimeDemoDeployment.systemResources.CPU_01",
+            "FprimeDemoDeployment.systemResources.CPU_02",
+            "FprimeDemoDeployment.systemResources.CPU_03",
+            "FprimeDemoDeployment.systemResources.CPU_04",
+            "FprimeDemoDeployment.systemResources.CPU_05",
+            "FprimeDemoDeployment.systemResources.CPU_06",
+            "FprimeDemoDeployment.systemResources.CPU_07"
+          ],
+          "height": 200
+        },
+        {
+          "title": "Rate Groups (max cycle time)",
+          "channels": [
+            "FprimeDemoDeployment.rateGroup_1Hz.RgMaxTime",
+            "FprimeDemoDeployment.rateGroup_0_5Hz.RgMaxTime",
+            "FprimeDemoDeployment.rateGroup_0_25Hz.RgMaxTime"
+          ],
+          "height": 200
+        },
+        {
+          "title": "Command Dispatch",
+          "channels": [
+            "CdhCore.cmdDisp.CommandsDispatched",
+            "CdhCore.cmdDisp.CommandErrors",
+            "CdhCore.cmdDisp.CommandsDropped"
+          ],
+          "height": 200
+        },
+        {
+          "title": "Com Pipeline",
+          "channels": [
+            "ComCcsds.comQueue.comQueueDepth",
+            "ComCcsds.comQueue.buffQueueDepth",
+            "ComCcsds.commsBufferManager.CurrBuffs",
+            "ComCcsds.commsBufferManager.NoBuffs",
+            "CdhCore.events.EventsDropped"
+          ],
+          "height": 200
+        }
+      ]
+    }
+  ]
+}

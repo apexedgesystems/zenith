@@ -25,7 +25,7 @@ use tokio::sync::broadcast;
 use tokio::time::{timeout, Duration};
 
 use crate::core::transport::{ClientError, Protocol, PushTelemetryPacket};
-use crate::protocol::{ccsds_spp, slip};
+use crate::protocol::{ccsds_spp, ccsds_tm, slip};
 
 /// How bytes reach zenith -- a third composition axis, orthogonal to
 /// the framing and packet stages. TCP dials the target and reads a
@@ -43,6 +43,12 @@ pub enum Carrier {
     /// OS-assigned, useful only when the peer replies to the source
     /// address.
     Udp { listen_port: u16 },
+    /// Accept the target dialing IN to listen_port -- the
+    /// push-to-ground pattern: some flight stacks initiate the
+    /// connection to their ground system. One session at a time;
+    /// when the peer drops, the link goes back to accepting, and
+    /// the connected flag tracks a live session, not the listener.
+    TcpListen { listen_port: u16 },
 }
 
 /// What to build a pipeline from -- config data, kept so each connect
@@ -54,8 +60,75 @@ pub enum PipelineSpec {
     Spp { apid_map: HashMap<u16, u32> },
     /// SLIP delimits; each frame is one SPP packet.
     SlipSpp { apid_map: HashMap<u16, u32> },
+    /// Fixed-size TM transfer frames delimit; verified data fields
+    /// concatenate into an SPP stream (idle-packet fill included,
+    /// which the router skips silently as protocol filler).
+    TmSpp {
+        apid_map: HashMap<u16, u32>,
+        frame_size: usize,
+    },
+    /// TM frames -> SPP packets -> record streams: packets on the
+    /// record APID carry concatenated variable-length records
+    /// addressed by an id field, walked with the generated table.
+    TmSppRecords {
+        frame_size: usize,
+        records: RecordSpec,
+    },
     /// SLIP delimits; each frame is one raw payload for the config uid.
     SlipRaw { uid: Option<u32> },
+}
+
+/// The engine's view of a generated record table: byte shape of the
+/// header, id -> (value size, uid) routing, and which packet
+/// addresses are deliberately not decoded.
+#[derive(Debug, Clone)]
+pub struct RecordSpec {
+    pub record_apid: u16,
+    pub id_offset: usize,
+    pub id_size: usize,
+    pub header_size: usize,
+    /// id -> value size; the id itself is the routing uid (the
+    /// record dictionary keys decode by the same id).
+    pub by_id: HashMap<u32, usize>,
+    pub skip_apids: std::collections::HashSet<u16>,
+}
+
+impl RecordSpec {
+    /// Walk one packet payload: emit each known record whole
+    /// (header + value, so dictionaries can also expose time
+    /// fields). An unknown id ends the walk -- record lengths come
+    /// from the table, so past an unknown record there is no
+    /// alignment. Returns (records, dropped-tail flag).
+    fn walk(&self, payload: &[u8]) -> (Vec<(u32, Vec<u8>)>, bool) {
+        let mut out = Vec::new();
+        let mut pos = 0usize;
+        while payload.len() - pos >= self.header_size {
+            let id_at = pos + self.id_offset;
+            let id = if self.id_size == 2 {
+                u16::from_be_bytes([payload[id_at], payload[id_at + 1]]) as u32
+            } else {
+                u32::from_be_bytes([
+                    payload[id_at],
+                    payload[id_at + 1],
+                    payload[id_at + 2],
+                    payload[id_at + 3],
+                ])
+            };
+            let Some(&value_size) = self.by_id.get(&id) else {
+                return (out, true);
+            };
+            let total = self.header_size + value_size;
+            if payload.len() - pos < total {
+                // Truncated final record: aggregation never splits a
+                // record across packets, so this is damage, not
+                // continuation.
+                return (out, true);
+            }
+            out.push((id, payload[pos..pos + total].to_vec()));
+            pos += total;
+        }
+        (out, false)
+    }
 }
 
 /// A live pipeline: stream bytes -> addressed packets.
@@ -67,6 +140,16 @@ enum PacketPipeline {
     SlipSpp {
         slip: slip::Decoder,
         apid_map: HashMap<u16, u32>,
+    },
+    TmSpp {
+        deframer: ccsds_tm::Deframer,
+        extractor: ccsds_spp::Extractor,
+        apid_map: HashMap<u16, u32>,
+    },
+    TmSppRecords {
+        deframer: ccsds_tm::Deframer,
+        extractor: ccsds_spp::Extractor,
+        records: RecordSpec,
     },
     SlipRaw {
         slip: slip::Decoder,
@@ -84,6 +167,22 @@ impl PacketPipeline {
             PipelineSpec::SlipSpp { apid_map } => PacketPipeline::SlipSpp {
                 slip: slip::Decoder::new(),
                 apid_map: apid_map.clone(),
+            },
+            PipelineSpec::TmSpp {
+                apid_map,
+                frame_size,
+            } => PacketPipeline::TmSpp {
+                deframer: ccsds_tm::Deframer::new(*frame_size),
+                extractor: ccsds_spp::Extractor::new(),
+                apid_map: apid_map.clone(),
+            },
+            PipelineSpec::TmSppRecords {
+                frame_size,
+                records,
+            } => PacketPipeline::TmSppRecords {
+                deframer: ccsds_tm::Deframer::new(*frame_size),
+                extractor: ccsds_spp::Extractor::new(),
+                records: records.clone(),
             },
             PipelineSpec::SlipRaw { uid } => PacketPipeline::SlipRaw {
                 slip: slip::Decoder::new(),
@@ -134,6 +233,59 @@ impl PacketPipeline {
                             None => unroutable += 1,
                         },
                         None => unroutable += 1,
+                    }
+                }
+            }
+            PacketPipeline::TmSpp {
+                deframer,
+                extractor,
+                apid_map,
+            } => {
+                let (fields, bad_frames) = deframer.feed(bytes);
+                unroutable += bad_frames;
+                for field in fields {
+                    for (hdr, payload) in extractor.feed(&field) {
+                        if hdr.apid == ccsds_spp::IDLE_APID {
+                            continue; // protocol fill, not data
+                        }
+                        match apid_map.get(&hdr.apid) {
+                            Some(&uid) => out.push(PushTelemetryPacket {
+                                full_uid: uid,
+                                payload,
+                            }),
+                            None => unroutable += 1,
+                        }
+                    }
+                }
+            }
+            PacketPipeline::TmSppRecords {
+                deframer,
+                extractor,
+                records,
+            } => {
+                let (fields, bad_frames) = deframer.feed(bytes);
+                unroutable += bad_frames;
+                for field in fields {
+                    for (hdr, payload) in extractor.feed(&field) {
+                        if hdr.apid == ccsds_spp::IDLE_APID
+                            || records.skip_apids.contains(&hdr.apid)
+                        {
+                            continue; // fill, or deliberately not decoded
+                        }
+                        if hdr.apid != records.record_apid {
+                            unroutable += 1;
+                            continue;
+                        }
+                        let (recs, dropped_tail) = records.walk(&payload);
+                        for (uid, record) in recs {
+                            out.push(PushTelemetryPacket {
+                                full_uid: uid,
+                                payload: record,
+                            });
+                        }
+                        if dropped_tail {
+                            unroutable += 1;
+                        }
                     }
                 }
             }
@@ -339,6 +491,95 @@ impl StreamLink {
         let gen_flag = self.generation.clone();
         let proto_name = self.protocol.name();
 
+        // Listen-mode: bind now, serve sessions as the target dials
+        // in. Structurally inverted from the dial carriers (sessions
+        // arrive over time, each with a fresh pipeline and its own
+        // init pass), so it owns its whole lifecycle here.
+        if let Carrier::TcpListen { listen_port } = self.carrier {
+            let listener = tokio::net::TcpListener::bind(("0.0.0.0", listen_port))
+                .await
+                .map_err(ClientError::Connect)?;
+            let spec = self.spec.clone();
+            let init = self.init.clone();
+            let push_tx = self.push_tlm_tx.clone();
+            let handle = tokio::spawn(async move {
+                loop {
+                    let (stream, peer) = match listener.accept().await {
+                        Ok(x) => x,
+                        Err(e) => {
+                            tracing::error!("{proto_name} accept error: {e}");
+                            if gen_flag.load(Ordering::Acquire) == gen {
+                                conn_flag.store(false, Ordering::Release);
+                            }
+                            break;
+                        }
+                    };
+                    let _ = stream.set_nodelay(true);
+                    tracing::info!("{proto_name} target dialed in from {peer}");
+                    if gen_flag.load(Ordering::Acquire) == gen {
+                        conn_flag.store(true, Ordering::Release);
+                    } else {
+                        break;
+                    }
+                    // Fresh pipeline per session: no residue from a
+                    // dropped predecessor.
+                    let mut ingest = Ingest {
+                        pipeline: PacketPipeline::build(&spec),
+                        push_tx: push_tx.clone(),
+                        proto_name,
+                        last_warn: None,
+                    };
+                    let (mut rd, mut wr) = stream.into_split();
+                    // Init steps inline before reading: the session
+                    // is fresh and TCP buffers whatever the peer
+                    // sends meanwhile. A failed step drops the
+                    // session, not the listener.
+                    let mut init_ok = true;
+                    for step in &init {
+                        if step.delay_ms > 0 {
+                            tokio::time::sleep(Duration::from_millis(step.delay_ms)).await;
+                        }
+                        if let Err(e) = wr.write_all(&step.bytes).await {
+                            tracing::error!(
+                                "{proto_name} init step '{}' failed: {e}; dropping session",
+                                step.name
+                            );
+                            init_ok = false;
+                            break;
+                        }
+                        tracing::info!("{proto_name} init step sent: {}", step.name);
+                    }
+                    if init_ok {
+                        let mut buf = vec![0u8; 65536];
+                        loop {
+                            match rd.read(&mut buf).await {
+                                Ok(0) => {
+                                    tracing::info!("{proto_name} session closed by peer");
+                                    break;
+                                }
+                                Ok(n) => ingest.feed(&buf[..n]),
+                                Err(e) => {
+                                    tracing::error!("{proto_name} session read error: {e}");
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if gen_flag.load(Ordering::Acquire) == gen {
+                        conn_flag.store(false, Ordering::Release);
+                    } else {
+                        break;
+                    }
+                }
+            });
+            self.reader_handle = Some(handle);
+            // The connected flag stays FALSE until a session
+            // attaches: it reports a live peer, not a bound
+            // listener.
+            tracing::info!("Listening ({proto_name}) on :{listen_port}");
+            return Ok(());
+        }
+
         let (reader_handle, sender) = match self.carrier {
             Carrier::Tcp => {
                 let stream = timeout(Duration::from_secs(5), TcpStream::connect(&addr))
@@ -410,6 +651,7 @@ impl StreamLink {
                     },
                 )
             }
+            Carrier::TcpListen { .. } => unreachable!("handled by the early return above"),
         };
 
         self.init_handle = spawn_init(
@@ -471,6 +713,7 @@ mod tests {
         };
         let comp = ComponentDict {
             component: "WaveGenerator".to_string(),
+            byte_order: None,
             structs: std::collections::HashMap::from([(
                 "Output".to_string(),
                 StructDef {
@@ -519,13 +762,14 @@ mod tests {
             .unwrap()
     }
 
-    /// @test THE protocol-agnosticism proof, now across THREE stream
+    /// @test THE protocol-agnosticism proof, now across FOUR stream
     /// compositions: the same struct bytes delivered as (a) bare
-    /// self-delimiting SPP, (b) SLIP-framed SPP -- the layered stack
-    /// -- and (c) raw SLIP frames all decode to exactly the samples
-    /// the decoder produces for those bytes directly. One dictionary,
-    /// one decoder, one pipeline seam; the stacks differ only in
-    /// config.
+    /// self-delimiting SPP, (b) SLIP-framed SPP, (c) SPP inside
+    /// CRC-verified fixed-size TM transfer frames -- the space-data-
+    /// link stack -- and (d) raw SLIP frames all decode to exactly
+    /// the samples the decoder produces for those bytes directly.
+    /// One dictionary, one decoder, one pipeline seam; the stacks
+    /// differ only in config.
     #[tokio::test]
     async fn all_stream_compositions_decode_identically() {
         let dict = wavegen_dict();
@@ -563,6 +807,20 @@ mod tests {
                 {
                     let framed = slip::encode(&spp_wire);
                     vec![framed[..5].to_vec(), framed[5..].to_vec()]
+                },
+            ),
+            (
+                Protocol::TmCcsdsSpp,
+                PipelineSpec::TmSpp {
+                    apid_map: map.clone(),
+                    frame_size: 128,
+                },
+                // The space-data-link stack: the SPP packet inside a
+                // CRC-verified TM transfer frame with idle fill,
+                // split mid-frame.
+                {
+                    let framed = ccsds_tm::pack_frame(128, 0x044, 0, &spp_wire);
+                    vec![framed[..40].to_vec(), framed[40..].to_vec()]
                 },
             ),
             (
@@ -828,6 +1086,144 @@ mod tests {
             !link.is_connected(),
             "link must report disconnected after an init step fails"
         );
+        link.disconnect();
+    }
+
+    /// @test The record stage end to end through the full TM stack:
+    /// two known records aggregated in one packet route whole
+    /// (header + value) to their table uids; an unknown id drops
+    /// the aggregate's tail but not what came before it; packets on
+    /// a skip APID vanish silently; and the whole walk survives the
+    /// frame being split mid-stream.
+    #[tokio::test]
+    async fn record_stage_walks_aggregates_through_tm_stack() {
+        // Record shape mirroring a typical id-addressed wire: 2B
+        // discriminator, 4B id, 11B time, then the value.
+        let rec = |id: u32, value: &[u8]| -> Vec<u8> {
+            let mut r = vec![0x00, 0x01];
+            r.extend_from_slice(&id.to_be_bytes());
+            r.extend_from_slice(&[0u8; 11]);
+            r.extend_from_slice(value);
+            r
+        };
+        let spec = RecordSpec {
+            record_apid: 0x001,
+            id_offset: 2,
+            id_size: 4,
+            header_size: 17,
+            by_id: HashMap::from([(100, 4), (200, 1)]),
+            skip_apids: [0x002u16].into_iter().collect(),
+        };
+
+        // Aggregate: known(100), known(200), unknown(999) + junk.
+        let mut agg = rec(100, &[1, 2, 3, 4]);
+        agg.extend_from_slice(&rec(200, &[7]));
+        agg.extend_from_slice(&rec(999, &[0xEE; 3]));
+        let tlm_pkt = ccsds_spp::pack(0x001, 1, &agg);
+        let event_pkt = ccsds_spp::pack(0x002, 1, &[0xBB; 10]);
+        let mut content = tlm_pkt.clone();
+        content.extend_from_slice(&event_pkt);
+        let frame = ccsds_tm::pack_frame(256, 0x044, 0, &content);
+
+        let addr = serve_bytes(vec![frame[..100].to_vec(), frame[100..].to_vec()]).await;
+        let (push_tx, mut push_rx) = broadcast::channel(16);
+        let mut link = StreamLink::new(
+            Protocol::TmCcsdsSppRecords,
+            PipelineSpec::TmSppRecords {
+                frame_size: 256,
+                records: spec,
+            },
+            Carrier::Tcp,
+            Vec::new(),
+            push_tx,
+        );
+        link.connect(&addr.ip().to_string(), addr.port())
+            .await
+            .unwrap();
+
+        let first = recv_one(&mut push_rx).await;
+        assert_eq!(first.full_uid, 100);
+        assert_eq!(first.payload.len(), 17 + 4);
+        assert_eq!(&first.payload[17..], &[1, 2, 3, 4]);
+        let second = recv_one(&mut push_rx).await;
+        assert_eq!(second.full_uid, 200);
+        assert_eq!(&second.payload[17..], &[7]);
+        // Unknown-id tail and the skip-APID event packet: nothing
+        // further arrives.
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(push_rx.try_recv().is_err());
+        link.disconnect();
+    }
+
+    /// @test The listen-mode carrier end to end, shaped like the
+    /// push-to-ground pattern: zenith binds and waits, the fake
+    /// deployment dials IN, receives the init step, and its
+    /// telemetry parses through the same SPP pipeline as every
+    /// other carrier. The connected flag tracks the live session --
+    /// false while merely listening, true after the peer attaches,
+    /// false again after it hangs up -- and a second session gets a
+    /// fresh pipeline (a packet split across the reconnect must NOT
+    /// reassemble from stale residue).
+    #[tokio::test]
+    async fn tcp_listen_serves_dialing_target() {
+        // Reserve a port the fake deployment can dial (bind + drop).
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        let (push_tx, mut push_rx) = broadcast::channel(16);
+        let mut link = StreamLink::new(
+            Protocol::CcsdsSpp,
+            PipelineSpec::Spp {
+                apid_map: HashMap::from([(0x0D0u16, 0x00D000u32)]),
+            },
+            Carrier::TcpListen { listen_port: port },
+            vec![InitStep {
+                name: "hello".into(),
+                delay_ms: 0,
+                bytes: b"HI".to_vec(),
+            }],
+            push_tx,
+        );
+        link.connect("0.0.0.0", 0).await.unwrap();
+        assert!(!link.is_connected(), "listening is not connected");
+
+        // Session 1: dial in, read the init step, then hang up
+        // mid-packet -- leaving a header that PROMISES 4000 more
+        // bytes. A pipeline that survived into the next session
+        // would swallow everything into that pending frame.
+        let mut s1 = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let mut greet = [0u8; 2];
+        tokio::io::AsyncReadExt::read_exact(&mut s1, &mut greet)
+            .await
+            .unwrap();
+        assert_eq!(&greet, b"HI", "init step reaches the dialing target");
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !link.is_connected() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(link.is_connected(), "session attach flips the flag");
+        let giant = ccsds_spp::pack(0x0D0, 1, &vec![0u8; 4000]);
+        s1.write_all(&giant[..6]).await.unwrap();
+        drop(s1);
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while link.is_connected() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(!link.is_connected(), "peer hangup clears the flag");
+
+        // Session 2: a whole real packet. It only arrives if the
+        // pipeline was rebuilt fresh -- stale residue would still be
+        // waiting on session 1's promised 4000 bytes.
+        let wire = ccsds_spp::pack(0x0D0, 2, &[1, 2, 3, 4]);
+        let mut s2 = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        tokio::io::AsyncReadExt::read_exact(&mut s2, &mut greet)
+            .await
+            .unwrap();
+        s2.write_all(&wire).await.unwrap();
+        let pkt = recv_one(&mut push_rx).await;
+        assert_eq!(pkt.full_uid, 0x00D000);
+        assert_eq!(pkt.payload, vec![1, 2, 3, 4]);
         link.disconnect();
     }
 
