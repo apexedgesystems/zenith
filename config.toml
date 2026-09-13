@@ -79,10 +79,7 @@ port = 9000
 #                             # names one comparison: { field = "x", ge = 2 };
 #                             # defaults cover the apex counters)
 auto_connect = false
-manifest = "/data/targets/sil-ops-demo/app_manifest.json"
-structs_dir = "/data/targets/sil-ops-demo/structs"
-telemetry_config = "/data/targets/sil-ops-demo/telemetry.json"
-commands_config = "/data/targets/sil-ops-demo/commands.json"
+dir = "/data/targets/sil-ops-demo"
 
 # Target: Ops Demo on Raspberry Pi (1 Hz sine + 5 Hz square)
 [[targets]]
@@ -90,10 +87,7 @@ name = "Pi - Ops Demo"
 host = "192.168.1.120"
 port = 9000
 auto_connect = false
-manifest = "/data/targets/pi-ops-demo/app_manifest.json"
-structs_dir = "/data/targets/pi-ops-demo/structs"
-telemetry_config = "/data/targets/pi-ops-demo/telemetry.json"
-commands_config = "/data/targets/pi-ops-demo/commands.json"
+dir = "/data/targets/pi-ops-demo"
 
 # Target: Thor Instance A (1 Hz sine + 5 Hz square, cores 0-3)
 [[targets]]
@@ -101,10 +95,7 @@ name = "Thor - Instance A"
 host = "192.168.1.41"
 port = 9000
 auto_connect = false
-manifest = "/data/targets/thor-ops-demo-a/app_manifest.json"
-structs_dir = "/data/targets/thor-ops-demo-a/structs"
-telemetry_config = "/data/targets/thor-ops-demo-a/telemetry.json"
-commands_config = "/data/targets/thor-ops-demo-a/commands.json"
+dir = "/data/targets/thor-ops-demo-a"
 
 # Target: Thor Instance B (3 Hz triangle + 7 Hz sawtooth, cores 4-7)
 [[targets]]
@@ -112,10 +103,7 @@ name = "Thor - Instance B"
 host = "192.168.1.41"
 port = 9001
 auto_connect = false
-manifest = "/data/targets/thor-ops-demo-b/app_manifest.json"
-structs_dir = "/data/targets/thor-ops-demo-b/structs"
-telemetry_config = "/data/targets/thor-ops-demo-b/telemetry.json"
-commands_config = "/data/targets/thor-ops-demo-b/commands.json"
+dir = "/data/targets/thor-ops-demo-b"
 
 # Target: Local SIL spec demo (dev only; published on host port 9002)
 [[targets]]
@@ -123,10 +111,7 @@ name = "Local SIL - Spec Demo"
 host = "127.0.0.1"
 port = 9002
 auto_connect = false
-manifest = "/data/targets/sil-spec-demo/app_manifest.json"
-structs_dir = "/data/targets/sil-spec-demo/structs"
-telemetry_config = "/data/targets/sil-spec-demo/telemetry.json"
-commands_config = "/data/targets/sil-spec-demo/commands.json"
+dir = "/data/targets/sil-spec-demo"
 
 # Target: local cFS cpu1 (dev; a stock cFS bundle in a container). The whole
 # transport is this definition: udp carrier + ccsds-spp packets,
@@ -141,10 +126,7 @@ protocol = "ccsds-spp"
 carrier = "udp"
 listen_port = 2234
 auto_connect = true
-manifest = "/data/targets/cfs-cpu1/app_manifest.json"
-connect_init = "/data/targets/cfs-cpu1/on_connect.json"
-structs_dir = "/data/targets/cfs-cpu1/structs"
-telemetry_config = "/data/targets/cfs-cpu1/telemetry.json"
+dir = "/data/targets/cfs-cpu1"
 # Display policy for this target's health cards: which counters are
 # bad when nonzero. Chosen from the live surface -- error counters
 # only, not the ones that grow in normal stock operation.

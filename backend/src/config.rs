@@ -242,6 +242,15 @@ pub struct TargetSection {
     /// the target config directory like every other artifact there.
     #[serde(default)]
     pub connect_init: Option<String>,
+    /// The target's generated artifact directory. Naming it is
+    /// enough: the conventional filenames inside it (app_manifest.json,
+    /// structs/, telemetry.json, commands.json, on_connect.json,
+    /// records.json) are found automatically, and whichever are absent
+    /// simply do not exist for this target. The explicit path fields
+    /// below still win when set, for directories that do not follow
+    /// the convention.
+    #[serde(default)]
+    pub dir: Option<String>,
     #[serde(default)]
     pub manifest: Option<String>,
     #[serde(default)]
@@ -463,6 +472,62 @@ impl Default for StorageSection {
     }
 }
 
+impl TargetSection {
+    /// A conventional artifact inside the target directory, when the
+    /// directory is declared and the artifact is actually there. A
+    /// bundle without commands.json simply has no command catalog.
+    fn in_dir(&self, name: &str) -> Option<String> {
+        let dir = self.dir.as_ref()?;
+        let path = std::path::Path::new(dir).join(name);
+        path.exists().then(|| path.to_string_lossy().into_owned())
+    }
+
+    pub fn manifest_path(&self) -> Option<String> {
+        self.manifest
+            .clone()
+            .or_else(|| self.in_dir("app_manifest.json"))
+    }
+
+    pub fn structs_path(&self) -> Option<String> {
+        self.structs_dir.clone().or_else(|| self.in_dir("structs"))
+    }
+
+    pub fn telemetry_path(&self) -> Option<String> {
+        self.telemetry_config
+            .clone()
+            .or_else(|| self.in_dir("telemetry.json"))
+    }
+
+    pub fn commands_path(&self) -> Option<String> {
+        self.commands_config
+            .clone()
+            .or_else(|| self.in_dir("commands.json"))
+    }
+
+    pub fn connect_init_path(&self) -> Option<String> {
+        self.connect_init
+            .clone()
+            .or_else(|| self.in_dir("on_connect.json"))
+    }
+
+    pub fn records_path(&self) -> Option<String> {
+        self.records_config
+            .clone()
+            .or_else(|| self.in_dir("records.json"))
+    }
+}
+
+/// The first target whose declared directory is not a directory.
+/// A mistyped path would otherwise produce a silently featureless
+/// target -- connected, decoding nothing by name -- so it is a boot
+/// refusal like the other definition bugs.
+pub fn missing_target_dir(targets: &[TargetSection]) -> Option<(&str, &str)> {
+    targets.iter().find_map(|t| {
+        let dir = t.dir.as_deref()?;
+        (!std::path::Path::new(dir).is_dir()).then_some((t.name.as_str(), dir))
+    })
+}
+
 /// Find the first local listen port claimed by two target
 /// definitions of the same transport kind (TCP and UDP port spaces
 /// are distinct). Distinct targets binding one port cannot both
@@ -579,6 +644,70 @@ pub fn apply_env_overrides(
 mod tests {
     use super::*;
 
+    /// @test The target-directory convention: naming one directory
+    /// finds the conventional artifacts inside it, absent ones stay
+    /// absent (a bundle without commands.json simply has no command
+    /// catalog), and an explicit path always wins over the
+    /// convention.
+    #[test]
+    fn target_directory_resolves_conventional_artifacts() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("app_manifest.json"), "{}").unwrap();
+        std::fs::write(dir.join("telemetry.json"), "{}").unwrap();
+        std::fs::create_dir(dir.join("structs")).unwrap();
+        // Deliberately no commands.json and no on_connect.json.
+
+        let mut t = target("rover", "tcp", None);
+        t.dir = Some(dir.to_string_lossy().into_owned());
+
+        assert_eq!(
+            t.manifest_path(),
+            Some(dir.join("app_manifest.json").to_string_lossy().into_owned())
+        );
+        assert_eq!(
+            t.structs_path(),
+            Some(dir.join("structs").to_string_lossy().into_owned())
+        );
+        assert_eq!(
+            t.telemetry_path(),
+            Some(dir.join("telemetry.json").to_string_lossy().into_owned())
+        );
+        assert_eq!(t.commands_path(), None, "absent artifact stays absent");
+        assert_eq!(t.connect_init_path(), None);
+
+        // An explicit path overrides the convention.
+        t.commands_config = Some("/elsewhere/commands.json".to_string());
+        assert_eq!(
+            t.commands_path(),
+            Some("/elsewhere/commands.json".to_string())
+        );
+
+        // With no directory declared, only explicit paths resolve.
+        let bare = target("bare", "tcp", None);
+        assert_eq!(bare.manifest_path(), None);
+        assert_eq!(bare.telemetry_path(), None);
+    }
+
+    /// @test A declared directory that is not a directory is named
+    /// for boot refusal; a real one and an undeclared one pass.
+    #[test]
+    fn missing_target_dir_is_named() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut good = target("good", "tcp", None);
+        good.dir = Some(tmp.path().to_string_lossy().into_owned());
+        let mut bad = target("bad", "tcp", None);
+        bad.dir = Some("/no/such/target/dir".to_string());
+
+        let only_good = [good.clone()];
+        assert_eq!(missing_target_dir(&only_good), None);
+        let no_dir = [target("plain", "tcp", None)];
+        assert_eq!(missing_target_dir(&no_dir), None);
+        let mixed = [good, bad];
+        let found = missing_target_dir(&mixed).unwrap();
+        assert_eq!(found.0, "bad");
+    }
+
     fn target(name: &str, carrier: &str, listen: Option<u16>) -> TargetSection {
         TargetSection {
             name: name.to_string(),
@@ -587,6 +716,7 @@ mod tests {
             protocol: "ccsds-spp".to_string(),
             health: Vec::new(),
             health_nonzero_bad: None,
+            dir: None,
             apid_map: None,
             raw_uid: None,
             carrier: carrier.to_string(),

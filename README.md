@@ -80,9 +80,23 @@ targets/
     telemetry.json
 ```
 
-The same backend binary serves any configured target. Adding a
-new target is a new entry in `config.toml` plus a new config
-directory.
+The same backend binary serves any configured target. A target
+definition names the directory and the conventional filenames inside
+it are found automatically:
+
+```toml
+[[targets]]
+name = "Pi - Ops Demo"
+host = "192.168.1.119"
+dir = "/data/targets/pi-ops-demo"   # everything above, by convention
+```
+
+Individual paths (`manifest`, `structs_dir`, `telemetry_config`,
+`commands_config`, `connect_init`) still override the convention for
+directories that do not follow it. The same directory can be handed to
+a **running** zenith -- Add Target takes it, and the target comes up
+with named channels, its command catalog, and its curated plots,
+without restarting the server or dropping other targets' links.
 
 The config directory is always generator output, one generator per
 framework, all emitting the same neutral format: apex targets use
