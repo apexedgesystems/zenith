@@ -1,6 +1,6 @@
 # Zenith
 
-Real-time operations interface for [Apex CSF](https://github.com/apexedgesystems/apex_csf) applications.
+Real-time operations interface for flight software: [Apex CSF](https://github.com/apexedgesystems/apex_csf), NASA cFS, and F-prime.
 
 Zenith connects to targets over per-target wire protocols -- one
 console for Apex CSF (TCP/APROTO), NASA cFS (CCSDS SPP over UDP),
@@ -18,35 +18,41 @@ boundary test forbids generic code from referencing any one protocol
 family or flight framework.
 
 ```
-+--------------------+        TCP / APROTO         +--------------------------+
-|  Apex Application  | <-------------------------> |       Zenith             |
-|  (Pi, Thor, ...)   |        (port 9000+)         |   Rust backend (axum)    |
-|                    |                             |   React frontend         |
-|  Executive         |                             |   SQLite + WAL pool      |
-|  Scheduler         |                             |                          |
-|  Interface         |                             |   - REST API             |
-|  Components...     |                             |   - WebSocket telemetry  |
-+--------------------+                             |   - Multi-target         |
-                                                   +--------------------------+
-                                                              |
-                                            Per-target config (JSON / TOML)
++--------------------+   TCP: SLIP + APROTO    \
+|  Apex Application  | <---------------------->  \
+|  (Pi, Thor, ...)   |      full command surface   \
++--------------------+                              \   +--------------------------+
+                                                     >  |        Zenith            |
++--------------------+   UDP: CCSDS space packets   /   |   Rust backend (axum)    |
+|    NASA cFS        | ---------------------------->    |   React frontend         |
+|  (CI_LAB/TO_LAB)   |   zenith arms the downlink  /    |   SQLite + WAL pool      |
++--------------------+                            /     |                          |
+                                                 /      |   - REST API             |
++--------------------+   TCP: CCSDS TM frames   /       |   - WebSocket telemetry  |
+|     F-prime        | ------------------------/        |   - Multi-target         |
+|   (deployment)     |   dials IN; zenith listens       +--------------------------+
++--------------------+                                             |
+                                            Per-target definitions (TOML) +
+                                            generated artifacts (JSON)
                                             +--------------------------+
                                             |  app_manifest.json       |
                                             |  structs/*.json          |
+                                            |     or records.json      |
                                             |  telemetry.json          |
                                             |  commands.json           |
+                                            |  on_connect.json         |
                                             +--------------------------+
 ```
 
 ## Per-Target Plugin Architecture
 
-Zenith ships with zero apex-application knowledge. Each target you
-want to control gets its own config directory with the build artifacts
-that describe what's running on that target:
+Zenith ships with zero application knowledge. Each target you want to
+control gets its own config directory with the build artifacts that
+describe what's running on that target:
 
 ```
 targets/
-  pi-ops-demo/
+  pi-ops-demo/            # An Apex application
     app_manifest.json     # Component registry: fullUid, name, type, instance
     structs/              # apex_data_gen output, one JSON per component
       ApexExecutive.json  #   - struct definitions with field types and offsets
@@ -58,10 +64,16 @@ targets/
     commands.json         # Per-component command catalog (quick commands,
                           #   typed field forms, response decoding hints)
 
-  thor-ops-demo-a/
-    ...                   # Different application: different artifacts
-  thor-ops-demo-b/
-    ...
+  cfs-cpu1/               # A cFS instance
+    app_manifest.json     # Same schema, different generator (cfs-dictgen)
+    structs/              # Layouts extracted from the flight build's DWARF
+    telemetry.json
+    on_connect.json       # Named steps sent on connect (enable the downlink)
+
+  fprime-demo/            # An F-prime deployment
+    records.json          # Record dictionary: one table of channel id, name,
+                          #   type, size + the record header shape and byte order
+    telemetry.json
 ```
 
 The same backend binary serves any configured target. Adding a
