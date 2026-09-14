@@ -115,6 +115,16 @@ impl AprotoClient {
         // Command callers -> writer: outbound packets
         let (cmd_tx, cmd_rx) = mpsc::channel::<CommandRequest>(64);
 
+        // The previous connection's tasks must not outlive it: its
+        // writer is parked on the command channel replaced below, and
+        // wakes to run its exit path the moment that channel drops.
+        if let Some(h) = self.reader_handle.take() {
+            h.abort();
+        }
+        if let Some(h) = self.writer_handle.take() {
+            h.abort();
+        }
+
         let connected = self.connected.clone();
         let gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         connected.store(true, Ordering::Release);
@@ -178,6 +188,7 @@ impl AprotoClient {
         // disconnect. A late ACK for a timed-out command is discarded by
         // the sequence match when it eventually arrives.
         let conn_flag_w = connected.clone();
+        let gen_flag_w = self.generation.clone();
         let ack_timeout = self.command_timeout;
         let writer_handle = tokio::spawn(async move {
             let mut write_half = write_half;
@@ -228,7 +239,11 @@ impl AprotoClient {
                 }
             }
 
-            conn_flag_w.store(false, Ordering::Release);
+            // Same generation guard as the reader: a writer from an
+            // earlier connection must not clear the current one's flag.
+            if gen_flag_w.load(Ordering::Acquire) == gen {
+                conn_flag_w.store(false, Ordering::Release);
+            }
         });
 
         self.cmd_tx = Some(cmd_tx);
@@ -592,6 +607,53 @@ impl AprotoClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// @test Reconnecting after the remote hangs up leaves the link
+    /// connected. The earlier connection's writer used to wake when
+    /// its command channel was replaced and clear the connected flag
+    /// with no generation check, so a live, working link reported
+    /// connected=false within moments and block polling stopped.
+    #[tokio::test]
+    async fn reconnect_after_remote_close_stays_connected() {
+        let (push_tx, _) = tokio::sync::broadcast::channel(16);
+        let mut client = AprotoClient::new(push_tx);
+
+        // First target: accept, then hang up at once.
+        let first = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let first_addr = first.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (sock, _) = first.accept().await.unwrap();
+            drop(sock);
+        });
+        client
+            .connect(&first_addr.ip().to_string(), first_addr.port())
+            .await
+            .unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while client.is_connected() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(!client.is_connected(), "remote close must clear the flag");
+
+        // Second target stays up; the reconnect must stay connected.
+        let second = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let second_addr = second.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (sock, _) = second.accept().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            drop(sock);
+        });
+        client
+            .connect(&second_addr.ip().to_string(), second_addr.port())
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            client.is_connected(),
+            "a stale writer from the first connection cleared the live flag"
+        );
+        client.disconnect();
+    }
     use std::sync::Mutex;
     use tokio::net::TcpListener;
 
