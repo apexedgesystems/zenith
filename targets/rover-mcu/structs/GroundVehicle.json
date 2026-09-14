@@ -1,0 +1,695 @@
+{
+  "component": "GroundVehicle",
+  "structs": {
+    "GroundVehicleState": {
+      "category": "STATE",
+      "size": 75,
+      "fields": [
+        {
+          "name": "tick_count",
+          "type": "uint",
+          "offset": 0,
+          "size": 8,
+          "value": 0
+        },
+        {
+          "name": "step_count",
+          "type": "uint",
+          "offset": 8,
+          "size": 8,
+          "value": 0
+        },
+        {
+          "name": "initialized",
+          "type": "uint",
+          "offset": 16,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "commanded_halt",
+          "type": "uint",
+          "offset": 17,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "throttle_override_pct",
+          "type": "uint",
+          "offset": 18,
+          "size": 1,
+          "value": 255
+        },
+        {
+          "name": "commanded_mode",
+          "type": "uint",
+          "offset": 19,
+          "size": 1,
+          "value": 255
+        },
+        {
+          "name": "target_kind",
+          "type": "uint",
+          "offset": 20,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "target_seq",
+          "type": "uint",
+          "offset": 21,
+          "size": 2,
+          "value": 0
+        },
+        {
+          "name": "target_a_m",
+          "type": "float",
+          "offset": 23,
+          "size": 4,
+          "value": "0.0F"
+        },
+        {
+          "name": "target_b_m",
+          "type": "float",
+          "offset": 27,
+          "size": 4,
+          "value": "0.0F"
+        },
+        {
+          "name": "seq_state",
+          "type": "uint",
+          "offset": 31,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "waypoint_total",
+          "type": "uint",
+          "offset": 32,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "active_waypoint",
+          "type": "uint",
+          "offset": 33,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "led_colour",
+          "type": "array",
+          "offset": 34,
+          "size": 2,
+          "value": [],
+          "element_type": "uint",
+          "dims": [2]
+        },
+        {
+          "name": "led_rate",
+          "type": "array",
+          "offset": 36,
+          "size": 2,
+          "value": [],
+          "element_type": "uint",
+          "dims": [2]
+        },
+        {
+          "name": "reserved_led",
+          "type": "uint",
+          "offset": 38,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "last_cmd_result",
+          "type": "uint",
+          "offset": 39,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "reserved_cmd",
+          "type": "uint",
+          "offset": 40,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "last_cmd_opcode",
+          "type": "uint",
+          "offset": 41,
+          "size": 2,
+          "value": 0
+        },
+        {
+          "name": "led_phase",
+          "type": "array",
+          "offset": 43,
+          "size": 4,
+          "value": [],
+          "element_type": "uint",
+          "dims": [2]
+        },
+        {
+          "name": "led_on",
+          "type": "array",
+          "offset": 47,
+          "size": 2,
+          "value": [],
+          "element_type": "uint",
+          "dims": [2]
+        },
+        {
+          "name": "reserved_strobe",
+          "type": "array",
+          "offset": 49,
+          "size": 2,
+          "value": [],
+          "element_type": "uint",
+          "dims": [2]
+        },
+        {
+          "name": "trace_t_s",
+          "type": "float",
+          "offset": 51,
+          "size": 8,
+          "value": 0.0
+        },
+        {
+          "name": "trace_decim",
+          "type": "uint",
+          "offset": 59,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "trace_dropped",
+          "type": "uint",
+          "offset": 63,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "trace_active",
+          "type": "uint",
+          "offset": 67,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "trace_ended",
+          "type": "uint",
+          "offset": 68,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "reserved_trace",
+          "type": "array",
+          "offset": 69,
+          "size": 6,
+          "value": [],
+          "element_type": "uint",
+          "dims": [6]
+        }
+      ]
+    },
+    "GroundVehicleTelemetry": {
+      "category": "OUTPUT",
+      "size": 256,
+      "fields": [
+        {
+          "name": "timestamp_ns",
+          "type": "uint",
+          "offset": 0,
+          "size": 8,
+          "value": 0
+        },
+        {
+          "name": "tick",
+          "type": "uint",
+          "offset": 8,
+          "size": 8,
+          "value": 0
+        },
+        {
+          "name": "pos_lat_deg",
+          "type": "float",
+          "offset": 16,
+          "size": 8,
+          "value": 0.0
+        },
+        {
+          "name": "pos_lon_deg",
+          "type": "float",
+          "offset": 24,
+          "size": 8,
+          "value": 0.0
+        },
+        {
+          "name": "pos_alt_m",
+          "type": "float",
+          "offset": 32,
+          "size": 8,
+          "value": 0.0
+        },
+        {
+          "name": "heading_deg",
+          "type": "float",
+          "offset": 40,
+          "size": 8,
+          "value": 0.0
+        },
+        {
+          "name": "speed_m_s",
+          "type": "float",
+          "offset": 48,
+          "size": 8,
+          "value": 0.0
+        },
+        {
+          "name": "ground_elevation_m",
+          "type": "float",
+          "offset": 56,
+          "size": 8,
+          "value": 0.0
+        },
+        {
+          "name": "slope_deg",
+          "type": "float",
+          "offset": 64,
+          "size": 8,
+          "value": 0.0
+        },
+        {
+          "name": "slope_azimuth_deg",
+          "type": "float",
+          "offset": 72,
+          "size": 8,
+          "value": 0.0
+        },
+        {
+          "name": "is_slipping",
+          "type": "uint",
+          "offset": 80,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "is_off_terrain",
+          "type": "uint",
+          "offset": 81,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "reserved0",
+          "type": "uint",
+          "offset": 82,
+          "size": 2,
+          "value": 0
+        },
+        {
+          "name": "lidar_n_rays",
+          "type": "uint",
+          "offset": 84,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "lidar_range_m",
+          "type": "array",
+          "offset": 88,
+          "size": 128,
+          "value": [],
+          "element_type": "float",
+          "dims": [16]
+        },
+        {
+          "name": "lidar_hit",
+          "type": "array",
+          "offset": 216,
+          "size": 16,
+          "value": [],
+          "element_type": "uint",
+          "dims": [16]
+        },
+        {
+          "name": "reserved1",
+          "type": "array",
+          "offset": 232,
+          "size": 24,
+          "value": [],
+          "element_type": "uint",
+          "dims": [24]
+        }
+      ]
+    },
+    "GroundVehicleTunables": {
+      "category": "TUNABLE_PARAM",
+      "size": 192,
+      "fields": [
+        {
+          "name": "mass_kg",
+          "type": "float",
+          "offset": 0,
+          "size": 8,
+          "value": 1500.0
+        },
+        {
+          "name": "max_speed_m_s",
+          "type": "float",
+          "offset": 8,
+          "size": 8,
+          "value": 8.0
+        },
+        {
+          "name": "throttle_default",
+          "type": "float",
+          "offset": 16,
+          "size": 8,
+          "value": 0.6
+        },
+        {
+          "name": "steer_rate_deg_s",
+          "type": "float",
+          "offset": 24,
+          "size": 8,
+          "value": 6.0
+        },
+        {
+          "name": "init_lat_deg",
+          "type": "float",
+          "offset": 32,
+          "size": 8,
+          "value": 39.5
+        },
+        {
+          "name": "init_lon_deg",
+          "type": "float",
+          "offset": 40,
+          "size": 8,
+          "value": -105.5
+        },
+        {
+          "name": "init_heading_deg",
+          "type": "float",
+          "offset": 48,
+          "size": 8,
+          "value": 45.0
+        },
+        {
+          "name": "max_slope_deg",
+          "type": "float",
+          "offset": 56,
+          "size": 8,
+          "value": 25.0
+        },
+        {
+          "name": "lidar_n_rays",
+          "type": "uint",
+          "offset": 64,
+          "size": 4,
+          "value": 8
+        },
+        {
+          "name": "lidar_reserved",
+          "type": "uint",
+          "offset": 68,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "lidar_max_range_m",
+          "type": "float",
+          "offset": 72,
+          "size": 8,
+          "value": 500.0
+        },
+        {
+          "name": "lidar_fov_deg",
+          "type": "float",
+          "offset": 80,
+          "size": 8,
+          "value": 90.0
+        },
+        {
+          "name": "lidar_step_m",
+          "type": "float",
+          "offset": 88,
+          "size": 8,
+          "value": 5.0
+        },
+        {
+          "name": "body_label",
+          "type": "string",
+          "offset": 96,
+          "size": 16,
+          "value": ""
+        },
+        {
+          "name": "init_from_grid",
+          "type": "uint",
+          "offset": 112,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "reserved_init",
+          "type": "array",
+          "offset": 113,
+          "size": 7,
+          "value": [],
+          "element_type": "uint",
+          "dims": [7]
+        },
+        {
+          "name": "anchor_lat_deg",
+          "type": "float",
+          "offset": 120,
+          "size": 8,
+          "value": 39.5
+        },
+        {
+          "name": "anchor_lon_deg",
+          "type": "float",
+          "offset": 128,
+          "size": 8,
+          "value": -105.5
+        },
+        {
+          "name": "init_north_m",
+          "type": "float",
+          "offset": 136,
+          "size": 8,
+          "value": 0.0
+        },
+        {
+          "name": "init_east_m",
+          "type": "float",
+          "offset": 144,
+          "size": 8,
+          "value": 0.0
+        },
+        {
+          "name": "wheelbase_m",
+          "type": "float",
+          "offset": 152,
+          "size": 8,
+          "value": 1.5
+        },
+        {
+          "name": "max_steer_deg",
+          "type": "float",
+          "offset": 160,
+          "size": 8,
+          "value": 33.0
+        },
+        {
+          "name": "accel_m_s2",
+          "type": "float",
+          "offset": 168,
+          "size": 8,
+          "value": 1.5
+        },
+        {
+          "name": "decel_m_s2",
+          "type": "float",
+          "offset": 176,
+          "size": 8,
+          "value": 2.0
+        },
+        {
+          "name": "step_hz",
+          "type": "uint",
+          "offset": 184,
+          "size": 4,
+          "value": 10
+        },
+        {
+          "name": "lidar_divisor",
+          "type": "uint",
+          "offset": 188,
+          "size": 4,
+          "value": 1
+        }
+      ]
+    },
+    "RoverCmdSeqState": {
+      "category": "COMMAND",
+      "opcode": "0x0107",
+      "size": 2,
+      "fields": [
+        {
+          "name": "state",
+          "type": "uint",
+          "offset": 0,
+          "size": 1,
+          "value": null
+        },
+        {
+          "name": "waypoint_total",
+          "type": "uint",
+          "offset": 1,
+          "size": 1,
+          "value": null
+        }
+      ]
+    },
+    "RoverCmdSetLed": {
+      "category": "COMMAND",
+      "opcode": "0x0106",
+      "size": 3,
+      "fields": [
+        {
+          "name": "lamp",
+          "type": "uint",
+          "offset": 0,
+          "size": 1,
+          "value": null
+        },
+        {
+          "name": "colour",
+          "type": "uint",
+          "offset": 1,
+          "size": 1,
+          "value": null
+        },
+        {
+          "name": "rate",
+          "type": "uint",
+          "offset": 2,
+          "size": 1,
+          "value": null
+        }
+      ]
+    },
+    "RoverCmdSetMode": {
+      "category": "COMMAND",
+      "opcode": "0x0103",
+      "size": 1,
+      "fields": [
+        {
+          "name": "mode",
+          "type": "uint",
+          "offset": 0,
+          "size": 1,
+          "value": null
+        }
+      ]
+    },
+    "RoverCmdSetTarget": {
+      "category": "COMMAND",
+      "opcode": "0x0104",
+      "size": 8,
+      "fields": [
+        {
+          "name": "a_m",
+          "type": "float",
+          "offset": 0,
+          "size": 4,
+          "value": null
+        },
+        {
+          "name": "b_m",
+          "type": "float",
+          "offset": 4,
+          "size": 4,
+          "value": null
+        }
+      ]
+    }
+  },
+  "enums": {
+    "CmdResultCode": {
+      "underlying_type": "uint8_t",
+      "values": {
+        "ACK": 1,
+        "NACK_BUSY": 4,
+        "NACK_EXEC_FAILED": 3,
+        "NACK_INVALID_ARGUMENT": 2,
+        "NACK_LINK_DOWN": 5,
+        "NONE": 0
+      }
+    },
+    "RoverOpcode": {
+      "underlying_type": "uint16_t",
+      "values": {
+        "HALT": 256,
+        "RESUME": 257,
+        "SET_LED": 262,
+        "SET_MODE": 259,
+        "SET_MODE_SEQ": 275,
+        "SET_SEQ_STATE": 263,
+        "SET_TARGET_ABS": 261,
+        "SET_TARGET_ABS_SEQ": 277,
+        "SET_TARGET_REL": 260,
+        "SET_TARGET_REL_SEQ": 276,
+        "SET_THROTTLE": 258
+      }
+    }
+  },
+  "commands": [
+    {
+      "name": "HALT",
+      "opcode": "0x0100",
+      "doc": "Plant-level stop; heading frozen. Stamps MANUAL_HALT (0x15) unless a halt reason is set."
+    },
+    {
+      "name": "RESUME",
+      "opcode": "0x0101",
+      "doc": "Clear a halt and any throttle override."
+    },
+    {
+      "name": "SET_MODE",
+      "opcode": "0x0103",
+      "request": "RoverCmdSetMode",
+      "doc": "Drive mode: 0 HOLD, 1 TRAJECTORY, 2 WAYPOINT. BUSY while a sequence runs."
+    },
+    {
+      "name": "SET_TARGET_REL",
+      "opcode": "0x0104",
+      "request": "RoverCmdSetTarget",
+      "doc": "Target (north, east) metres from the current position. BUSY while a sequence runs."
+    },
+    {
+      "name": "SET_TARGET_ABS",
+      "opcode": "0x0105",
+      "request": "RoverCmdSetTarget",
+      "doc": "Target (north, east) metres from the grid anchor; |value| <= 2000."
+    },
+    {
+      "name": "SET_LED",
+      "opcode": "0x0106",
+      "request": "RoverCmdSetLed",
+      "doc": "Lamp 1..2; colour 0 off, 1 red, 2 green, 3 blue, 4 yellow, 5 white; rate 0 steady, 1 0.5 Hz, 2 1 Hz, 3 2 Hz, 4 5 Hz, 5 10 Hz."
+    },
+    {
+      "name": "SET_SEQ_STATE",
+      "opcode": "0x0107",
+      "request": "RoverCmdSeqState",
+      "doc": "Sequences bracket themselves with this; 0 idle, 1..31 running id, 0x10|reason halt."
+    }
+  ]
+}

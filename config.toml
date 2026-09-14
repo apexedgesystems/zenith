@@ -168,3 +168,27 @@ tm_frame_size = 1024
 auto_connect = true
 telemetry_config = "/data/targets/fprime-demo/telemetry.json"
 records_config = "/data/targets/fprime-demo/records.json"
+
+# Target: Rover MCU demo (apex horizon rover; bundle from
+# `make zenith-target APP=ApexRoverMcuDemo`). This instance runs no
+# telemetry manager, so zenith reads the two OUTPUT blocks the
+# layouts chart on a timer instead of waiting for pushes. The host is
+# the rover container's bridge IP through its in-namespace forwarder;
+# it can change when the container restarts.
+[[targets]]
+name = "Rover MCU"
+host = "172.26.0.2"
+port = 9001
+auto_connect = true
+dir = "/data/targets/rover-mcu"
+health_nonzero_bad = ["isslipping", "isoffterrain"]
+
+[[targets.poll]]
+uid = "0x00DE00"   # GroundVehicle OUTPUT (256 B)
+category = 4
+rate_hz = 5.0
+
+[[targets.poll]]
+uid = "0x00E200"   # RoverController OUTPUT (112 B)
+category = 4
+rate_hz = 5.0

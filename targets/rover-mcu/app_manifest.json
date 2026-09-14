@@ -1,0 +1,118 @@
+{
+  "application": "ApexRoverMcuDemo",
+  "description": "Rover on a terrain tile; guidance law on a NUCLEO-F767ZI; lidar on its own wire.",
+  "protocol": {
+    "transport": "TCP",
+    "framing": "SLIP",
+    "port": 9000,
+    "header": "AprotoProtocol.json"
+  },
+  "components": [
+    {
+      "name": "Executive",
+      "fullUid": "0x000000",
+      "type": "EXECUTIVE",
+      "dataFile": "ApexExecutive.json",
+      "notes": "System executive. Health via GET_HEALTH (opcode 0x0100)."
+    },
+    {
+      "name": "Scheduler",
+      "fullUid": "0x000100",
+      "type": "CORE",
+      "dataFile": "Scheduler.json",
+      "notes": "Task scheduler. Health via GET_HEALTH (opcode 0x0100)."
+    },
+    {
+      "name": "FileSystem",
+      "fullUid": "0x000200",
+      "type": "CORE",
+      "notes": "File I/O for TPRM loading, file transfers, and library management."
+    },
+    {
+      "name": "Registry",
+      "fullUid": "0x000300",
+      "type": "CORE",
+      "notes": "Component and data registry. Handles INSPECT queries."
+    },
+    {
+      "name": "Interface",
+      "fullUid": "0x000400",
+      "type": "CORE",
+      "dataFile": "ApexInterface.json",
+      "notes": "TCP/SLIP interface. Stats via GET_STATS (opcode 0x0100)."
+    },
+    {
+      "name": "Action",
+      "fullUid": "0x000500",
+      "type": "CORE",
+      "dataFile": "ActionComponent.json",
+      "notes": "Sequence engine. Stats via GET_STATS (opcode 0x0100)."
+    },
+    {
+      "name": "GroundVehicle",
+      "fullUid": "0x00DE00",
+      "type": "SW_MODEL",
+      "notes": "100 Hz steered plant, lidar sweep, lamps; OUTPUT is the 256 B ROVR/2 frame",
+      "dataFile": "GroundVehicle.json"
+    },
+    {
+      "name": "RoverController",
+      "fullUid": "0x00E200",
+      "type": "SW_MODEL",
+      "notes": "20 Hz: resolves the leg, forwards the board's drive, host law as shadow",
+      "dataFile": "RoverController.json"
+    },
+    {
+      "name": "RoverBoardLink",
+      "fullUid": "0x00E300",
+      "type": "DRIVER",
+      "notes": "Serial link to the NUCLEO over the ST-Link VCP",
+      "dataFile": "RoverBoardLink.json"
+    },
+    {
+      "name": "RoverLidarModel",
+      "fullUid": "0x00E400",
+      "type": "HW_MODEL",
+      "notes": "Lidar scans over a USB-serial adapter to the board's USART6",
+      "dataFile": "RoverLidarModel.json"
+    },
+    {
+      "name": "CelestialBody",
+      "fullUid": "0x00DC00",
+      "type": "SW_MODEL",
+      "notes": "Earth bound to the shared world (J2, terrain tile, layered atmosphere)"
+    },
+    {
+      "name": "ShmRingBridge",
+      "fullUid": "0x00CB00",
+      "type": "SUPPORT",
+      "notes": "ROVR/2 frame out to /horizon_rover at 100 Hz, commands in"
+    }
+  ],
+  "systemOpcodes": {
+    "description": "System opcodes (0x0000-0x00FF) handled by ApexInterface.",
+    "interface": {
+      "0x0000": "SYS_NOOP - connectivity check (any fullUid)",
+      "0x0001": "SYS_PING - echo payload back",
+      "0x0020": "FILE_BEGIN - start file upload",
+      "0x0021": "FILE_CHUNK - file data chunk",
+      "0x0022": "FILE_END - finalize upload",
+      "0x0023": "FILE_ABORT - abort transfer",
+      "0x0024": "FILE_STATUS - query transfer status",
+      "0x0025": "FILE_GET - request file download",
+      "0x0026": "FILE_READ_CHUNK - read chunk from target"
+    },
+    "component": {
+      "0x0080": "GET_COMMAND_COUNT - command statistics (all components)",
+      "0x0081": "GET_STATUS_INFO - component lifecycle status (all components)",
+      "0x0100": "GET_HEALTH/GET_STATS - component-specific health telemetry"
+    }
+  },
+  "inspectCategories": {
+    "0": "STATIC_PARAM - read-only constants",
+    "1": "TUNABLE_PARAM - runtime-adjustable parameters",
+    "2": "STATE - internal component state",
+    "3": "INPUT - external data fed to component",
+    "4": "OUTPUT - data produced by component"
+  }
+}
