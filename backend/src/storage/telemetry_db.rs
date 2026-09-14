@@ -172,6 +172,7 @@ impl TelemetryDb {
                 grid TEXT NOT NULL DEFAULT '1x1',
                 time_window_s INTEGER DEFAULT 30,
                 created_at INTEGER NOT NULL,
+                position INTEGER NOT NULL DEFAULT 0,
                 UNIQUE(target_id, name)
             );
             CREATE TABLE IF NOT EXISTS telemetry_plots (
@@ -188,6 +189,20 @@ impl TelemetryDb {
                 thresholds TEXT
             );",
         )?;
+
+        // A layouts table from before file ordering gets the column in
+        // place; existing rows read as position 0 until the next seed
+        // rewrites them in file order.
+        let has_position: i64 = writer.query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('telemetry_layouts') WHERE name = 'position'",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_position == 0 {
+            writer.execute_batch(
+                "ALTER TABLE telemetry_layouts ADD COLUMN position INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
 
         // Operator UI preferences: (scope, kind, name) -> JSON value.
         // Scope is "global" or "target:<id>" today; the key shape
@@ -1540,7 +1555,7 @@ impl TelemetryDb {
         // layout id stable when only content changed. Names are unique
         // per target across sources, and a user-saved layout owns its
         // name: the file default is skipped rather than clobbering it.
-        for layout in &config.layouts {
+        for (position, layout) in config.layouts.iter().enumerate() {
             let existing: Option<(i64, String)> = tx
                 .query_row(
                     "SELECT id, source FROM telemetry_layouts
@@ -1557,13 +1572,17 @@ impl TelemetryDb {
                         "DELETE FROM telemetry_plots WHERE layout_id = ?1",
                         params![id],
                     )?;
+                    tx.execute(
+                        "UPDATE telemetry_layouts SET position = ?1 WHERE id = ?2",
+                        params![position as i64, id],
+                    )?;
                     id
                 }
                 None => {
                     tx.execute(
-                        "INSERT INTO telemetry_layouts (target_id, name, source, grid, time_window_s, created_at)
-                         VALUES (?1, ?2, 'config', '1x1', 30, ?3)",
-                        params![target_id, layout.name, now],
+                        "INSERT INTO telemetry_layouts (target_id, name, source, grid, time_window_s, created_at, position)
+                         VALUES (?1, ?2, 'config', '1x1', 30, ?3, ?4)",
+                        params![target_id, layout.name, now, position as i64],
                     )?;
                     count += 1;
                     tx.last_insert_rowid()
@@ -1588,11 +1607,13 @@ impl TelemetryDb {
     pub fn get_layouts(&self, target_id: &str) -> Result<Vec<SavedLayout>, DbError> {
         self.with_reader(|conn| {
             let mut stmt = conn.prepare_cached(
-                // Config layouts keep the order their file declares them in
-                // (rows are seeded in that order), so the first layout a
-                // producer lists is the one a page opens on.
+                // Config layouts keep the order their file declares them in,
+                // so the first layout a producer lists is the one a page
+                // opens on. Row ids can't carry that: a name surviving from
+                // an earlier file (or an earlier target at the same
+                // positional id) keeps its old, lower id.
                 "SELECT id, name, source, grid, time_window_s FROM telemetry_layouts
-                 WHERE target_id = ?1 ORDER BY source DESC, id",
+                 WHERE target_id = ?1 ORDER BY source DESC, position, id",
             )?;
 
             let layouts: Vec<(i64, String, String, String, u32)> = stmt
@@ -2356,6 +2377,33 @@ mod tests {
 
         let waves = layouts.iter().find(|l| l.name == "Waves").unwrap();
         assert_eq!(waves.plots[0].channels, vec!["A.x", "A.z"]);
+    }
+
+    /// @test Config layouts list in the order the current file declares
+    /// them, even when a name survives from an earlier seed with a lower
+    /// row id -- the positional-id reuse that put a stale "Default"
+    /// ahead of a producer's first layout.
+    #[test]
+    fn seed_layouts_list_in_file_order() {
+        let (_dir, db) = open_temp_db();
+        db.seed_layouts("t1", &telemetry_config(&[("Default", &["A.x"])]))
+            .unwrap();
+        db.seed_layouts(
+            "t1",
+            &telemetry_config(&[
+                ("Drive", &["B.speed"]),
+                ("Position", &["B.lat"]),
+                ("Default", &["A.x"]),
+            ]),
+        )
+        .unwrap();
+        let names: Vec<String> = db
+            .get_layouts("t1")
+            .unwrap()
+            .into_iter()
+            .map(|l| l.name)
+            .collect();
+        assert_eq!(names, vec!["Drive", "Position", "Default"]);
     }
 
     /// @test A user-saved layout owns its name: a config layout with
