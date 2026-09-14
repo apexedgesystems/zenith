@@ -696,7 +696,9 @@ pub struct QuickCommand {
     pub opcode: String,
     #[serde(default)]
     pub desc: String,
-    #[serde(default)]
+    /// Hex payload the button sends. Generators spell the key
+    /// `payloadHex`; both spellings load, and it serves as `payload`.
+    #[serde(default, alias = "payloadHex")]
     pub payload: Option<String>,
 }
 
@@ -1058,6 +1060,27 @@ impl ConnectInit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// @test A quick command's payload loads from either key spelling
+    /// (a generator emitting `payloadHex` must not lose it -- a sequence
+    /// start button would silently send an empty payload) and serves
+    /// back to the UI as `payload`.
+    #[test]
+    fn quick_command_payload_accepts_generator_spelling() {
+        let cfg: CommandConfig = serde_json::from_str(
+            r#"{"quickCommands": [
+                {"label": "Seq 7 resume", "fullUid": "0x000500",
+                 "opcode": "0x0510", "payloadHex": "0700"},
+                {"label": "Legacy", "fullUid": "0x000000",
+                 "opcode": "0x0001", "payload": "ab"}
+            ], "components": {}}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.quick_commands[0].payload.as_deref(), Some("0700"));
+        assert_eq!(cfg.quick_commands[1].payload.as_deref(), Some("ab"));
+        let served = serde_json::to_value(&cfg.quick_commands[0]).unwrap();
+        assert_eq!(served["payload"], "0700");
+    }
 
     /// @test Connect-init validation: a good sequence loads and
     /// decodes to (name, delay, bytes); bad hex, an empty name, an
