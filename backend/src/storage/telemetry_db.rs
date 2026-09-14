@@ -1588,8 +1588,11 @@ impl TelemetryDb {
     pub fn get_layouts(&self, target_id: &str) -> Result<Vec<SavedLayout>, DbError> {
         self.with_reader(|conn| {
             let mut stmt = conn.prepare_cached(
+                // Config layouts keep the order their file declares them in
+                // (rows are seeded in that order), so the first layout a
+                // producer lists is the one a page opens on.
                 "SELECT id, name, source, grid, time_window_s FROM telemetry_layouts
-                 WHERE target_id = ?1 ORDER BY source DESC, name",
+                 WHERE target_id = ?1 ORDER BY source DESC, id",
             )?;
 
             let layouts: Vec<(i64, String, String, String, u32)> = stmt
