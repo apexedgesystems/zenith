@@ -261,6 +261,83 @@ pub struct TargetSection {
     pub commands_config: Option<String>,
     #[serde(default)]
     pub auto_connect: bool,
+    /// APROTO targets: data blocks read on a timer while connected and
+    /// fed into the telemetry pipeline as if pushed. For vehicles that
+    /// publish nothing on their own -- the blocks still chart, store,
+    /// and drive health cards. Each read is a command round trip, so
+    /// rates stay modest.
+    #[serde(default)]
+    pub poll: Vec<PollBlock>,
+}
+
+/// One data block to poll: whose, which category, how often.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PollBlock {
+    /// Component fullUid ("0x" hex or decimal).
+    pub uid: String,
+    /// Data category (0 STATIC_PARAM .. 4 OUTPUT).
+    pub category: u8,
+    #[serde(default = "default_poll_hz")]
+    pub rate_hz: f64,
+}
+
+impl PollBlock {
+    pub fn full_uid(&self) -> Option<u32> {
+        let t = self.uid.trim();
+        match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+            Some(hex) => u32::from_str_radix(hex, 16).ok(),
+            None => t.parse().ok(),
+        }
+    }
+}
+
+fn default_poll_hz() -> f64 {
+    5.0
+}
+
+/// Upper bound on a polled block's rate: every read is a command round
+/// trip sharing the link with operator commands.
+pub const MAX_POLL_HZ: f64 = 50.0;
+
+/// The first target whose poll declaration cannot run, with the reason.
+/// Polling reads blocks through the APROTO command path, so it is a
+/// definition bug anywhere else.
+pub fn invalid_poll(targets: &[TargetSection]) -> Option<(&str, String)> {
+    for t in targets {
+        if t.poll.is_empty() {
+            continue;
+        }
+        if t.protocol != "aproto-slip" {
+            return Some((
+                t.name.as_str(),
+                format!(
+                    "poll is only supported on aproto-slip, not '{}'",
+                    t.protocol
+                ),
+            ));
+        }
+        for b in &t.poll {
+            if b.full_uid().is_none() {
+                return Some((
+                    t.name.as_str(),
+                    format!("poll uid '{}' is not a number", b.uid),
+                ));
+            }
+            if b.category > 4 {
+                return Some((
+                    t.name.as_str(),
+                    format!("poll category {} is not 0..4", b.category),
+                ));
+            }
+            if !(b.rate_hz > 0.0 && b.rate_hz <= MAX_POLL_HZ) {
+                return Some((
+                    t.name.as_str(),
+                    format!("poll rate_hz {} is outside (0, {}]", b.rate_hz, MAX_POLL_HZ),
+                ));
+            }
+        }
+    }
+    None
 }
 
 /* ----------------------------- Defaults ----------------------------- */
@@ -644,6 +721,56 @@ pub fn apply_env_overrides(
 mod tests {
     use super::*;
 
+    /// @test Poll declarations refuse boot unless they can run: only on
+    /// aproto-slip, with a numeric uid, a real category, and a rate in
+    /// (0, MAX_POLL_HZ]; a well-formed declaration passes.
+    #[test]
+    fn poll_declarations_are_validated() {
+        let block = |uid: &str, category: u8, rate_hz: f64| PollBlock {
+            uid: uid.to_string(),
+            category,
+            rate_hz,
+        };
+        let with_poll = |protocol: &str, b: PollBlock| {
+            let mut t = target("rover", "tcp", None);
+            t.protocol = protocol.to_string();
+            t.poll = vec![b];
+            t
+        };
+
+        let good = [with_poll("aproto-slip", block("0x00DE00", 4, 5.0))];
+        assert!(invalid_poll(&good).is_none());
+        assert_eq!(good[0].poll[0].full_uid(), Some(0x00DE00));
+
+        let cases = [
+            (
+                with_poll("ccsds-spp", block("0x00DE00", 4, 5.0)),
+                "aproto-slip",
+            ),
+            (
+                with_poll("aproto-slip", block("rover", 4, 5.0)),
+                "not a number",
+            ),
+            (
+                with_poll("aproto-slip", block("0x00DE00", 9, 5.0)),
+                "category",
+            ),
+            (
+                with_poll("aproto-slip", block("0x00DE00", 4, 0.0)),
+                "rate_hz",
+            ),
+            (
+                with_poll("aproto-slip", block("0x00DE00", 4, 500.0)),
+                "rate_hz",
+            ),
+        ];
+        for (t, expect) in cases {
+            let one = [t];
+            let (_, reason) = invalid_poll(&one).expect("must refuse");
+            assert!(reason.contains(expect), "{reason}");
+        }
+    }
+
     /// @test The target-directory convention: naming one directory
     /// finds the conventional artifacts inside it, absent ones stay
     /// absent (a bundle without commands.json simply has no command
@@ -730,6 +857,7 @@ mod tests {
             telemetry_config: None,
             commands_config: None,
             auto_connect: false,
+            poll: Vec::new(),
         }
     }
 

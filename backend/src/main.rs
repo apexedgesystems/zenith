@@ -98,6 +98,9 @@ struct TargetState {
     /// telemetry; the link's RecordSpec derives from it)
     record_table: Option<Arc<crate::core::config_manager::RecordTable>>,
     _router_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Timed block reads feeding the telemetry stream (config `poll`);
+    /// torn down wherever the router is.
+    _poll_handles: Vec<tokio::task::JoinHandle<()>>,
 }
 
 struct SharedState {
@@ -675,8 +678,63 @@ async fn do_connect_target(state: &AppState, id: &str) -> Result<bool, (StatusCo
         if let Some(old) = target._router_handle.replace(handle) {
             old.abort();
         }
+        for h in target._poll_handles.drain(..) {
+            h.abort();
+        }
+        target._poll_handles = spawn_polls(
+            &target.config.poll,
+            target.client.clone(),
+            target.push_tlm_tx.clone(),
+        );
     }
     Ok(true)
+}
+
+/// Read a target's declared data blocks on a timer and publish each
+/// read into its telemetry stream, exactly as a pushed packet would
+/// arrive -- the router, storage, and dashboard cannot tell the
+/// difference. A task ends when the link drops; the next connect
+/// starts fresh ones.
+fn spawn_polls(
+    blocks: &[config::PollBlock],
+    client: Arc<Mutex<ProtocolLink>>,
+    push_tx: broadcast::Sender<PushTelemetryPacket>,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    blocks
+        .iter()
+        .filter_map(|b| {
+            let uid = b.full_uid()?;
+            let category = b.category;
+            let period = std::time::Duration::from_secs_f64(1.0 / b.rate_hz);
+            let client = client.clone();
+            let push_tx = push_tx.clone();
+            Some(tokio::spawn(async move {
+                let mut tick = tokio::time::interval(period);
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tick.tick().await;
+                    let read = {
+                        let mut link = client.lock().await;
+                        if !link.is_connected() {
+                            break;
+                        }
+                        let Some(cli) = link.aproto() else {
+                            break;
+                        };
+                        cli.inspect(uid, category, 0, 0).await
+                    };
+                    if let Ok(resp) = read {
+                        if resp.status == 0 && !resp.extra.is_empty() {
+                            let _ = push_tx.send(PushTelemetryPacket {
+                                full_uid: uid,
+                                payload: resp.extra,
+                            });
+                        }
+                    }
+                }
+            }))
+        })
+        .collect()
 }
 
 async fn list_targets(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -781,6 +839,9 @@ async fn disconnect_target(
             .get_mut(&id)
             .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
         if let Some(h) = target._router_handle.take() {
+            h.abort();
+        }
+        for h in target._poll_handles.drain(..) {
             h.abort();
         }
         (target.client.clone(), db)
@@ -2935,6 +2996,7 @@ async fn add_target(
         records_config: None,
         connect_init: None,
         auto_connect: false,
+        poll: Vec::new(),
     };
 
     // Load artifacts BEFORE taking the write guard -- these hit the
@@ -3002,6 +3064,7 @@ async fn add_target(
             connect_init: artifacts.connect_init,
             record_table: artifacts.record_table,
             _router_handle: None,
+            _poll_handles: Vec::new(),
         },
     );
 
@@ -3052,8 +3115,11 @@ async fn remove_target(
     cli.disconnect();
     drop(cli);
 
-    // Abort telemetry router
+    // Abort telemetry router and any block polls
     if let Some(h) = target._router_handle {
+        h.abort();
+    }
+    for h in target._poll_handles {
         h.abort();
     }
 
@@ -4277,6 +4343,11 @@ async fn main() {
         std::process::exit(1);
     }
 
+    if let Some((name, reason)) = config::invalid_poll(&config.targets) {
+        eprintln!("FATAL: target '{}': {}", name, reason);
+        std::process::exit(1);
+    }
+
     // Cross-target definition check: two targets binding one local
     // listen port cannot both hear their telemetry, and the loser
     // would only find out at connect time. Boot refusal instead.
@@ -4389,6 +4460,7 @@ async fn main() {
                 connect_init,
                 record_table,
                 _router_handle: None,
+                _poll_handles: Vec::new(),
             },
         );
     }
@@ -4788,6 +4860,9 @@ async fn main() {
         let mut st = shutdown_state.write().await;
         for (id, target) in st.targets.iter_mut() {
             if let Some(h) = target._router_handle.take() {
+                h.abort();
+            }
+            for h in target._poll_handles.drain(..) {
                 h.abort();
             }
             let mut cli = target.client.lock().await;
