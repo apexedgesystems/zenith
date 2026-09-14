@@ -475,13 +475,13 @@ const ExecutiveSummary = memo(function ExecutiveSummary({
                 </div>
               )}
               <div
-                className="text-[10px] uppercase tracking-wider mb-0.5"
+                className="text-[11px] uppercase tracking-wider mb-1"
                 style={{ color: "var(--color-text-muted)" }}
               >
                 {m.label}
               </div>
               <div
-                className="mono text-sm font-bold"
+                className="mono text-lg font-bold"
                 style={{
                   color: m.bad
                     ? "var(--color-crit)"
@@ -570,13 +570,13 @@ const PipelineSummary = memo(function PipelineSummary({
             style={{ backgroundColor: "var(--color-elevated)" }}
           >
             <div
-              className="text-[10px] uppercase tracking-wider mb-0.5"
+              className="text-[11px] uppercase tracking-wider mb-1"
               style={{ color: "var(--color-text-muted)" }}
             >
               {t.label}
             </div>
             <div
-              className="mono text-sm font-bold"
+              className="mono text-lg font-bold"
               style={{
                 color: t.bad
                   ? "var(--color-crit)"
@@ -722,7 +722,7 @@ export default function DashboardPage({
   }
 
   return (
-    <div className="max-w-4xl">
+    <div className="max-w-screen-2xl">
       {/* Header */}
       <div className="flex items-center justify-between mb-5">
         <div>

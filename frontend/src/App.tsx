@@ -632,7 +632,7 @@ function Shell() {
                     }
                   />
                   <span
-                    className="text-xs font-semibold truncate"
+                    className="text-[13px] font-semibold break-words min-w-0"
                     style={{
                       color: active
                         ? "var(--color-text-primary)"

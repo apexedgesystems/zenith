@@ -89,7 +89,29 @@ const MultiChart = memo(function MultiChart({
       if (pts[pts.length - 1].t > globalMaxT)
         globalMaxT = pts[pts.length - 1].t;
     }
-    if (!isFinite(globalMaxT)) return;
+    if (!isFinite(globalMaxT)) {
+      const padL = computePadL(-1, 1);
+      padLRef.current = padL;
+      const plotHEmpty = h - PAD_T - PAD_B;
+      ctx.strokeStyle = "#373e47";
+      ctx.lineWidth = 0.5;
+      for (let i = 0; i <= 4; i++) {
+        const y = PAD_T + (plotHEmpty * i) / 4;
+        ctx.beginPath();
+        ctx.moveTo(padL, y);
+        ctx.lineTo(w - PAD_R, y);
+        ctx.stroke();
+      }
+      ctx.fillStyle = "#8b949e";
+      ctx.font = "13px Inter, system-ui, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText(
+        "Waiting for data",
+        padL + (w - PAD_R - padL) / 2,
+        PAD_T + plotHEmpty / 2 + 4,
+      );
+      return;
+    }
     const rangeT = timeWindowMs;
     const globalMinT = globalMaxT - rangeT;
 
@@ -147,7 +169,7 @@ const MultiChart = memo(function MultiChart({
 
     // X-axis time labels
     ctx.fillStyle = "#6e7681";
-    ctx.font = "9px monospace";
+    ctx.font = "11px monospace";
     ctx.textAlign = "center";
     for (let i = 0; i <= nVTicks; i++) {
       const x = PAD_L + (plotW * i) / nVTicks;
@@ -165,7 +187,7 @@ const MultiChart = memo(function MultiChart({
 
     // Y-axis labels
     ctx.fillStyle = "#6e7681";
-    ctx.font = "10px monospace";
+    ctx.font = "11px monospace";
     ctx.textAlign = "right";
     for (let i = 0; i <= 4; i++) {
       const y = PAD_T + (plotH * i) / 4;
@@ -251,7 +273,7 @@ const MultiChart = memo(function MultiChart({
           ctx.setLineDash([]);
           if (th.label) {
             ctx.fillStyle = th.color;
-            ctx.font = "9px monospace";
+            ctx.font = "11px monospace";
             ctx.textAlign = "right";
             ctx.fillText(th.label, w - PAD_R - 2, y - 3);
           }
@@ -262,7 +284,7 @@ const MultiChart = memo(function MultiChart({
     // Y-axis unit label
     if (yLabel) {
       ctx.fillStyle = "#6e7681";
-      ctx.font = "9px monospace";
+      ctx.font = "11px monospace";
       ctx.textAlign = "left";
       ctx.fillText(yLabel, PAD_L + 2, h - 2);
     }
@@ -316,7 +338,7 @@ const MultiChart = memo(function MultiChart({
     let yOff = PAD_T + 12;
     for (const cv of crosshair.values) {
       ctx.fillStyle = cv.color;
-      ctx.font = "bold 10px monospace";
+      ctx.font = "bold 12px monospace";
       ctx.textAlign = "left";
       const lbl = cv.range
         ? `${fieldName(cv.ch)}: ${cv.v.toFixed(4)} [${cv.range[0].toFixed(
@@ -458,8 +480,8 @@ const MultiChart = memo(function MultiChart({
       <div className="flex items-center justify-between mb-1">
         <div className="flex items-center gap-2">
           <span
-            className="text-xs font-bold"
-            style={{ color: "var(--color-text-secondary)" }}
+            className="text-sm font-semibold"
+            style={{ color: "var(--color-text-primary)" }}
           >
             {title}
           </span>
@@ -467,7 +489,7 @@ const MultiChart = memo(function MultiChart({
             onClick={() =>
               canvasRef.current && exportPng(canvasRef.current, title)
             }
-            className="text-[9px] px-1"
+            className="text-[11px] px-1"
             style={{
               color: "var(--color-text-muted)",
               background: "none",
@@ -479,7 +501,7 @@ const MultiChart = memo(function MultiChart({
           </button>
           <button
             onClick={() => exportCsv(channels, data, title)}
-            className="text-[9px] px-1"
+            className="text-[11px] px-1"
             style={{
               color: "var(--color-text-muted)",
               background: "none",
@@ -501,21 +523,21 @@ const MultiChart = memo(function MultiChart({
                 style={{ opacity: isHidden ? 0.35 : 1 }}
               >
                 <div
-                  className="w-2 h-2 rounded-full cursor-pointer"
+                  className="w-2.5 h-2.5 rounded-full cursor-pointer"
                   style={{ backgroundColor: COLORS[ci % COLORS.length] }}
                   onClick={() => onToggleChannel(ch)}
                   title="Toggle visibility"
                 />
                 <span
-                  className="mono text-[10px] cursor-pointer"
-                  style={{ color: "var(--color-text-muted)" }}
+                  className="mono text-xs cursor-pointer"
+                  style={{ color: "var(--color-text-secondary)" }}
                   onClick={() => onToggleChannel(ch)}
                 >
                   {fieldName(ch)}
                 </span>
                 {lastVal !== undefined && !isHidden && (
                   <span
-                    className="mono text-[10px] font-bold"
+                    className="mono text-xs font-bold"
                     style={{ color: "var(--color-text-primary)" }}
                   >
                     {lastVal.toFixed(3)}

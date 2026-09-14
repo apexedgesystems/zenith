@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDialogs } from "../components/dialogs";
 import MultiChart from "../components/MultiChart";
+import { useTargets } from "../api/queries";
 import PlotContextMenu from "../components/PlotContextMenu";
 import {
   type PlotDef,
@@ -32,6 +33,11 @@ export default function TelemetryPage({
   const [layouts, setLayouts] = useState<TelemetryLayout[]>([]);
   const [selectedLayout, setSelectedLayout] = useState("");
   const [connected, setConnected] = useState(false);
+  // `connected` above means samples are arriving on the live stream; the
+  // link itself can be up with nothing to push, and that is not "off".
+  const { data: targets } = useTargets();
+  const linkUp =
+    targets?.find((t) => t.id === selectedTarget)?.connected ?? false;
   const [sampleCount, setSampleCount] = useState(0);
   const [pickerFilter, setPickerFilter] = useState("");
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
@@ -669,7 +675,9 @@ export default function TelemetryPage({
                 ? paused
                   ? "var(--color-warn)"
                   : "var(--color-ok)"
-                : "var(--color-crit)",
+                : linkUp
+                  ? "var(--color-text-secondary)"
+                  : "var(--color-crit)",
             }}
           >
             <div
@@ -679,10 +687,18 @@ export default function TelemetryPage({
                   ? paused
                     ? "var(--color-warn)"
                     : "var(--color-ok)"
-                  : "var(--color-crit)",
+                  : linkUp
+                    ? "var(--color-text-muted)"
+                    : "var(--color-crit)",
               }}
             />
-            {!connected ? "Off" : paused ? "Paused" : "Live"}
+            {!connected
+              ? linkUp
+                ? "No data"
+                : "Off"
+              : paused
+                ? "Paused"
+                : "Live"}
           </div>
           <div className="flex gap-1">
             <button
@@ -897,7 +913,11 @@ export default function TelemetryPage({
               className="text-xs py-4 text-center"
               style={{ color: "var(--color-text-muted)" }}
             >
-              {connected ? "Waiting for channels..." : "Not connected"}
+              {connected
+                ? "Waiting for channels..."
+                : linkUp
+                  ? "Connected -- no telemetry arriving"
+                  : "Not connected"}
             </div>
           )}
         </div>
