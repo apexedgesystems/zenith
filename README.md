@@ -176,6 +176,52 @@ refreshed dictionaries. Back curation up with
 
 ## Quickstart
 
+### Run the published image
+
+Nothing to build. The image carries a default config and the demo
+target directories for all three frameworks, so it boots as is:
+
+```bash
+docker run -d --name zenith --network host \
+  -v zenith-data:/var/lib/zenith \
+  ghcr.io/apexedgesystems/zenith:latest
+# http://localhost:8080
+```
+
+Or with compose, which adds the health check and restart policy:
+
+```bash
+curl -O https://raw.githubusercontent.com/apexedgesystems/zenith/main/deploy/docker-compose.yml
+docker compose up -d
+```
+
+Pin a version with `ZENITH_IMAGE=ghcr.io/apexedgesystems/zenith:v0.0.2`.
+Three settings come from the environment when set: `ZENITH_PORT`
+(the front door, default 8080), `ZENITH_DB_PATH` (default
+`/var/lib/zenith/zenith.db`, inside the persistent volume), and
+`ZENITH_AUTH_SECRET` (see Authentication and Audit). Everything else
+is the config file.
+
+To run your own targets, write a `config.toml` (the Configuration
+section below is the reference; the bundled default is
+[deploy/config.toml](deploy/config.toml)) and mount it with the
+target directories:
+
+```bash
+docker run -d --name zenith --network host \
+  -v zenith-data:/var/lib/zenith \
+  -v "$PWD/config.toml:/etc/zenith/config.toml:ro" \
+  -v "$PWD/targets:/data/targets:ro" \
+  ghcr.io/apexedgesystems/zenith:latest
+```
+
+The container runs on the host network on purpose: each target's
+definition describes its own transport (what it dials, what it
+listens on) and the transport layer binds exactly that, so no
+per-target port publishing is ever needed.
+
+### Build from source
+
 ```bash
 # 1. Generate the target config directory from the apex build
 #    (in the apex repo; emits manifest, struct dicts, commands, and
