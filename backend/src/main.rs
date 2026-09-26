@@ -2882,13 +2882,17 @@ async fn target_registry(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (client, manifest) = {
+    let (client, manifest, db) = {
         let st = state.read().await;
         let target = st
             .targets
             .get(&id)
             .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
-        (target.client.clone(), target.manifest.clone())
+        (
+            target.client.clone(),
+            target.manifest.clone(),
+            st.db.clone(),
+        )
     };
 
     // Use app manifest (build artifact) for component registry
@@ -2906,9 +2910,26 @@ async fn target_registry(
 
     let mut link = client.lock().await;
     let connected = link.is_connected();
-    // Reachability probes are an APROTO-family operation; on other
-    // protocols the manifest listing still serves, unprobed.
+    // Reachability probes are an APROTO-family operation. On other
+    // protocols a component is reachable when its telemetry is
+    // arriving: the vehicle cannot be asked, but it can be heard.
     let mut cli = link.aproto();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    const HEARD_WITHIN_MS: u64 = 30_000;
+    let heard: Vec<(String, u64)> = if connected && cli.is_none() {
+        db.query_latest(&id)
+            .map(|v| {
+                v.into_iter()
+                    .map(|s| (s.channel.to_string(), s.timestamp_ms))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
     let mut components = Vec::new();
     for comp in &manifest_components {
@@ -2925,7 +2946,12 @@ async fn target_registry(
                     Ok(r) => r.status == 0,
                     Err(_) => false,
                 },
-                None => false,
+                None => {
+                    let prefix = format!("{}.", comp.name);
+                    heard.iter().any(|(ch, ts)| {
+                        ch.starts_with(&prefix) && now_ms.saturating_sub(*ts) < HEARD_WITHIN_MS
+                    })
+                }
             }
         } else {
             false
