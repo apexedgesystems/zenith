@@ -18,6 +18,8 @@ export interface Target {
   host: string;
   port: number;
   connected: boolean;
+  /** A listening carrier bound and waiting for the target to dial in. */
+  listening?: boolean;
   /** Command-surface capabilities the target's dictionaries declare
    *  (e.g. "readback"). Absent on older backends. */
   capabilities?: string[];
@@ -71,6 +73,7 @@ export interface PipelineMetrics {
   command_latency_avg_us: number;
   last_sample_age_ms: number | null;
   connected: boolean;
+  listening?: boolean;
 }
 
 const isMetrics: Validator<PipelineMetrics> = (v) => {

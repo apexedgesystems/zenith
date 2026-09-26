@@ -69,6 +69,9 @@ struct TargetState {
     /// read this instead of locking `client`, which a file transfer can
     /// hold for the duration of an upload.
     connected: Arc<std::sync::atomic::AtomicBool>,
+    /// Lock-free view of the link's listening flag: a listening
+    /// carrier bound and waiting for its peer (false for dial-out).
+    listening: Arc<std::sync::atomic::AtomicBool>,
     /// Pipeline counters shared by the router, DB writer, WebSocket
     /// subscribers, and the client's command accounting.
     metrics: Arc<TargetMetrics>,
@@ -87,6 +90,9 @@ struct TargetState {
     /// Connect-time init sequence (named steps; the link runs it,
     /// this copy names the steps in connect audit records)
     connect_init: Option<Arc<crate::core::config_manager::ConnectInit>>,
+    /// Record dictionary (the decode source for record-shaped
+    /// telemetry; the link's RecordSpec derives from it)
+    record_table: Option<Arc<crate::core::config_manager::RecordTable>>,
     _router_handle: Option<tokio::task::JoinHandle<()>>,
 }
 
@@ -139,6 +145,9 @@ struct TargetInfo {
     host: String,
     port: u16,
     connected: bool,
+    /// A listening carrier bound and waiting for the target to dial
+    /// in: up from the operator's side, no peer yet.
+    listening: bool,
     /// Command-surface capabilities the target's dictionaries declare
     /// (e.g. "readback"). Empty for older dictionary sets.
     capabilities: Vec<String>,
@@ -227,6 +236,7 @@ async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             id.clone(),
             serde_json::json!({
                 "connected": t.connected.load(std::sync::atomic::Ordering::Acquire),
+                "listening": t.listening.load(std::sync::atomic::Ordering::Acquire),
                 "last_sample_age_ms":
                     if last > 0 { Some(now_ms.saturating_sub(last)) } else { None },
                 "db_write_failures": t
@@ -264,10 +274,15 @@ fn build_link(
     push_tlm_tx: broadcast::Sender<PushTelemetryPacket>,
     config: &config::TargetSection,
     connect_init: Option<&crate::core::config_manager::ConnectInit>,
+    record_spec: Option<crate::core::stream_link::RecordSpec>,
 ) -> ProtocolLink {
     match protocol {
         Protocol::AprotoSlip => ProtocolLink::Aproto(AprotoClient::new(push_tlm_tx)),
-        Protocol::CcsdsSpp | Protocol::SlipCcsdsSpp | Protocol::RawSlip => {
+        Protocol::CcsdsSpp
+        | Protocol::SlipCcsdsSpp
+        | Protocol::TmCcsdsSpp
+        | Protocol::TmCcsdsSppRecords
+        | Protocol::RawSlip => {
             use crate::core::stream_link::{PipelineSpec, StreamLink};
             // Boot already validated the carrier (see carrier_from_config
             // at startup); a bad value on the dynamic-add path degrades
@@ -283,6 +298,14 @@ fn build_link(
                 },
                 Protocol::SlipCcsdsSpp => PipelineSpec::SlipSpp {
                     apid_map: parse_apid_map(config.apid_map.as_ref(), &config.name),
+                },
+                Protocol::TmCcsdsSpp => PipelineSpec::TmSpp {
+                    apid_map: parse_apid_map(config.apid_map.as_ref(), &config.name),
+                    frame_size: config.tm_frame_size,
+                },
+                Protocol::TmCcsdsSppRecords => PipelineSpec::TmSppRecords {
+                    frame_size: config.tm_frame_size,
+                    records: record_spec.expect("boot validated records_config for this protocol"),
                 },
                 Protocol::RawSlip => PipelineSpec::SlipRaw {
                     uid: config.raw_uid.as_deref().and_then(|s| {
@@ -311,18 +334,53 @@ fn carrier_from_config(
     use crate::core::stream_link::Carrier;
     match config.carrier.as_str() {
         "tcp" => Ok(Carrier::Tcp),
-        "udp" => {
+        "udp" | "tcp-listen" => {
             if protocol == Protocol::AprotoSlip {
-                return Err("carrier 'udp' is not supported for aproto-slip (TCP-only)".into());
+                return Err(format!(
+                    "carrier '{}' is not supported for aproto-slip (TCP-dial only)",
+                    config.carrier
+                ));
             }
-            match config.udp_listen_port {
-                Some(port) => Ok(Carrier::Udp { listen_port: port }),
-                None => Err("carrier 'udp' requires udp_listen_port (the local port \
-                     the target sends telemetry to)"
-                    .into()),
+            match config.listen_port {
+                Some(port) if config.carrier == "udp" => Ok(Carrier::Udp { listen_port: port }),
+                Some(port) => Ok(Carrier::TcpListen { listen_port: port }),
+                None => Err(format!(
+                    "carrier '{}' requires listen_port (the local port \
+                     the target sends or dials to)",
+                    config.carrier
+                )),
             }
         }
-        other => Err(format!("unknown carrier '{}' (supported: tcp, udp)", other)),
+        other => Err(format!(
+            "unknown carrier '{}' (supported: tcp, udp, tcp-listen)",
+            other
+        )),
+    }
+}
+
+/// A loaded record table as the engine consumes it: numeric
+/// addresses parsed, ids mapped to (value size, uid).
+fn record_spec_from_table(
+    table: &crate::core::config_manager::RecordTable,
+) -> crate::core::stream_link::RecordSpec {
+    use crate::core::config_manager::parse_num_u32;
+    crate::core::stream_link::RecordSpec {
+        record_apid: parse_num_u32(&table.record_apid).unwrap_or(0) as u16,
+        packet_prefix: table.packet_prefix,
+        id_offset: table.id_offset,
+        id_size: table.id_size,
+        header_size: table.header_size,
+        by_id: table.records.iter().map(|r| (r.id, r.size)).collect(),
+        skip_apids: table
+            .skip_apids
+            .iter()
+            .filter_map(|a| parse_num_u32(a).map(|v| v as u16))
+            .collect(),
+        skip_by_id: table
+            .skip
+            .iter()
+            .map(|s| (s.id, s.layout.clone()))
+            .collect(),
     }
 }
 
@@ -421,7 +479,10 @@ async fn do_connect_target(state: &AppState, id: &str) -> Result<bool, (StatusCo
 
     {
         let mut cli = client.lock().await;
-        if cli.is_connected() {
+        // Already serving: a live session, or a listener waiting for
+        // one. Either way there is nothing to bring up and no router
+        // to replace.
+        if cli.is_connected() || cli.is_listening() {
             return Ok(false);
         }
         cli.connect(&host, port)
@@ -441,6 +502,7 @@ async fn do_connect_target(state: &AppState, id: &str) -> Result<bool, (StatusCo
             target.sample_tx.clone(),
             target.struct_dicts.clone(),
             target.manifest.clone(),
+            target.record_table.clone(),
             target.metrics.clone(),
         );
         if let Some(old) = target._router_handle.replace(handle) {
@@ -457,12 +519,14 @@ async fn list_targets(State(state): State<AppState>) -> Json<serde_json::Value> 
         // Lock-free flag read: locking the client here would make the
         // 3s frontend poll stall behind any in-flight file transfer.
         let connected = t.connected.load(std::sync::atomic::Ordering::Acquire);
+        let listening = t.listening.load(std::sync::atomic::Ordering::Acquire);
         targets.push(TargetInfo {
             id: id.clone(),
             name: t.config.name.clone(),
             host: t.config.host.clone(),
             port: t.config.port,
             connected,
+            listening,
             capabilities: t.struct_dicts.capabilities(),
             health_nonzero_bad: t.config.health_nonzero_bad.clone(),
             protocol: t.config.protocol.clone(),
@@ -2189,7 +2253,7 @@ async fn telemetry_layouts(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (db, dicts, manifest) = {
+    let (db, dicts, manifest, record_table) = {
         let st = state.read().await;
         let target = st
             .targets
@@ -2199,6 +2263,7 @@ async fn telemetry_layouts(
             st.db.clone(),
             target.struct_dicts.clone(),
             target.manifest.clone(),
+            target.record_table.clone(),
         )
     };
 
@@ -2219,11 +2284,13 @@ async fn telemetry_layouts(
         .iter()
         .map(|(u, n, k)| (*u, n.as_str(), k.as_deref()))
         .collect();
-    let known: std::collections::HashSet<String> =
-        telemetry::TelemetryDecoder::new(&dicts, &uid_refs)
-            .channel_names()
-            .into_iter()
-            .collect();
+    let known: std::collections::HashSet<String> = {
+        let mut d = telemetry::TelemetryDecoder::new(&dicts, &uid_refs);
+        if let Some(table) = &record_table {
+            d.add_record_table(table);
+        }
+        d.channel_names().into_iter().collect()
+    };
 
     let annotated: Vec<serde_json::Value> = layouts
         .iter()
@@ -2703,7 +2770,10 @@ async fn add_target(
         apid_map: None,
         raw_uid: None,
         carrier: "tcp".to_string(),
+        listen_port: None,
         udp_listen_port: None,
+        tm_frame_size: 1024,
+        records_config: None,
         connect_init: None,
         auto_connect: false,
     };
@@ -2718,15 +2788,17 @@ async fn add_target(
         metrics.clone(),
     );
 
-    let mut new_client = build_link(Protocol::AprotoSlip, push_tlm_tx.clone(), &tc, None);
+    let mut new_client = build_link(Protocol::AprotoSlip, push_tlm_tx.clone(), &tc, None, None);
     new_client.set_metrics(metrics.clone());
     let connected = new_client.connected_handle();
+    let listening = new_client.listening_handle();
     st.targets.insert(
         id.clone(),
         TargetState {
             config: tc,
             client: Arc::new(Mutex::new(new_client)),
             connected,
+            listening,
             metrics,
             push_tlm_tx,
             sample_tx,
@@ -2735,6 +2807,7 @@ async fn add_target(
             telemetry_config: None,
             commands_config: None,
             connect_init: None,
+            record_table: None,
             _router_handle: None,
         },
     );
@@ -2810,13 +2883,17 @@ async fn target_registry(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let (client, manifest) = {
+    let (client, manifest, db) = {
         let st = state.read().await;
         let target = st
             .targets
             .get(&id)
             .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
-        (target.client.clone(), target.manifest.clone())
+        (
+            target.client.clone(),
+            target.manifest.clone(),
+            st.db.clone(),
+        )
     };
 
     // Use app manifest (build artifact) for component registry
@@ -2834,9 +2911,26 @@ async fn target_registry(
 
     let mut link = client.lock().await;
     let connected = link.is_connected();
-    // Reachability probes are an APROTO-family operation; on other
-    // protocols the manifest listing still serves, unprobed.
+    // Reachability probes are an APROTO-family operation. On other
+    // protocols a component is reachable when its telemetry is
+    // arriving: the vehicle cannot be asked, but it can be heard.
     let mut cli = link.aproto();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    const HEARD_WITHIN_MS: u64 = 30_000;
+    let heard: Vec<(String, u64)> = if connected && cli.is_none() {
+        db.query_latest(&id)
+            .map(|v| {
+                v.into_iter()
+                    .map(|s| (s.channel.to_string(), s.timestamp_ms))
+                    .collect()
+            })
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
     let mut components = Vec::new();
     for comp in &manifest_components {
@@ -2853,7 +2947,12 @@ async fn target_registry(
                     Ok(r) => r.status == 0,
                     Err(_) => false,
                 },
-                None => false,
+                None => {
+                    let prefix = format!("{}.", comp.name);
+                    heard.iter().any(|(ch, ts)| {
+                        ch.starts_with(&prefix) && now_ms.saturating_sub(*ts) < HEARD_WITHIN_MS
+                    })
+                }
             }
         } else {
             false
@@ -3156,6 +3255,8 @@ async fn get_metrics(State(state): State<AppState>) -> Json<serde_json::Value> {
         let mut snap = t.metrics.snapshot(now_ms);
         snap["connected"] =
             serde_json::json!(t.connected.load(std::sync::atomic::Ordering::Acquire));
+        snap["listening"] =
+            serde_json::json!(t.listening.load(std::sync::atomic::Ordering::Acquire));
         targets.insert(id.clone(), snap);
     }
     Json(serde_json::json!({ "targets": targets }))
@@ -3693,7 +3794,7 @@ async fn main() {
     // would only find out at connect time. Boot refusal instead.
     if let Some((port, first, second)) = config::duplicate_listen_port(&config.targets) {
         eprintln!(
-            "FATAL: targets '{}' and '{}' both declare udp_listen_port {}; \
+            "FATAL: targets '{}' and '{}' both declare listen_port {}; \
              distinct targets cannot share a local listen port",
             first, second, port
         );
@@ -3814,6 +3915,14 @@ async fn main() {
             eprintln!("FATAL: target '{}': {}", tc.name, e);
             std::process::exit(1);
         }
+        if let Some(e) = config::invalid_tm_frame_size(tc) {
+            eprintln!("FATAL: target '{}': {}", tc.name, e);
+            std::process::exit(1);
+        }
+        if let Some(e) = config::retired_key(tc) {
+            eprintln!("FATAL: target '{}': {}", tc.name, e);
+            std::process::exit(1);
+        }
         // Connect-time init sequence: stream links only, for now.
         // The APROTO family's connect-time behavior belongs to its
         // command machine (catalog-named commands with real ACK
@@ -3852,15 +3961,52 @@ async fn main() {
                     }
                 },
             );
-        let mut new_client = build_link(protocol, push_tlm_tx.clone(), tc, connect_init.as_deref());
+        // Record-stage protocols need their generated table; a
+        // missing or broken one is a definition bug -> boot refusal.
+        let record_table = if protocol == Protocol::TmCcsdsSppRecords {
+            let Some(path) = tc.records_config.as_ref() else {
+                eprintln!(
+                    "FATAL: target '{}': protocol '{}' requires records_config \
+                     (the generated record table)",
+                    tc.name, tc.protocol
+                );
+                std::process::exit(1);
+            };
+            match crate::core::config_manager::RecordTable::load(std::path::Path::new(path)) {
+                Ok(table) => {
+                    tracing::info!(
+                        "Loaded record dictionary for {}: {} channels",
+                        tc.name,
+                        table.records.len()
+                    );
+                    Some(Arc::new(table))
+                }
+                Err(e) => {
+                    eprintln!("FATAL: target '{}': records_config: {}", tc.name, e);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            None
+        };
+        let record_spec = record_table.as_ref().map(|t| record_spec_from_table(t));
+        let mut new_client = build_link(
+            protocol,
+            push_tlm_tx.clone(),
+            tc,
+            connect_init.as_deref(),
+            record_spec,
+        );
         new_client.set_metrics(metrics.clone());
         let connected = new_client.connected_handle();
+        let listening = new_client.listening_handle();
         targets.insert(
             id,
             TargetState {
                 config: tc.clone(),
                 client: Arc::new(Mutex::new(new_client)),
                 connected,
+                listening,
                 metrics,
                 push_tlm_tx,
                 sample_tx,
@@ -3869,6 +4015,7 @@ async fn main() {
                 telemetry_config,
                 commands_config,
                 connect_init,
+                record_table,
                 _router_handle: None,
             },
         );

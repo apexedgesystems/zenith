@@ -22,6 +22,7 @@ use zenith::core::transport::PushTelemetryPacket;
 fn make_dict() -> StructDictionary {
     let wavegen = ComponentDict {
         component: "WaveGenerator".to_string(),
+        byte_order: None,
         structs: HashMap::from([
             (
                 "Output".to_string(),
@@ -199,6 +200,7 @@ fn make_dict() -> StructDictionary {
 
     let sysmon = ComponentDict {
         component: "SystemMonitor".to_string(),
+        byte_order: None,
         structs: HashMap::from([(
             "Output".to_string(),
             StructDef {

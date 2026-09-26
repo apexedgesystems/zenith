@@ -134,6 +134,7 @@ mod tests {
                 "Action".to_string(),
                 ComponentDict {
                     component: "Action".to_string(),
+                    byte_order: None,
                     structs: Map::from([
                         ("StandaloneSequenceTprm".to_string(), seq),
                         ("StandaloneStepTprm".to_string(), step),

@@ -217,7 +217,9 @@ function App() {
       const now = Date.now();
       for (const t of liveTargets) {
         if (!ar[t.id]) continue;
-        if (t.connected) continue;
+        // A listening link is up from our side; the peer dials in
+        // when it is ready, and a connect call would only bounce it.
+        if (t.connected || t.listening) continue;
         if (inflight.has(t.id)) continue;
         const lastTry = cooldown.get(t.id) || 0;
         if (now - lastTry < 10_000) continue; // 10s cooldown after last attempt
@@ -440,8 +442,17 @@ function App() {
                     style={{
                       backgroundColor: t.connected
                         ? "var(--color-ok)"
-                        : "var(--color-border)",
+                        : t.listening
+                          ? "var(--color-warn)"
+                          : "var(--color-border)",
                     }}
+                    title={
+                      t.connected
+                        ? "Connected"
+                        : t.listening
+                          ? "Listening for the target to dial in"
+                          : "Disconnected"
+                    }
                   />
                   <span
                     className="text-xs font-semibold truncate"
@@ -528,7 +539,7 @@ function App() {
               boxShadow: "0 4px 12px rgba(0,0,0,0.4)",
             }}
           >
-            {targetMenu.target.connected ? (
+            {targetMenu.target.connected || targetMenu.target.listening ? (
               <div
                 onClick={() => {
                   disconnectTarget(targetMenu.target.id);

@@ -126,6 +126,14 @@ impl StructDef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ComponentDict {
     pub component: String,
+    /// Byte order of payload field values AS THEY ARRIVE at this
+    /// system's boundary: "le" (default) or "be". Stamped by the
+    /// producing generator from evidence -- an ELF's own ident
+    /// byte, a serialization spec -- never hand-set. Describes the
+    /// wire, not the target CPU: a boundary proxy that normalizes
+    /// order changes what gets stamped.
+    #[serde(default)]
+    pub byte_order: Option<String>,
     #[serde(default)]
     pub structs: HashMap<String, StructDef>,
     #[serde(default)]
@@ -135,6 +143,13 @@ pub struct ComponentDict {
     /// on older dictionaries; treated as empty.
     #[serde(default)]
     pub capabilities: Vec<String>,
+}
+
+impl ComponentDict {
+    /// True when this dictionary's payload values are big-endian.
+    pub fn big_endian(&self) -> bool {
+        matches!(self.byte_order.as_deref(), Some("be"))
+    }
 }
 
 /// Inline a struct's nested fields: a `type = "nested"` field with a
@@ -232,6 +247,8 @@ impl StructDictionary {
 
             match serde_json::from_str::<ComponentDict>(&content) {
                 Ok(dict) => {
+                    check_byte_order(dict.byte_order.as_deref())
+                        .map_err(|e| format!("{}: {}", path.display(), e))?;
                     tracing::info!(
                         "Loaded struct dict: {} ({} structs)",
                         dict.component,
@@ -728,6 +745,200 @@ impl TelemetryConfig {
     }
 }
 
+/* ----------------------------- Record Table ----------------------------- */
+
+/// A generated record dictionary (`records.json` in the target
+/// config directory) for wires whose packets carry concatenated
+/// variable-length records addressed by an id field. This IS the
+/// dictionary for record-shaped telemetry -- some frameworks
+/// downlink per-channel records rather than fixed structs, and
+/// forcing that shape through struct dictionaries shreds one clean
+/// generated file into dozens of single-field fakes. One table
+/// carries the record header shape, every channel's id, name,
+/// type, and value size, and the wire byte order; the engine reads
+/// it without learning the framework.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordTable {
+    /// Packet address (APID) whose payloads are record streams.
+    pub record_apid: String,
+    /// Byte offset of the id field within a record.
+    pub id_offset: usize,
+    /// Width of the id field (2 or 4, big-endian per the wire).
+    pub id_size: usize,
+    /// Total fixed header bytes before each record's value.
+    pub header_size: usize,
+    /// Bytes at the start of every record-stream packet before its
+    /// first record (a packet-level descriptor, for wires that carry
+    /// one); zero when records start at the payload's first byte.
+    #[serde(default)]
+    pub packet_prefix: usize,
+    /// Byte order of record values ("le" default) -- same semantics
+    /// as a struct dictionary's stamp.
+    #[serde(default)]
+    pub byte_order: Option<String>,
+    /// Packet addresses that are known-but-not-decoded (skipped
+    /// silently, not counted unroutable -- deliberate non-decode is
+    /// not noise).
+    #[serde(default)]
+    pub skip_apids: Vec<String>,
+    pub records: Vec<RecordDef>,
+    /// Records on the record stream that are known but not decoded
+    /// (strings, aggregates): their wire layout lets the walker step
+    /// over them so the records after them in a packet still decode.
+    #[serde(default)]
+    pub skip: Vec<SkipDef>,
+}
+
+/// One undecoded record: its id and how many bytes it occupies.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkipDef {
+    pub id: u32,
+    pub channel: String,
+    pub layout: Vec<LayoutStep>,
+}
+
+/// One segment of an undecoded value's wire layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum LayoutStep {
+    /// This many bytes.
+    Fixed { fixed: usize },
+    /// A big-endian length of this width, then that many bytes.
+    Prefixed { prefixed: usize },
+}
+
+/// Bytes an undecoded value occupies at the start of `data`, or None
+/// when the data ends before the layout does.
+pub fn skip_len(layout: &[LayoutStep], data: &[u8]) -> Option<usize> {
+    let mut pos = 0usize;
+    for step in layout {
+        match *step {
+            LayoutStep::Fixed { fixed } => pos += fixed,
+            LayoutStep::Prefixed { prefixed } => {
+                let bytes = data.get(pos..pos + prefixed)?;
+                let len = bytes.iter().fold(0usize, |acc, &b| (acc << 8) | b as usize);
+                pos += prefixed + len;
+            }
+        }
+        if pos > data.len() {
+            return None;
+        }
+    }
+    Some(pos)
+}
+
+/// One channel: its record id on the wire, its display name, and
+/// its value type/size.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordDef {
+    pub id: u32,
+    pub channel: String,
+    #[serde(rename = "type")]
+    pub field_type: String,
+    pub size: usize,
+    /// Producer commentary carried for humans; never interpreted.
+    #[serde(default)]
+    pub annotation: Option<String>,
+}
+
+impl RecordTable {
+    pub fn load(path: &Path) -> Result<Self, String> {
+        let content =
+            std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path.display(), e))?;
+        let table: RecordTable =
+            serde_json::from_str(&content).map_err(|e| format!("{}: {}", path.display(), e))?;
+        table
+            .validate()
+            .map_err(|e| format!("{}: {}", path.display(), e))?;
+        Ok(table)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if self.id_size != 2 && self.id_size != 4 {
+            return Err(format!("id_size {} is not 2 or 4", self.id_size));
+        }
+        if self.id_offset + self.id_size > self.header_size {
+            return Err(format!(
+                "id field ({}+{}) does not fit in the {}-byte header",
+                self.id_offset, self.id_size, self.header_size
+            ));
+        }
+        if self.records.is_empty() {
+            return Err("no records declared".to_string());
+        }
+        let mut seen = std::collections::HashSet::new();
+        for r in &self.records {
+            if !seen.insert(r.id) {
+                return Err(format!("record id {} declared twice", r.id));
+            }
+            if r.channel.trim().is_empty() {
+                return Err(format!("record id {} has no channel name", r.id));
+            }
+            if r.size == 0 {
+                return Err(format!("channel '{}' has zero size", r.channel));
+            }
+        }
+        parse_num_u32(&self.record_apid).ok_or(format!(
+            "record_apid '{}' is not a number",
+            self.record_apid
+        ))?;
+        for a in &self.skip_apids {
+            parse_num_u32(a).ok_or(format!("skip_apids entry '{}' is not a number", a))?;
+        }
+        for sk in &self.skip {
+            if !seen.insert(sk.id) {
+                return Err(format!("skip id {} is also a record or skip id", sk.id));
+            }
+            if sk.layout.is_empty() {
+                return Err(format!("skip '{}' has an empty layout", sk.channel));
+            }
+            for step in &sk.layout {
+                match *step {
+                    LayoutStep::Fixed { fixed: 0 } => {
+                        return Err(format!("skip '{}' has a zero-length segment", sk.channel))
+                    }
+                    LayoutStep::Prefixed { prefixed } if !matches!(prefixed, 1 | 2 | 4) => {
+                        return Err(format!(
+                            "skip '{}' has a {}-byte length prefix (1, 2 or 4)",
+                            sk.channel, prefixed
+                        ))
+                    }
+                    _ => {}
+                }
+            }
+        }
+        check_byte_order(self.byte_order.as_deref())?;
+        Ok(())
+    }
+
+    /// True when this table's record values are big-endian.
+    pub fn big_endian(&self) -> bool {
+        matches!(self.byte_order.as_deref(), Some("be"))
+    }
+}
+
+/// A dictionary's byte_order stamp is evidence about the wire, so
+/// only the two spellings the generators write are accepted: an
+/// unrecognized value would silently decode as little-endian, which
+/// is exactly the plausible-garbage failure the stamp exists to
+/// prevent.
+pub fn check_byte_order(stamp: Option<&str>) -> Result<(), String> {
+    match stamp {
+        None | Some("le") | Some("be") => Ok(()),
+        Some(other) => Err(format!("byte_order '{}' is not \"le\" or \"be\"", other)),
+    }
+}
+
+/// "0x" hex or decimal, the target-config number convention.
+pub fn parse_num_u32(s: &str) -> Option<u32> {
+    let t = s.trim();
+    if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16).ok()
+    } else {
+        t.parse().ok()
+    }
+}
+
 /* ----------------------------- Connect Init ----------------------------- */
 
 /// A connect-time init sequence (`on_connect.json` in the target
@@ -998,6 +1209,7 @@ mod nested_tests {
 
         let dict = ComponentDict {
             component: "C".to_string(),
+            byte_order: None,
             structs: HashMap::from([
                 ("Sub".to_string(), sub),
                 ("Deep".to_string(), deep),
@@ -1027,5 +1239,98 @@ mod nested_tests {
         let out = expanded_fields(&dict, &two_level.fields, 0);
         let names: Vec<(&str, usize)> = out.iter().map(|x| (x.name.as_str(), x.offset)).collect();
         assert_eq!(names, vec![("d.x", 0), ("d.pair.a", 2), ("d.pair.b", 4)]);
+    }
+
+    /// @test A byte_order stamp is evidence, so only the two
+    /// generator spellings load: a record table or struct dictionary
+    /// with any other value is refused by name instead of decoding
+    /// little-endian by default, and a skip_apids entry that is not a
+    /// number is refused too.
+    #[test]
+    fn byte_order_and_skip_apids_are_validated() {
+        assert!(check_byte_order(None).is_ok());
+        assert!(check_byte_order(Some("le")).is_ok());
+        assert!(check_byte_order(Some("be")).is_ok());
+        for bad in ["BE", "big", "big-endian", ""] {
+            let e = check_byte_order(Some(bad)).unwrap_err();
+            assert!(e.contains(&format!("'{bad}'")), "{e}");
+        }
+        let table = |byte_order: &str, skip: &str| {
+            serde_json::from_str::<RecordTable>(&format!(
+                r#"{{"record_apid": "0x001", "id_offset": 2, "id_size": 4,
+                     "header_size": 17, "byte_order": "{byte_order}",
+                     "skip_apids": ["{skip}"],
+                     "records": [{{"id": 1, "channel": "a.b", "type": "uint", "size": 4}}]}}"#
+            ))
+            .unwrap()
+        };
+        assert!(table("be", "0x002").validate().is_ok());
+        assert!(table("big", "0x002")
+            .validate()
+            .unwrap_err()
+            .contains("byte_order 'big'"));
+        assert!(table("be", "events")
+            .validate()
+            .unwrap_err()
+            .contains("skip_apids entry 'events'"));
+    }
+
+    /// @test An undecoded record's layout is walked by its segments:
+    /// fixed bytes and big-endian length prefixes, in order, with
+    /// None when the data ends first; the table refuses a skip that
+    /// reuses a record id, an empty layout, or an odd prefix width.
+    #[test]
+    fn skip_layouts_measure_and_validate() {
+        use LayoutStep::{Fixed, Prefixed};
+        // enum U32 + string(len 3) + status U8
+        let layout = [
+            Fixed { fixed: 4 },
+            Prefixed { prefixed: 2 },
+            Fixed { fixed: 1 },
+        ];
+        let data = [0, 0, 0, 1, 0, 3, b'a', b'b', b'c', 9, 0xFF];
+        assert_eq!(skip_len(&layout, &data), Some(10));
+        assert_eq!(skip_len(&layout, &data[..9]), None, "status byte missing");
+        assert_eq!(skip_len(&layout, &data[..5]), None, "prefix cut short");
+        assert_eq!(
+            skip_len(&[Prefixed { prefixed: 4 }], &[0, 0, 0, 0]),
+            Some(4)
+        );
+
+        let table = |skip: &str| {
+            serde_json::from_str::<RecordTable>(&format!(
+                r#"{{"record_apid": "0x001", "id_offset": 2, "id_size": 4,
+                     "header_size": 17,
+                     "records": [{{"id": 1, "channel": "a.b", "type": "uint", "size": 4}}],
+                     "skip": [{skip}]}}"#
+            ))
+            .unwrap()
+        };
+        assert!(
+            table(r#"{"id": 2, "channel": "a.s", "layout": [{"prefixed": 2}]}"#)
+                .validate()
+                .is_ok()
+        );
+        for (bad, why) in [
+            (
+                r#"{"id": 1, "channel": "a.s", "layout": [{"fixed": 4}]}"#,
+                "skip id 1",
+            ),
+            (
+                r#"{"id": 2, "channel": "a.s", "layout": []}"#,
+                "empty layout",
+            ),
+            (
+                r#"{"id": 2, "channel": "a.s", "layout": [{"prefixed": 3}]}"#,
+                "3-byte length prefix",
+            ),
+            (
+                r#"{"id": 2, "channel": "a.s", "layout": [{"fixed": 0}]}"#,
+                "zero-length",
+            ),
+        ] {
+            let e = table(bad).validate().unwrap_err();
+            assert!(e.contains(why), "{e}");
+        }
     }
 }

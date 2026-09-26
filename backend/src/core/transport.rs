@@ -58,6 +58,13 @@ pub enum Protocol {
     /// SLIP-framed CCSDS Space Packets -- the layered stack
     /// (telemetry-only).
     SlipCcsdsSpp,
+    /// CCSDS TM Transfer Frames carrying Space Packets -- the
+    /// space-data-link stack (telemetry-only).
+    TmCcsdsSpp,
+    /// The TM stack with a record stage on top: packets on the
+    /// generated table's record APID carry concatenated
+    /// variable-length records (telemetry-only).
+    TmCcsdsSppRecords,
     /// Header-less SLIP frames over TCP (telemetry-only; fullUid
     /// from config -- the bare-instrument case).
     RawSlip,
@@ -71,10 +78,13 @@ impl Protocol {
             "aproto-slip" => Ok(Protocol::AprotoSlip),
             "ccsds-spp" => Ok(Protocol::CcsdsSpp),
             "slip+ccsds-spp" => Ok(Protocol::SlipCcsdsSpp),
+            "tm+ccsds-spp" => Ok(Protocol::TmCcsdsSpp),
+            "tm+ccsds-spp+records" => Ok(Protocol::TmCcsdsSppRecords),
             "raw-slip" => Ok(Protocol::RawSlip),
             other => Err(format!(
                 "unknown protocol '{}' (supported: aproto-slip, ccsds-spp, \
-                 slip+ccsds-spp, raw-slip)",
+                 slip+ccsds-spp, tm+ccsds-spp, tm+ccsds-spp+records, \
+                 raw-slip)",
                 other
             )),
         }
@@ -85,6 +95,8 @@ impl Protocol {
             Protocol::AprotoSlip => "aproto-slip",
             Protocol::CcsdsSpp => "ccsds-spp",
             Protocol::SlipCcsdsSpp => "slip+ccsds-spp",
+            Protocol::TmCcsdsSpp => "tm+ccsds-spp",
+            Protocol::TmCcsdsSppRecords => "tm+ccsds-spp+records",
             Protocol::RawSlip => "raw-slip",
         }
     }
@@ -127,6 +139,24 @@ impl ProtocolLink {
         match self {
             ProtocolLink::Aproto(c) => c.is_connected(),
             ProtocolLink::Stream(c) => c.is_connected(),
+        }
+    }
+
+    /// Bound and accepting on a listening carrier, peer or no peer.
+    /// Dial-out links never listen.
+    pub fn is_listening(&self) -> bool {
+        match self {
+            ProtocolLink::Aproto(_) => false,
+            ProtocolLink::Stream(c) => c.is_listening(),
+        }
+    }
+
+    /// Lock-free handle to the listening flag; permanently false for
+    /// links that dial out.
+    pub fn listening_handle(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        match self {
+            ProtocolLink::Aproto(_) => Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            ProtocolLink::Stream(c) => c.listening_handle(),
         }
     }
 
@@ -208,6 +238,10 @@ mod tests {
                 include_str!("../protocol/ccsds_spp.rs"),
             ),
             ("protocol/slip.rs", include_str!("../protocol/slip.rs")),
+            (
+                "protocol/ccsds_tm.rs",
+                include_str!("../protocol/ccsds_tm.rs"),
+            ),
             ("core/stream_link.rs", include_str!("stream_link.rs")),
             ("core/config_manager.rs", include_str!("config_manager.rs")),
         ] {

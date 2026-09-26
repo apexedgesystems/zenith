@@ -7,6 +7,8 @@ export interface Target {
   host: string;
   port: number;
   connected: boolean;
+  /** A listening carrier bound and waiting for the target to dial in. */
+  listening?: boolean;
   capabilities?: string[];
   /** Dashboard display policy served from this target's config. */
   health_nonzero_bad?: string[];
@@ -44,7 +46,8 @@ export function targetsEqual(a: Target[], b: Target[]): boolean {
       x.name !== y.name ||
       x.host !== y.host ||
       x.port !== y.port ||
-      x.connected !== y.connected
+      x.connected !== y.connected ||
+      (x.listening ?? false) !== (y.listening ?? false)
     ) {
       return false;
     }

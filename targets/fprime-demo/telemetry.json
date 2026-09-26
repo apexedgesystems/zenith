@@ -1,0 +1,99 @@
+{
+  "layouts": [
+    {
+      "name": "System",
+      "plots": [
+        {
+          "title": "CPU load (%)",
+          "channels": ["FprimeDemoDeployment.systemResources.CPU"],
+          "height": 200
+        },
+        {
+          "title": "CPU cores 0-7 (%)",
+          "channels": [
+            "FprimeDemoDeployment.systemResources.CPU_00",
+            "FprimeDemoDeployment.systemResources.CPU_01",
+            "FprimeDemoDeployment.systemResources.CPU_02",
+            "FprimeDemoDeployment.systemResources.CPU_03",
+            "FprimeDemoDeployment.systemResources.CPU_04",
+            "FprimeDemoDeployment.systemResources.CPU_05",
+            "FprimeDemoDeployment.systemResources.CPU_06",
+            "FprimeDemoDeployment.systemResources.CPU_07"
+          ],
+          "height": 220
+        },
+        {
+          "title": "CPU cores 8-15 (%)",
+          "channels": [
+            "FprimeDemoDeployment.systemResources.CPU_08",
+            "FprimeDemoDeployment.systemResources.CPU_09",
+            "FprimeDemoDeployment.systemResources.CPU_10",
+            "FprimeDemoDeployment.systemResources.CPU_11",
+            "FprimeDemoDeployment.systemResources.CPU_12",
+            "FprimeDemoDeployment.systemResources.CPU_13",
+            "FprimeDemoDeployment.systemResources.CPU_14",
+            "FprimeDemoDeployment.systemResources.CPU_15"
+          ],
+          "height": 220
+        },
+        {
+          "title": "Memory (kB)",
+          "channels": [
+            "FprimeDemoDeployment.systemResources.MEMORY_USED",
+            "FprimeDemoDeployment.systemResources.MEMORY_TOTAL"
+          ],
+          "height": 200
+        },
+        {
+          "title": "Non-volatile storage (kB)",
+          "channels": [
+            "FprimeDemoDeployment.systemResources.NON_VOLATILE_FREE",
+            "FprimeDemoDeployment.systemResources.NON_VOLATILE_TOTAL"
+          ],
+          "height": 200
+        }
+      ]
+    },
+    {
+      "name": "Timing and buffers",
+      "plots": [
+        {
+          "title": "Rate groups: max cycle time (us)",
+          "channels": [
+            "FprimeDemoDeployment.rateGroup_1Hz.RgMaxTime",
+            "FprimeDemoDeployment.rateGroup_0_5Hz.RgMaxTime",
+            "FprimeDemoDeployment.rateGroup_0_25Hz.RgMaxTime"
+          ],
+          "height": 200
+        },
+        {
+          "title": "Rate groups: cycle slips",
+          "channels": [
+            "FprimeDemoDeployment.rateGroup_1Hz.RgCycleSlips",
+            "FprimeDemoDeployment.rateGroup_0_5Hz.RgCycleSlips",
+            "FprimeDemoDeployment.rateGroup_0_25Hz.RgCycleSlips"
+          ],
+          "height": 200
+        },
+        {
+          "title": "Com buffers",
+          "channels": [
+            "ComCcsds.commsBufferManager.CurrBuffs",
+            "ComCcsds.commsBufferManager.NoBuffs",
+            "CdhCore.events.EventsDropped"
+          ],
+          "height": 200
+        },
+        {
+          "title": "Command dispatch",
+          "channels": [
+            "CdhCore.cmdDisp.CommandsDispatched",
+            "CdhCore.cmdDisp.CommandErrors",
+            "CdhCore.cmdDisp.CommandsDropped"
+          ],
+          "height": 200
+        }
+      ]
+    }
+  ]
+}

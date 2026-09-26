@@ -1,12 +1,13 @@
 # Zenith
 
-Real-time operations interface for [Apex CSF](https://github.com/apexedgesystems/apex_csf) applications.
+Real-time operations interface for flight software: [Apex CSF](https://github.com/apexedgesystems/apex_csf), NASA cFS, and F-prime.
 
-Zenith connects to targets over per-target wire protocols (TCP/APROTO
-for Apex executables; CCSDS SPP for space-packet sources such as
-NASA cFS, over TCP or UDP carriers), provides a REST API for
-commanding and telemetry, and serves a real-time web UI for
-visualization, configuration, and system management. Zero hardcoded
+Zenith connects to targets over per-target wire protocols -- one
+console for Apex CSF (TCP/APROTO), NASA cFS (CCSDS SPP over UDP),
+and F-prime (CCSDS TM frames over a listening TCP port), all
+running side by side -- provides a REST API for commanding and
+telemetry, and serves a real-time web UI for visualization,
+configuration, and system management. Zero hardcoded
 component knowledge -- all application-specific behavior comes from
 per-target build artifacts (struct dictionaries, app manifest, plot
 layouts, command catalog) loaded at deploy time, and the layers above
@@ -17,35 +18,41 @@ boundary test forbids generic code from referencing any one protocol
 family or flight framework.
 
 ```
-+--------------------+        TCP / APROTO         +--------------------------+
-|  Apex Application  | <-------------------------> |       Zenith             |
-|  (Pi, Thor, ...)   |        (port 9000+)         |   Rust backend (axum)    |
-|                    |                             |   React frontend         |
-|  Executive         |                             |   SQLite + WAL pool      |
-|  Scheduler         |                             |                          |
-|  Interface         |                             |   - REST API             |
-|  Components...     |                             |   - WebSocket telemetry  |
-+--------------------+                             |   - Multi-target         |
-                                                   +--------------------------+
-                                                              |
-                                            Per-target config (JSON / TOML)
++--------------------+   TCP: SLIP + APROTO    \
+|  Apex Application  | <---------------------->  \
+|  (Pi, Thor, ...)   |      full command surface   \
++--------------------+                              \   +--------------------------+
+                                                     >  |        Zenith            |
++--------------------+   UDP: CCSDS space packets   /   |   Rust backend (axum)    |
+|    NASA cFS        | ---------------------------->    |   React frontend         |
+|  (CI_LAB/TO_LAB)   |   zenith arms the downlink  /    |   SQLite + WAL pool      |
++--------------------+                            /     |                          |
+                                                 /      |   - REST API             |
++--------------------+   TCP: CCSDS TM frames   /       |   - WebSocket telemetry  |
+|     F-prime        | ------------------------/        |   - Multi-target         |
+|   (deployment)     |   dials IN; zenith listens       +--------------------------+
++--------------------+                                             |
+                                            Per-target definitions (TOML) +
+                                            generated artifacts (JSON)
                                             +--------------------------+
                                             |  app_manifest.json       |
                                             |  structs/*.json          |
+                                            |     or records.json      |
                                             |  telemetry.json          |
                                             |  commands.json           |
+                                            |  on_connect.json         |
                                             +--------------------------+
 ```
 
 ## Per-Target Plugin Architecture
 
-Zenith ships with zero apex-application knowledge. Each target you
-want to control gets its own config directory with the build artifacts
-that describe what's running on that target:
+Zenith ships with zero application knowledge. Each target you want to
+control gets its own config directory with the build artifacts that
+describe what's running on that target:
 
 ```
 targets/
-  pi-ops-demo/
+  pi-ops-demo/            # An Apex application
     app_manifest.json     # Component registry: fullUid, name, type, instance
     structs/              # apex_data_gen output, one JSON per component
       ApexExecutive.json  #   - struct definitions with field types and offsets
@@ -57,28 +64,43 @@ targets/
     commands.json         # Per-component command catalog (quick commands,
                           #   typed field forms, response decoding hints)
 
-  thor-ops-demo-a/
-    ...                   # Different application: different artifacts
-  thor-ops-demo-b/
-    ...
+  cfs-cpu1/               # A cFS instance
+    app_manifest.json     # Same schema, different generator (cfs-dictgen)
+    structs/              # Layouts extracted from the flight build's DWARF
+    telemetry.json
+    on_connect.json       # Named steps sent on connect (enable the downlink)
+
+  fprime-demo/            # An F-prime deployment
+    records.json          # Record dictionary: one table of channel id, name,
+                          #   type, size + the packet/record header shape, byte
+                          #   order, and the wire layout of undecoded records
+    telemetry.json
 ```
 
 The same backend binary serves any configured target. Adding a
 new target is a new entry in `config.toml` plus a new config
 directory.
 
-The config directory is always generator output. Apex targets use
-`apex_data_gen`; cFS targets use `tools/cfs-dictgen`, which extracts
-exact struct layouts from the flight build's DWARF debug info (the
-same binaries the software runs, so dictionaries cannot drift from
-the wire) and emits the manifest, struct dicts, and telemetry
-layouts in one pass.
+The config directory is always generator output, one generator per
+framework, all emitting the same neutral format: apex targets use
+`apex_data_gen`; cFS targets use `tools/cfs-dictgen` (extracts
+exact struct layouts from the flight build's DWARF debug info --
+the same binaries the software runs, so dictionaries cannot drift
+from the wire); F-prime targets use `tools/fprime-dictgen` (a pure
+transform of the deployment's build-generated JSON dictionary into
+a record dictionary -- record-shaped telemetry is a first-class
+dictionary form, one readable table of channel ids, names, types,
+and sizes, plus the byte layout of every channel it does not
+decode so the walker steps over them -- plus display layouts).
+Dictionaries carry a generator-measured `byte_order` stamp, so
+big-endian wires (F-prime by spec, big-endian flight processors by
+ELF ident) decode correctly with zero configuration.
 
 ## Pages
 
 | Page              | Purpose                                                                                                                                                                                                                                                                                                                                                 |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Dashboard**     | Per-target health cards auto-discovered from struct dicts. Executive summary banner. Component registry with reachability dots. Connect / disconnect / add target.                                                                                                                                                                                      |
+| **Dashboard**     | Per-target health cards auto-discovered from struct dicts. Executive summary banner. Component registry with status dots (probed by command on apex targets; "telemetry heard in the last 30 s" on telemetry-only links). Connect / disconnect / add target.                                                                                            |
 | **Telemetry**     | Multi-signal strip charts with hover crosshair, per-plot time windows, threshold lines, drag-to-reorder, layout presets from `telemetry.json`, user-saved layouts in DB, pause/resume, 2-column grid, PNG/CSV export, historical data backfill. Tiered (downsampled) history renders as min/max envelope bands with mean [min..max] crosshair readouts. |
 | **Operations**    | System controls: Sleep/Wake, Pause/Resume, Set Verbosity, Restart Executive (with auto-reconnect). Per-component Lock/Unlock with visual lock state. Library hot-swap (lock + upload .so + reload + auto-unlock). In-page audit feed of issued commands.                                                                                                |
 | **Command**       | Generic APROTO command console: pick a component from the catalog, fill typed fields, send. Quick command presets. Response display with "Interpret as..." dropdown that decodes the raw bytes against any per-target struct of matching size.                                                                                                          |
@@ -90,7 +112,9 @@ layouts in one pass.
 
 ## Sidebar Features
 
-- Live target list with connection state dots
+- Live target list with connection state dots (green connected; amber
+  listening, for a tcp-listen target waiting for its deployment to
+  dial in; grey down)
 - **Per-target storage strip** -- shows samples + bytes per target
 - **Right-click target menu**: Connect / Disconnect, Copy address,
   **Auto-reconnect toggle** (persisted across browser sessions),
@@ -252,7 +276,7 @@ host = "127.0.0.1"             # Commands dial out to CI_LAB here
 port = 1234
 protocol = "ccsds-spp"         # Space packets...
 carrier = "udp"                # ...as datagrams (default: "tcp")
-udp_listen_port = 2234         # Local port TO_LAB pushes telemetry to
+listen_port = 2234             # Local port TO_LAB pushes telemetry to
 connect_init = "/data/targets/cfs-cpu1/on_connect.json"
                                # Named init steps sent on connect
                                # (e.g. enable the downlink); generated
@@ -261,13 +285,29 @@ structs_dir = "/data/targets/cfs-cpu1/structs"
 telemetry_config = "/data/targets/cfs-cpu1/telemetry.json"
 [targets.apid_map]             # Wire APID -> component uid routing
 "0x000" = "0x00C00000"
+
+[[targets]]
+name = "F-prime Demo"          # An F-prime deployment, same engine
+host = "127.0.0.1"
+port = 50050
+protocol = "tm+ccsds-spp+records"  # CCSDS TM frames -> space
+                               # packets -> id-addressed records
+carrier = "tcp-listen"         # The deployment dials IN to zenith
+listen_port = 50050
+tm_frame_size = 1024           # Mission constant of the build
+records_config = "/data/targets/fprime-demo/records.json"
+telemetry_config = "/data/targets/fprime-demo/telemetry.json"
 ```
 
 A target's definition fully describes its transport: the protocol
-(`aproto-slip`, `ccsds-spp`, `slip+ccsds-spp`, `raw-slip`), the
+(`aproto-slip`, `ccsds-spp`, `slip+ccsds-spp`, `tm+ccsds-spp`,
+`tm+ccsds-spp+records`, `raw-slip`), the
 carrier (`tcp` dials host:port and reads the stream; `udp` binds
-`udp_listen_port` for inbound datagrams and sends outbound ones to
-host:port), and an optional `connect_init` sequence -- a generated
+`listen_port` for inbound datagrams and sends outbound ones to
+host:port; `tcp-listen` binds `listen_port` on every interface and accepts
+the target dialing in -- the push-to-ground pattern, with the
+connected state tracking the live session, not the bound listener), and an optional `connect_init`
+sequence -- a generated
 on_connect.json of named steps (bytes + per-step delays) sent in
 order on every connect, for stacks that emit nothing until a ground
 message enables their downlink. Steps are opaque bytes to zenith;

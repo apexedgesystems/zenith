@@ -13,6 +13,10 @@
 pub const HEADER_SIZE: usize = 6;
 /// Ceiling on a whole packet, mirroring the reference library's bound.
 pub const MAX_PACKET: usize = 4096;
+/// The all-ones idle APID (133.0-B-2): protocol fill, not data.
+/// Framing stages that pad with idle packets rely on routers
+/// skipping this silently rather than counting it unroutable.
+pub const IDLE_APID: u16 = 0x7FF;
 
 /// Parsed primary header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,6 +93,13 @@ pub struct Extractor {
 impl Extractor {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Forget any partial packet: the bytes that would have completed
+    /// it are known to be gone (a dropped frame upstream), so the
+    /// residue can only mislead the next parse.
+    pub fn reset(&mut self) {
+        self.buf.clear();
     }
 
     /// Feed stream bytes; returns every complete packet now available
