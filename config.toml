@@ -1,4 +1,9 @@
 # Zenith Configuration
+#
+# Three settings may also come from the environment, overriding the
+# values here: ZENITH_PORT ([server] port), ZENITH_DB_PATH ([storage]
+# path), ZENITH_AUTH_SECRET ([auth] secret). Everything else is this
+# file.
 
 [server]
 host = "0.0.0.0"
