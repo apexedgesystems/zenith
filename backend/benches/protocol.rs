@@ -161,7 +161,9 @@ criterion_group! {
         bench_aproto_build,
         bench_aproto_parse,
         bench_full_pipeline,
-        bench_spp_extract
+        bench_spp_extract,
+        bench_tm_deframe,
+        bench_record_walk
 }
 criterion_main!(benches);
 
@@ -197,6 +199,90 @@ fn bench_spp_extract(c: &mut Criterion) {
             let mut ex = ccsds_spp::Extractor::new();
             black_box(ex.feed(&dirty))
         })
+    });
+    group.finish();
+}
+
+fn bench_tm_deframe(c: &mut Criterion) {
+    use zenith::protocol::{ccsds_spp, ccsds_tm};
+
+    // A realistic downlink burst: 50 fixed 1024-byte frames, each
+    // carrying four 200-byte packets plus idle fill, CRC-verified.
+    let mut stream = Vec::new();
+    for f in 0..50u8 {
+        let mut content = Vec::new();
+        for p in 0..4u16 {
+            content.extend(ccsds_spp::pack(0x001, f as u16 * 4 + p, &[0x5A; 194]));
+        }
+        stream.extend(ccsds_tm::pack_frame(1024, 0x044, f, &content));
+    }
+
+    let mut group = c.benchmark_group("tm_deframe");
+    group.throughput(Throughput::Bytes(stream.len() as u64));
+    group.bench_function("50x1024B_frames_whole", |b| {
+        b.iter(|| {
+            let mut d = ccsds_tm::Deframer::new(1024);
+            black_box(d.feed(&stream))
+        })
+    });
+    // Socket-sized reads: frames straddle every chunk boundary.
+    group.bench_function("50x1024B_frames_in_1500B_chunks", |b| {
+        b.iter(|| {
+            let mut d = ccsds_tm::Deframer::new(1024);
+            let mut n = 0usize;
+            for chunk in stream.chunks(1500) {
+                n += d.feed(chunk).len();
+            }
+            black_box(n)
+        })
+    });
+    group.finish();
+}
+
+fn bench_record_walk(c: &mut Criterion) {
+    use std::collections::HashMap;
+    use zenith::core::config_manager::LayoutStep;
+    use zenith::core::stream_link::RecordSpec;
+
+    // One aggregate packet as a record-shaped downlink emits it: a 2B
+    // packet descriptor, then 20 records of [4B id][11B time][value],
+    // eighteen 4-byte channels and two length-prefixed strings to
+    // step over.
+    let rec = |id: u32, value: &[u8]| -> Vec<u8> {
+        let mut r = id.to_be_bytes().to_vec();
+        r.extend_from_slice(&[0u8; 11]);
+        r.extend_from_slice(value);
+        r
+    };
+    let mut payload = vec![0x00, 0x01];
+    let mut by_id = HashMap::new();
+    for id in 0..18u32 {
+        by_id.insert(id, 4usize);
+        payload.extend(rec(id, &[0, 0, 0, id as u8]));
+    }
+    let text = b"version-string";
+    let mut sval = (text.len() as u16).to_be_bytes().to_vec();
+    sval.extend_from_slice(text);
+    payload.extend(rec(100, &sval));
+    payload.extend(rec(101, &sval));
+    let spec = RecordSpec {
+        record_apid: 0x001,
+        packet_prefix: 2,
+        id_offset: 0,
+        id_size: 4,
+        header_size: 15,
+        by_id,
+        skip_apids: Default::default(),
+        skip_by_id: HashMap::from([
+            (100, vec![LayoutStep::Prefixed { prefixed: 2 }]),
+            (101, vec![LayoutStep::Prefixed { prefixed: 2 }]),
+        ]),
+    };
+
+    let mut group = c.benchmark_group("record_walk");
+    group.throughput(Throughput::Bytes(payload.len() as u64));
+    group.bench_function("20_records_2_skipped", |b| {
+        b.iter(|| black_box(spec.walk(black_box(&payload))))
     });
     group.finish();
 }
