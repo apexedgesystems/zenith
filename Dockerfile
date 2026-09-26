@@ -45,7 +45,13 @@ RUN apt-get update && \
 COPY --from=backend /build/target/release/zenith /usr/local/bin/zenith
 COPY --from=frontend /build/dist/ /usr/local/share/zenith/static/
 
-RUN mkdir -p /var/lib/zenith /etc/zenith
+# The image boots on its own: a default config declaring the bundled
+# demo targets. A mount at /etc/zenith/config.toml replaces the
+# config; a mount at /data/targets replaces the target directories.
+COPY deploy/config.toml /etc/zenith/config.toml
+COPY targets/ /data/targets/
+
+RUN mkdir -p /var/lib/zenith
 
 # Working directory sits inside the persistent volume so even a
 # relative storage path in config.toml resolves somewhere durable.

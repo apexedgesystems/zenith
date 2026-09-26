@@ -1,0 +1,85 @@
+# Zenith default configuration, shipped inside the container image.
+#
+# It declares the three demo targets bundled under /data/targets so a
+# freshly pulled image boots with something to connect to. Replace it
+# by mounting your own file at /etc/zenith/config.toml (see
+# deploy/docker-compose.yml). ZENITH_PORT, ZENITH_DB_PATH and
+# ZENITH_AUTH_SECRET override the corresponding settings from the
+# environment.
+
+[server]
+host = "0.0.0.0"
+port = 8080
+
+[auth]
+enabled = false
+secret = "change-me-in-production"
+
+[storage]
+# Inside the persistent volume (zenith-data mounts at /var/lib/zenith).
+path = "/var/lib/zenith/zenith.db"
+retention_hours = 24
+
+# An Apex CSF application: full command surface over TCP + SLIP +
+# APROTO. The ops demo ships with apex; run it on this host and press
+# Connect.
+[[targets]]
+name = "Apex ops demo"
+host = "127.0.0.1"
+port = 9000
+auto_connect = false
+manifest = "/data/targets/sil-ops-demo/app_manifest.json"
+structs_dir = "/data/targets/sil-ops-demo/structs"
+telemetry_config = "/data/targets/sil-ops-demo/telemetry.json"
+commands_config = "/data/targets/sil-ops-demo/commands.json"
+
+# A stock NASA cFS bundle: CCSDS space packets over UDP. Connect arms
+# the downlink (the generated connect-init sequence enables TO_LAB
+# output); telemetry is heard on listen_port.
+[[targets]]
+name = "cFS cpu1"
+host = "127.0.0.1"
+port = 1234
+protocol = "ccsds-spp"
+carrier = "udp"
+listen_port = 2234
+auto_connect = true
+manifest = "/data/targets/cfs-cpu1/app_manifest.json"
+structs_dir = "/data/targets/cfs-cpu1/structs"
+telemetry_config = "/data/targets/cfs-cpu1/telemetry.json"
+connect_init = "/data/targets/cfs-cpu1/on_connect.json"
+health_nonzero_bad = [
+  "commanderrorcounter",
+  "ingesterrors",
+  "internalerrorcounter",
+  "messagetrunccounter",
+  "unregisteredappcounter",
+  "processorresets",
+  "pipeoverflowerrorcounter",
+  "msgreceiveerrorcounter",
+  "subscribeerrorcounter",
+  "createpipeerrorcounter",
+]
+[targets.apid_map]
+"0x000" = "0x00C00000" # CFE_ES
+"0x001" = "0x00C00001" # CFE_EVS
+"0x003" = "0x00C00003" # CFE_SB
+"0x005" = "0x00C00005" # CFE_TIME
+"0x080" = "0x00C00080" # TO_LAB
+"0x084" = "0x00C00084" # CI_LAB
+
+# A stock F-prime deployment: it dials in, so zenith listens on
+# listen_port (every interface; host/port are unused by a listening
+# carrier). CCSDS TM frames wrapping space packets of id-addressed
+# channel records, described by the generated records.json.
+[[targets]]
+name = "F-prime demo"
+host = "127.0.0.1"
+port = 50050
+protocol = "tm+ccsds-spp+records"
+carrier = "tcp-listen"
+listen_port = 50050
+tm_frame_size = 1024
+auto_connect = true
+records_config = "/data/targets/fprime-demo/records.json"
+telemetry_config = "/data/targets/fprime-demo/telemetry.json"
