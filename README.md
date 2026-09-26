@@ -300,9 +300,9 @@ A target's definition fully describes its transport: the protocol
 `tm+ccsds-spp+records`, `raw-slip`), the
 carrier (`tcp` dials host:port and reads the stream; `udp` binds
 `listen_port` for inbound datagrams and sends outbound ones to
-host:port; `tcp-listen` accepts the target dialing in to
-`listen_port` -- the push-to-ground pattern, with the connected
-state tracking the live session), and an optional `connect_init`
+host:port; `tcp-listen` binds `listen_port` on every interface and accepts
+the target dialing in -- the push-to-ground pattern, with the
+connected state tracking the live session, not the bound listener), and an optional `connect_init`
 sequence -- a generated
 on_connect.json of named steps (bytes + per-step delays) sent in
 order on every connect, for stacks that emit nothing until a ground

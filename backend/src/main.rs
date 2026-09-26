@@ -3748,7 +3748,7 @@ async fn main() {
     // would only find out at connect time. Boot refusal instead.
     if let Some((port, first, second)) = config::duplicate_listen_port(&config.targets) {
         eprintln!(
-            "FATAL: targets '{}' and '{}' both declare udp_listen_port {}; \
+            "FATAL: targets '{}' and '{}' both declare listen_port {}; \
              distinct targets cannot share a local listen port",
             first, second, port
         );

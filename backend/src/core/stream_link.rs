@@ -529,12 +529,6 @@ impl StreamLink {
             h.abort();
         }
         let gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        let mut ingest = Ingest {
-            pipeline: PacketPipeline::build(&self.spec),
-            push_tx: self.push_tlm_tx.clone(),
-            proto_name: self.protocol.name(),
-            last_warn: None,
-        };
         let conn_flag = self.connected.clone();
         let gen_flag = self.generation.clone();
         let proto_name = self.protocol.name();
@@ -628,6 +622,12 @@ impl StreamLink {
             return Ok(());
         }
 
+        let mut ingest = Ingest {
+            pipeline: PacketPipeline::build(&self.spec),
+            push_tx: self.push_tlm_tx.clone(),
+            proto_name: self.protocol.name(),
+            last_warn: None,
+        };
         let (reader_handle, sender) = match self.carrier {
             Carrier::Tcp => {
                 let stream = timeout(Duration::from_secs(5), TcpStream::connect(&addr))

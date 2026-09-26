@@ -229,6 +229,10 @@ mod tests {
                 include_str!("../protocol/ccsds_spp.rs"),
             ),
             ("protocol/slip.rs", include_str!("../protocol/slip.rs")),
+            (
+                "protocol/ccsds_tm.rs",
+                include_str!("../protocol/ccsds_tm.rs"),
+            ),
             ("core/stream_link.rs", include_str!("stream_link.rs")),
             ("core/config_manager.rs", include_str!("config_manager.rs")),
         ] {
