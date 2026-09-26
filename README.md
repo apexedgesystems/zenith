@@ -536,7 +536,9 @@ The declared version lives in the workspace `Cargo.toml`;
 proves both (`make version-check TAG=vX.Y.Z` also proves a tag).
 [CHANGELOG.md](CHANGELOG.md) keeps an `Unreleased` section that each
 feature branch adds to; a release turns it into a `vX.Y.Z - date`
-section.
+section. Entries are written for the person upgrading: what changed
+for them, one line each, breaking changes first. Engineering detail
+stays in commit messages.
 
 To cut a release: bump the two version fields, retitle the
 changelog section, merge, then tag `vX.Y.Z` on main and push the

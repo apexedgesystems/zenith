@@ -11,49 +11,58 @@ architecture review; work before that is the v0.0.1 tag.
 
 ## Unreleased
 
+Zenith grows from an Apex CSF console into one console for three
+flight frameworks, published as a container that runs as pulled.
+
+### Breaking
+
+- Target config keys: `arm_hex` is replaced by a generated
+  `connect_init` file of named steps; `udp_listen_port` is renamed
+  `listen_port` (boot refuses the old key and names the new one).
+- The container runs on the host network. Each target's definition
+  declares its own ports; nothing is published per target anymore.
+
 ### Added
 
-- NASA cFS targets: CCSDS space packets over a UDP carrier, a
-  dictionary generator that reads the flight build's debug info, and
-  generated connect-time init sequences that arm the downlink.
-- F-prime targets: a tcp-listen carrier for deployments that dial in,
-  CCSDS TM transfer-frame deframing with CRC verification, a
-  record-dictionary form for id-addressed telemetry, and a generator
-  that transforms the deployment's topology dictionary.
-- Dictionaries carry a byte-order stamp; big-endian wires decode
-  without configuration.
-- Retention tiers: an age-based envelope ladder, chart bands for
-  downsampled history, and a storage panel with a capacity gauge, usage
-  bars, and live pipeline accounting.
-- Command lifecycle with READBACK consumption and verify-before-apply
-  on tunables; RTS plan validation before upload.
-- Preference store, configurable dashboard cards, command favorites.
-- Argon2 credentials, JWT sessions with WebSocket tickets, attributed
-  audit entries, per-IP rate limiting, bounded requests.
-- Environment overrides for the front-door port, database path, and
-  auth secret; a default config and the demo target directories
-  bundled in the image; a pull-not-build compose file.
+- NASA cFS targets over UDP, with a dictionary generator that reads
+  the flight build's debug info and a connect-time step that arms the
+  downlink.
+- F-prime targets: the deployment dials in, TM frames are verified,
+  and a record dictionary generated from the topology dictionary
+  names every channel.
+- Byte order stamped in dictionaries; big-endian wires decode without
+  configuration.
+- A pull-not-build image with a default config and demo targets for
+  all three frameworks; `ZENITH_PORT`, `ZENITH_DB_PATH` and
+  `ZENITH_AUTH_SECRET` override the file from the environment.
+- Retention tiers (age-based envelope ladder) with chart bands for
+  downsampled history, and a Storage page with a capacity gauge and
+  live pipeline accounting.
+- Command lifecycle: READBACK results, verify-before-apply on
+  tunables, RTS plans validated before upload.
+- Configurable dashboard cards, command favorites, saved preferences.
+- A listening target shows as listening; telemetry-only targets show
+  component status by telemetry heard.
 
 ### Changed
 
-- Zenith is framework-neutral above the transport: each target
-  declares its protocol, carrier, ports and connect-time init in
-  config, and a CI boundary test forbids generic modules from naming
-  any framework.
-- Target directories are named once (`dir =`) with conventional
-  artifact names inside; explicit paths still override.
-- Telemetry-only targets report component status by telemetry heard
-  and show a listening link as listening.
-- Toolchain pinned across dev and prod images; dependabot groups paired
-  majors so proposed updates can merge.
+- Everything framework-specific comes from generated target files;
+  a target declares its protocol, carrier, ports and connect-time
+  init in config.
+
+### Security
+
+- Argon2 credentials, JWT sessions with short-lived WebSocket
+  tickets, per-IP rate limiting, bounded uploads and history
+  queries, audit entries attributed to the operator.
 
 ### Fixed
 
-- Failure-safe ingest and durable storage with correct retention.
-- Bounded ACK waits; no lock guards held across target I/O.
-- Counted drops at every pipeline stage and truthful health.
-- Layout hashes aware of field offsets; nested-struct vocabulary.
-- Frontend geometry, id handling, and dead code under a lint gate.
+- Ingest survives write failures and the database survives a crash;
+  retention removes what it says it removes.
+- Every dropped sample is counted at the stage that dropped it, and
+  the health page reflects it.
+- Commands that never get an ACK time out instead of hanging.
 
 ## v0.0.1 - 2026-04-10
 
