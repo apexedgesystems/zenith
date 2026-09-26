@@ -13,14 +13,19 @@ producing exactly two files:
     <out>/telemetry.json       curated layouts from the spec, or a
                                default chunking per component
 
-Record layout (stock ComCcsds downlink, confirmed on a live capture):
-[descriptor U16][channel id U32][time: base U16, ctx U8, secs U32,
-useconds U32] = 17 bytes, then the value, big-endian throughout per
-F-prime serialization.
+Record layout (stock ComCcsds downlink, confirmed on a live capture
+of whole aggregate packets): each telemetry packet payload is one
+[packet descriptor U16] followed by records of [channel id U32]
+[time: base U16, ctx U8, secs U32, useconds U32] = 15 bytes, then
+the value, big-endian throughout per F-prime serialization. The
+descriptor is per packet, not per record.
 
-String channels are variable-length on the wire (length-prefixed)
-and are skipped with a warning: a string record's id is absent from
-the table, so an aggregate's tail past one is dropped and counted.
+Channels that are not numeric scalars (strings, structs, arrays)
+are not converted, but their wire layout is: each lands in the
+table's "skip" list with the byte segments it occupies (fixed
+counts and length prefixes), so the walker steps over it and the
+records after it in the same packet still decode. The report names
+every skipped channel and why.
 
 Usage: dictgen.py <spec.json> <output-dir>
 Spec: { "application": ..., "dictionary": path, "layouts": [...] }
@@ -30,8 +35,9 @@ import json
 import os
 import sys
 
-RECORD_HEADER = 17
-DESCRIPTOR_OFFSET_OF_ID = 2
+PACKET_PREFIX = 2  # the packet descriptor, once per packet
+RECORD_HEADER = 15  # id U32 + 11-byte time tag
+ID_OFFSET = 0
 ID_SIZE = 4
 TELEMETRY_APID = "0x001"
 # The dictionary format this transform was written and verified
@@ -78,6 +84,64 @@ def describe_kind(t: dict, typedefs: dict) -> str:
     return f"{kind}: not a numeric type"
 
 
+# Strings serialize as a length prefix of this many bytes followed by
+# the characters (the framework's size-store type, U16 by default).
+STRING_LENGTH_PREFIX = 2
+
+
+def wire_layout(t: dict, typedefs: dict, depth: int = 0) -> list | None:
+    """The byte layout of a value the converter does not decode, so
+    the record walker can step over it: a list of {"fixed": n} and
+    {"prefixed": w} segments (a w-byte big-endian length then that
+    many bytes). Structs are their members in index order, arrays
+    their elements, enums their representation, aliases their
+    target. None when a type cannot be laid out."""
+    if depth > 16:
+        return None
+    kind = t.get("kind")
+    if kind in ("integer", "float"):
+        return [{"fixed": t["size"] // 8}]
+    if kind == "bool":
+        return [{"fixed": 1}]
+    if kind == "string":
+        return [{"prefixed": STRING_LENGTH_PREFIX}]
+    if kind == "qualifiedIdentifier":
+        td = typedefs.get(t.get("name"))
+        if td is None:
+            return None
+        tk = td.get("kind")
+        if tk == "alias":
+            return wire_layout(td.get("underlyingType", {}), typedefs, depth + 1)
+        if tk == "enum":
+            return wire_layout(td.get("representationType", {}), typedefs, depth + 1)
+        if tk == "array":
+            elem = wire_layout(td.get("elementType", {}), typedefs, depth + 1)
+            if elem is None:
+                return None
+            return merge_fixed(elem * int(td.get("size", 0)))
+        if tk == "struct":
+            out = []
+            members = sorted(td.get("members", {}).values(), key=lambda m: m["index"])
+            for m in members:
+                part = wire_layout(m["type"], typedefs, depth + 1)
+                if part is None:
+                    return None
+                out.extend(part)
+            return merge_fixed(out)
+    return None
+
+
+def merge_fixed(steps: list) -> list:
+    """Coalesce adjacent fixed segments."""
+    out: list = []
+    for st in steps:
+        if "fixed" in st and out and "fixed" in out[-1]:
+            out[-1] = {"fixed": out[-1]["fixed"] + st["fixed"]}
+        else:
+            out.append(dict(st))
+    return out
+
+
 def zenith_type(concrete: dict) -> tuple[str, int]:
     size = concrete["size"] // 8
     if concrete["kind"] == "float":
@@ -108,12 +172,21 @@ def main() -> None:
     typedefs = {t.get("qualifiedName"): t for t in fdict.get("typeDefinitions", [])}
 
     records = []
+    skip = []
     skipped = []
     converted = 0
     for ch in fdict["telemetryChannels"]:
         concrete = resolve_type(ch["type"], typedefs)
         if concrete is None:
-            skipped.append((ch["name"], describe_kind(ch["type"], typedefs)))
+            why = describe_kind(ch["type"], typedefs)
+            layout = wire_layout(ch["type"], typedefs)
+            if layout is None:
+                why += "; no wire layout, the walker will stop at it"
+            else:
+                # Not decoded, but stepped over: the records after it
+                # in the same packet still decode.
+                skip.append({"id": ch["id"], "channel": ch["name"], "layout": layout})
+            skipped.append((ch["name"], why))
             continue
         ftype, fsize = zenith_type(concrete)
         entry = {"id": ch["id"], "channel": ch["name"],
@@ -131,12 +204,14 @@ def main() -> None:
                 f"dictionary spec {meta.get('dictionarySpecVersion', '?')})"
             ),
             "record_apid": TELEMETRY_APID,
-            "id_offset": DESCRIPTOR_OFFSET_OF_ID,
+            "packet_prefix": PACKET_PREFIX,
+            "id_offset": ID_OFFSET,
             "id_size": ID_SIZE,
             "header_size": RECORD_HEADER,
             "byte_order": "be",
             "skip_apids": SKIP_APIDS,
             "records": records,
+            "skip": skip,
         }, f, indent=2)
         f.write("\n")
 

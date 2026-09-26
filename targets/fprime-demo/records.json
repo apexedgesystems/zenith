@@ -1,9 +1,10 @@
 {
   "_generated_by": "fprime-dictgen from FprimeDemoDeployment.FprimeDemoDeployment (framework v4.3.0, dictionary spec 1.0.0)",
   "record_apid": "0x001",
-  "id_offset": 2,
+  "packet_prefix": 2,
+  "id_offset": 0,
   "id_size": 4,
-  "header_size": 17,
+  "header_size": 15,
   "byte_order": "be",
   "skip_apids": [
     "0x002",
@@ -491,6 +492,293 @@
       "type": "float",
       "size": 4,
       "annotation": "System's CPU Percentage"
+    }
+  ],
+  "skip": [
+    {
+      "id": 16789504,
+      "channel": "CdhCore.version.FrameworkVersion",
+      "layout": [
+        {
+          "prefixed": 2
+        }
+      ]
+    },
+    {
+      "id": 16789505,
+      "channel": "CdhCore.version.ProjectVersion",
+      "layout": [
+        {
+          "prefixed": 2
+        }
+      ]
+    },
+    {
+      "id": 16789506,
+      "channel": "CdhCore.version.CustomVersion01",
+      "layout": [
+        {
+          "fixed": 4
+        },
+        {
+          "prefixed": 2
+        },
+        {
+          "fixed": 1
+        }
+      ]
+    },
+    {
+      "id": 16789507,
+      "channel": "CdhCore.version.CustomVersion02",
+      "layout": [
+        {
+          "fixed": 4
+        },
+        {
+          "prefixed": 2
+        },
+        {
+          "fixed": 1
+        }
+      ]
+    },
+    {
+      "id": 16789508,
+      "channel": "CdhCore.version.CustomVersion03",
+      "layout": [
+        {
+          "fixed": 4
+        },
+        {
+          "prefixed": 2
+        },
+        {
+          "fixed": 1
+        }
+      ]
+    },
+    {
+      "id": 16789509,
+      "channel": "CdhCore.version.CustomVersion04",
+      "layout": [
+        {
+          "fixed": 4
+        },
+        {
+          "prefixed": 2
+        },
+        {
+          "fixed": 1
+        }
+      ]
+    },
+    {
+      "id": 16789510,
+      "channel": "CdhCore.version.CustomVersion05",
+      "layout": [
+        {
+          "fixed": 4
+        },
+        {
+          "prefixed": 2
+        },
+        {
+          "fixed": 1
+        }
+      ]
+    },
+    {
+      "id": 16789511,
+      "channel": "CdhCore.version.CustomVersion06",
+      "layout": [
+        {
+          "fixed": 4
+        },
+        {
+          "prefixed": 2
+        },
+        {
+          "fixed": 1
+        }
+      ]
+    },
+    {
+      "id": 16789512,
+      "channel": "CdhCore.version.CustomVersion07",
+      "layout": [
+        {
+          "fixed": 4
+        },
+        {
+          "prefixed": 2
+        },
+        {
+          "fixed": 1
+        }
+      ]
+    },
+    {
+      "id": 16789513,
+      "channel": "CdhCore.version.CustomVersion08",
+      "layout": [
+        {
+          "fixed": 4
+        },
+        {
+          "prefixed": 2
+        },
+        {
+          "fixed": 1
+        }
+      ]
+    },
+    {
+      "id": 16789514,
+      "channel": "CdhCore.version.CustomVersion09",
+      "layout": [
+        {
+          "fixed": 4
+        },
+        {
+          "prefixed": 2
+        },
+        {
+          "fixed": 1
+        }
+      ]
+    },
+    {
+      "id": 16789515,
+      "channel": "CdhCore.version.CustomVersion10",
+      "layout": [
+        {
+          "fixed": 4
+        },
+        {
+          "prefixed": 2
+        },
+        {
+          "fixed": 1
+        }
+      ]
+    },
+    {
+      "id": 16789516,
+      "channel": "CdhCore.version.LibraryVersion01",
+      "layout": [
+        {
+          "prefixed": 2
+        }
+      ]
+    },
+    {
+      "id": 16789517,
+      "channel": "CdhCore.version.LibraryVersion02",
+      "layout": [
+        {
+          "prefixed": 2
+        }
+      ]
+    },
+    {
+      "id": 16789518,
+      "channel": "CdhCore.version.LibraryVersion03",
+      "layout": [
+        {
+          "prefixed": 2
+        }
+      ]
+    },
+    {
+      "id": 16789519,
+      "channel": "CdhCore.version.LibraryVersion04",
+      "layout": [
+        {
+          "prefixed": 2
+        }
+      ]
+    },
+    {
+      "id": 16789520,
+      "channel": "CdhCore.version.LibraryVersion05",
+      "layout": [
+        {
+          "prefixed": 2
+        }
+      ]
+    },
+    {
+      "id": 16789521,
+      "channel": "CdhCore.version.LibraryVersion06",
+      "layout": [
+        {
+          "prefixed": 2
+        }
+      ]
+    },
+    {
+      "id": 16789522,
+      "channel": "CdhCore.version.LibraryVersion07",
+      "layout": [
+        {
+          "prefixed": 2
+        }
+      ]
+    },
+    {
+      "id": 16789523,
+      "channel": "CdhCore.version.LibraryVersion08",
+      "layout": [
+        {
+          "prefixed": 2
+        }
+      ]
+    },
+    {
+      "id": 16789524,
+      "channel": "CdhCore.version.LibraryVersion09",
+      "layout": [
+        {
+          "prefixed": 2
+        }
+      ]
+    },
+    {
+      "id": 16789525,
+      "channel": "CdhCore.version.LibraryVersion10",
+      "layout": [
+        {
+          "prefixed": 2
+        }
+      ]
+    },
+    {
+      "id": 33554432,
+      "channel": "ComCcsds.comQueue.comQueueDepth",
+      "layout": [
+        {
+          "fixed": 8
+        }
+      ]
+    },
+    {
+      "id": 33554433,
+      "channel": "ComCcsds.comQueue.buffQueueDepth",
+      "layout": [
+        {
+          "fixed": 4
+        }
+      ]
+    },
+    {
+      "id": 268451845,
+      "channel": "FprimeDemoDeployment.cmdSeq.CS_CurrentSequence",
+      "layout": [
+        {
+          "prefixed": 2
+        }
+      ]
     }
   ]
 }

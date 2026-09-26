@@ -359,6 +359,7 @@ fn record_spec_from_table(
     use crate::core::config_manager::parse_num_u32;
     crate::core::stream_link::RecordSpec {
         record_apid: parse_num_u32(&table.record_apid).unwrap_or(0) as u16,
+        packet_prefix: table.packet_prefix,
         id_offset: table.id_offset,
         id_size: table.id_size,
         header_size: table.header_size,
@@ -367,6 +368,11 @@ fn record_spec_from_table(
             .skip_apids
             .iter()
             .filter_map(|a| parse_num_u32(a).map(|v| v as u16))
+            .collect(),
+        skip_by_id: table
+            .skip
+            .iter()
+            .map(|s| (s.id, s.layout.clone()))
             .collect(),
     }
 }

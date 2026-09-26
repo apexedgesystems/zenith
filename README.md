@@ -72,7 +72,8 @@ targets/
 
   fprime-demo/            # An F-prime deployment
     records.json          # Record dictionary: one table of channel id, name,
-                          #   type, size + the record header shape and byte order
+                          #   type, size + the packet/record header shape, byte
+                          #   order, and the wire layout of undecoded records
     telemetry.json
 ```
 
@@ -89,7 +90,8 @@ from the wire); F-prime targets use `tools/fprime-dictgen` (a pure
 transform of the deployment's build-generated JSON dictionary into
 a record dictionary -- record-shaped telemetry is a first-class
 dictionary form, one readable table of channel ids, names, types,
-and sizes -- plus display layouts).
+and sizes, plus the byte layout of every channel it does not
+decode so the walker steps over them -- plus display layouts).
 Dictionaries carry a generator-measured `byte_order` stamp, so
 big-endian wires (F-prime by spec, big-endian flight processors by
 ELF ident) decode correctly with zero configuration.

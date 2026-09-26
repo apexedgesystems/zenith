@@ -84,6 +84,8 @@ pub enum PipelineSpec {
 #[derive(Debug, Clone)]
 pub struct RecordSpec {
     pub record_apid: u16,
+    /// Bytes before the first record in each packet payload.
+    pub packet_prefix: usize,
     pub id_offset: usize,
     pub id_size: usize,
     pub header_size: usize,
@@ -91,17 +93,24 @@ pub struct RecordSpec {
     /// record dictionary keys decode by the same id).
     pub by_id: HashMap<u32, usize>,
     pub skip_apids: std::collections::HashSet<u16>,
+    /// id -> wire layout of a record that is known but not decoded;
+    /// the walker steps over it instead of stopping.
+    pub skip_by_id: HashMap<u32, Vec<crate::core::config_manager::LayoutStep>>,
 }
 
 impl RecordSpec {
     /// Walk one packet payload: emit each known record whole
     /// (header + value, so dictionaries can also expose time
-    /// fields). An unknown id ends the walk -- record lengths come
-    /// from the table, so past an unknown record there is no
-    /// alignment. Returns (records, dropped-tail flag).
-    fn walk(&self, payload: &[u8]) -> (Vec<(u32, Vec<u8>)>, bool) {
+    /// fields); step silently over records the table declares
+    /// undecoded, by their layout. An unknown id ends the walk --
+    /// record lengths come from the table, so past an unknown record
+    /// there is no alignment. Returns (records, dropped-tail flag).
+    pub fn walk(&self, payload: &[u8]) -> (Vec<(u32, Vec<u8>)>, bool) {
         let mut out = Vec::new();
-        let mut pos = 0usize;
+        if payload.len() < self.packet_prefix {
+            return (out, true);
+        }
+        let mut pos = self.packet_prefix;
         while payload.len() - pos >= self.header_size {
             let id_at = pos + self.id_offset;
             let id = if self.id_size == 2 {
@@ -115,6 +124,16 @@ impl RecordSpec {
                 ])
             };
             let Some(&value_size) = self.by_id.get(&id) else {
+                if let Some(layout) = self.skip_by_id.get(&id) {
+                    let value_start = pos + self.header_size;
+                    match crate::core::config_manager::skip_len(layout, &payload[value_start..]) {
+                        Some(len) => {
+                            pos = value_start + len;
+                            continue;
+                        }
+                        None => return (out, true),
+                    }
+                }
                 return (out, true);
             };
             let total = self.header_size + value_size;
@@ -1155,26 +1174,34 @@ mod tests {
     /// frame being split mid-stream.
     #[tokio::test]
     async fn record_stage_walks_aggregates_through_tm_stack() {
-        // Record shape mirroring a typical id-addressed wire: 2B
-        // discriminator, 4B id, 11B time, then the value.
+        // Record shape mirroring a typical id-addressed wire: one 2B
+        // packet descriptor, then records of 4B id, 11B time, value.
         let rec = |id: u32, value: &[u8]| -> Vec<u8> {
-            let mut r = vec![0x00, 0x01];
-            r.extend_from_slice(&id.to_be_bytes());
+            let mut r = id.to_be_bytes().to_vec();
             r.extend_from_slice(&[0u8; 11]);
             r.extend_from_slice(value);
             r
         };
         let spec = RecordSpec {
             record_apid: 0x001,
-            id_offset: 2,
+            packet_prefix: 2,
+            id_offset: 0,
             id_size: 4,
-            header_size: 17,
+            header_size: 15,
             by_id: HashMap::from([(100, 4), (200, 1)]),
             skip_apids: [0x002u16].into_iter().collect(),
+            // 150: an undecoded string (2-byte length prefix).
+            skip_by_id: HashMap::from([(
+                150,
+                vec![crate::core::config_manager::LayoutStep::Prefixed { prefixed: 2 }],
+            )]),
         };
 
-        // Aggregate: known(100), known(200), unknown(999) + junk.
-        let mut agg = rec(100, &[1, 2, 3, 4]);
+        // Aggregate: known(100), skipped string(150), known(200),
+        // unknown(999) + junk.
+        let mut agg = vec![0x00, 0x01];
+        agg.extend_from_slice(&rec(100, &[1, 2, 3, 4]));
+        agg.extend_from_slice(&rec(150, &[0, 5, b'h', b'e', b'l', b'l', b'o']));
         agg.extend_from_slice(&rec(200, &[7]));
         agg.extend_from_slice(&rec(999, &[0xEE; 3]));
         let tlm_pkt = ccsds_spp::pack(0x001, 1, &agg);
@@ -1201,11 +1228,14 @@ mod tests {
 
         let first = recv_one(&mut push_rx).await;
         assert_eq!(first.full_uid, 100);
-        assert_eq!(first.payload.len(), 17 + 4);
-        assert_eq!(&first.payload[17..], &[1, 2, 3, 4]);
+        assert_eq!(first.payload.len(), 15 + 4);
+        assert_eq!(&first.payload[15..], &[1, 2, 3, 4]);
         let second = recv_one(&mut push_rx).await;
-        assert_eq!(second.full_uid, 200);
-        assert_eq!(&second.payload[17..], &[7]);
+        assert_eq!(
+            second.full_uid, 200,
+            "the string before it was stepped over"
+        );
+        assert_eq!(&second.payload[15..], &[7]);
         // Unknown-id tail and the skip-APID event packet: nothing
         // further arrives.
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;

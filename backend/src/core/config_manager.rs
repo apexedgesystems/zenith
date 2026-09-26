@@ -767,6 +767,11 @@ pub struct RecordTable {
     pub id_size: usize,
     /// Total fixed header bytes before each record's value.
     pub header_size: usize,
+    /// Bytes at the start of every record-stream packet before its
+    /// first record (a packet-level descriptor, for wires that carry
+    /// one); zero when records start at the payload's first byte.
+    #[serde(default)]
+    pub packet_prefix: usize,
     /// Byte order of record values ("le" default) -- same semantics
     /// as a struct dictionary's stamp.
     #[serde(default)]
@@ -777,6 +782,49 @@ pub struct RecordTable {
     #[serde(default)]
     pub skip_apids: Vec<String>,
     pub records: Vec<RecordDef>,
+    /// Records on the record stream that are known but not decoded
+    /// (strings, aggregates): their wire layout lets the walker step
+    /// over them so the records after them in a packet still decode.
+    #[serde(default)]
+    pub skip: Vec<SkipDef>,
+}
+
+/// One undecoded record: its id and how many bytes it occupies.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkipDef {
+    pub id: u32,
+    pub channel: String,
+    pub layout: Vec<LayoutStep>,
+}
+
+/// One segment of an undecoded value's wire layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum LayoutStep {
+    /// This many bytes.
+    Fixed { fixed: usize },
+    /// A big-endian length of this width, then that many bytes.
+    Prefixed { prefixed: usize },
+}
+
+/// Bytes an undecoded value occupies at the start of `data`, or None
+/// when the data ends before the layout does.
+pub fn skip_len(layout: &[LayoutStep], data: &[u8]) -> Option<usize> {
+    let mut pos = 0usize;
+    for step in layout {
+        match *step {
+            LayoutStep::Fixed { fixed } => pos += fixed,
+            LayoutStep::Prefixed { prefixed } => {
+                let bytes = data.get(pos..pos + prefixed)?;
+                let len = bytes.iter().fold(0usize, |acc, &b| (acc << 8) | b as usize);
+                pos += prefixed + len;
+            }
+        }
+        if pos > data.len() {
+            return None;
+        }
+    }
+    Some(pos)
 }
 
 /// One channel: its record id on the wire, its display name, and
@@ -836,6 +884,28 @@ impl RecordTable {
         ))?;
         for a in &self.skip_apids {
             parse_num_u32(a).ok_or(format!("skip_apids entry '{}' is not a number", a))?;
+        }
+        for sk in &self.skip {
+            if !seen.insert(sk.id) {
+                return Err(format!("skip id {} is also a record or skip id", sk.id));
+            }
+            if sk.layout.is_empty() {
+                return Err(format!("skip '{}' has an empty layout", sk.channel));
+            }
+            for step in &sk.layout {
+                match *step {
+                    LayoutStep::Fixed { fixed: 0 } => {
+                        return Err(format!("skip '{}' has a zero-length segment", sk.channel))
+                    }
+                    LayoutStep::Prefixed { prefixed } if !matches!(prefixed, 1 | 2 | 4) => {
+                        return Err(format!(
+                            "skip '{}' has a {}-byte length prefix (1, 2 or 4)",
+                            sk.channel, prefixed
+                        ))
+                    }
+                    _ => {}
+                }
+            }
         }
         check_byte_order(self.byte_order.as_deref())?;
         Ok(())
@@ -1203,5 +1273,64 @@ mod nested_tests {
             .validate()
             .unwrap_err()
             .contains("skip_apids entry 'events'"));
+    }
+
+    /// @test An undecoded record's layout is walked by its segments:
+    /// fixed bytes and big-endian length prefixes, in order, with
+    /// None when the data ends first; the table refuses a skip that
+    /// reuses a record id, an empty layout, or an odd prefix width.
+    #[test]
+    fn skip_layouts_measure_and_validate() {
+        use LayoutStep::{Fixed, Prefixed};
+        // enum U32 + string(len 3) + status U8
+        let layout = [
+            Fixed { fixed: 4 },
+            Prefixed { prefixed: 2 },
+            Fixed { fixed: 1 },
+        ];
+        let data = [0, 0, 0, 1, 0, 3, b'a', b'b', b'c', 9, 0xFF];
+        assert_eq!(skip_len(&layout, &data), Some(10));
+        assert_eq!(skip_len(&layout, &data[..9]), None, "status byte missing");
+        assert_eq!(skip_len(&layout, &data[..5]), None, "prefix cut short");
+        assert_eq!(
+            skip_len(&[Prefixed { prefixed: 4 }], &[0, 0, 0, 0]),
+            Some(4)
+        );
+
+        let table = |skip: &str| {
+            serde_json::from_str::<RecordTable>(&format!(
+                r#"{{"record_apid": "0x001", "id_offset": 2, "id_size": 4,
+                     "header_size": 17,
+                     "records": [{{"id": 1, "channel": "a.b", "type": "uint", "size": 4}}],
+                     "skip": [{skip}]}}"#
+            ))
+            .unwrap()
+        };
+        assert!(
+            table(r#"{"id": 2, "channel": "a.s", "layout": [{"prefixed": 2}]}"#)
+                .validate()
+                .is_ok()
+        );
+        for (bad, why) in [
+            (
+                r#"{"id": 1, "channel": "a.s", "layout": [{"fixed": 4}]}"#,
+                "skip id 1",
+            ),
+            (
+                r#"{"id": 2, "channel": "a.s", "layout": []}"#,
+                "empty layout",
+            ),
+            (
+                r#"{"id": 2, "channel": "a.s", "layout": [{"prefixed": 3}]}"#,
+                "3-byte length prefix",
+            ),
+            (
+                r#"{"id": 2, "channel": "a.s", "layout": [{"fixed": 0}]}"#,
+                "zero-length",
+            ),
+        ] {
+            let e = table(bad).validate().unwrap_err();
+            assert!(e.contains(why), "{e}");
+        }
     }
 }
