@@ -142,6 +142,15 @@ impl ProtocolLink {
         }
     }
 
+    /// Bound and accepting on a listening carrier, peer or no peer.
+    /// Dial-out links never listen.
+    pub fn is_listening(&self) -> bool {
+        match self {
+            ProtocolLink::Aproto(_) => false,
+            ProtocolLink::Stream(c) => c.is_listening(),
+        }
+    }
+
     /// Lock-free handle to the connection flag (status endpoints must
     /// not wait on the link mutex).
     pub fn connected_handle(&self) -> Arc<AtomicBool> {

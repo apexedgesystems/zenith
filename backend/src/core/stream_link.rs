@@ -472,6 +472,12 @@ impl StreamLink {
 
     pub async fn connect(&mut self, host: &str, port: u16) -> Result<(), ClientError> {
         let addr = format!("{}:{}", host, port);
+        // A listener that is already bound and serving is the
+        // connection: bouncing it would refuse any peer dialing in
+        // during the rebind, and the connect contract is idempotent.
+        if self.is_listening() {
+            return Ok(());
+        }
         // A stale reader or a still-parked init task from a previous
         // connection must not outlive this one.
         if let Some(h) = self.reader_handle.take() {
@@ -682,6 +688,16 @@ impl StreamLink {
 
     pub fn is_connected(&self) -> bool {
         self.connected.load(Ordering::Acquire)
+    }
+
+    /// A tcp-listen link whose listener task is alive: bound and
+    /// accepting, whether or not a peer is attached right now.
+    pub fn is_listening(&self) -> bool {
+        matches!(self.carrier, Carrier::TcpListen { .. })
+            && self
+                .reader_handle
+                .as_ref()
+                .is_some_and(|h| !h.is_finished())
     }
 
     pub fn connected_handle(&self) -> Arc<AtomicBool> {
@@ -1225,6 +1241,97 @@ mod tests {
         assert_eq!(pkt.full_uid, 0x00D000);
         assert_eq!(pkt.payload, vec![1, 2, 3, 4]);
         link.disconnect();
+    }
+
+    /// @test A packet straddling a dropped frame does not leak: the
+    /// orphaned head is discarded with the frame, the next frame's
+    /// first-header pointer resumes the packet stage at a real packet
+    /// boundary, and nothing bogus routes in between.
+    #[tokio::test]
+    async fn packet_straddling_a_dropped_frame_is_discarded() {
+        const FRAME: usize = 32;
+        let field_len = FRAME - ccsds_tm::HEADER_SIZE - ccsds_tm::TRAILER_SIZE; // 24
+        let map = HashMap::from([(0x0D0u16, 0x00D000u32)]);
+        // Packet A: 30 bytes on the wire, straddles frames 1 and 2.
+        let a = ccsds_spp::pack(0x0D0, 1, &[0xA5u8; 24]);
+        assert_eq!(a.len(), 30);
+        // Frame 2 carries A's last 6 bytes, then packet B whole.
+        let b = ccsds_spp::pack(0x0D0, 2, &[1, 2, 3, 4]);
+        let mut f2_content = a[field_len..].to_vec();
+        f2_content.extend_from_slice(&b);
+        let mut f1 = ccsds_tm::pack_frame(FRAME, 0x044, 0, &a[..field_len]);
+        let mut f2 = ccsds_tm::pack_frame(FRAME, 0x044, 1, &f2_content);
+        // Frame 2's first header is at offset 6, not 0.
+        f2[4..6].copy_from_slice(&(0x1800u16 | 6).to_be_bytes());
+        let crc = ccsds_tm::crc16(&f2[..FRAME - ccsds_tm::TRAILER_SIZE]);
+        f2[FRAME - 2..].copy_from_slice(&crc.to_be_bytes());
+        // Frame 3: a clean packet C, so the stream provably continues.
+        let c = ccsds_spp::pack(0x0D0, 3, &[9, 9]);
+        let f3 = ccsds_tm::pack_frame(FRAME, 0x044, 2, &c);
+        f1[10] ^= 0xFF; // corrupt frame 1: A's head is gone
+
+        let mut stream = f1;
+        stream.extend_from_slice(&f2);
+        stream.extend_from_slice(&f3);
+        let addr = serve_bytes(vec![stream]).await;
+        let (push_tx, mut push_rx) = broadcast::channel(16);
+        let mut link = StreamLink::new(
+            Protocol::TmCcsdsSpp,
+            PipelineSpec::TmSpp {
+                apid_map: map,
+                frame_size: FRAME,
+            },
+            Carrier::Tcp,
+            Vec::new(),
+            push_tx,
+        );
+        link.connect(&addr.ip().to_string(), addr.port())
+            .await
+            .unwrap();
+        let first = recv_one(&mut push_rx).await;
+        assert_eq!(first.payload, vec![1, 2, 3, 4], "B is the first packet out");
+        let second = recv_one(&mut push_rx).await;
+        assert_eq!(
+            second.payload,
+            vec![9, 9],
+            "C follows; nothing bogus between"
+        );
+        link.disconnect();
+    }
+
+    /// @test Connect is idempotent on a listening link: a second call
+    /// while the listener is alive leaves it bound (no rebind window
+    /// that would refuse a dialing peer) and a peer still attaches.
+    #[tokio::test]
+    async fn tcp_listen_connect_is_idempotent() {
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let (push_tx, mut push_rx) = broadcast::channel(16);
+        let mut link = StreamLink::new(
+            Protocol::CcsdsSpp,
+            PipelineSpec::Spp {
+                apid_map: HashMap::from([(0x0D0u16, 0x00D000u32)]),
+            },
+            Carrier::TcpListen { listen_port: port },
+            Vec::new(),
+            push_tx,
+        );
+        link.connect("0.0.0.0", 0).await.unwrap();
+        assert!(link.is_listening());
+        assert!(!link.is_connected());
+        link.connect("0.0.0.0", 0).await.unwrap();
+        assert!(link.is_listening(), "second connect keeps the listener");
+
+        let mut peer = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        peer.write_all(&ccsds_spp::pack(0x0D0, 1, &[7, 7]))
+            .await
+            .unwrap();
+        let pkt = recv_one(&mut push_rx).await;
+        assert_eq!(pkt.payload, vec![7, 7]);
+        assert!(link.is_connected() && link.is_listening());
+        link.disconnect();
+        assert!(!link.is_listening(), "disconnect stops the listener");
     }
 
     /// @test Without a configured raw_uid, raw frames drop instead of

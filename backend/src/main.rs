@@ -466,7 +466,10 @@ async fn do_connect_target(state: &AppState, id: &str) -> Result<bool, (StatusCo
 
     {
         let mut cli = client.lock().await;
-        if cli.is_connected() {
+        // Already serving: a live session, or a listener waiting for
+        // one. Either way there is nothing to bring up and no router
+        // to replace.
+        if cli.is_connected() || cli.is_listening() {
             return Ok(false);
         }
         cli.connect(&host, port)
