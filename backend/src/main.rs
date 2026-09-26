@@ -3866,6 +3866,10 @@ async fn main() {
             eprintln!("FATAL: target '{}': {}", tc.name, e);
             std::process::exit(1);
         }
+        if let Some(e) = config::invalid_tm_frame_size(tc) {
+            eprintln!("FATAL: target '{}': {}", tc.name, e);
+            std::process::exit(1);
+        }
         // Connect-time init sequence: stream links only, for now.
         // The APROTO family's connect-time behavior belongs to its
         // command machine (catalog-named commands with real ACK

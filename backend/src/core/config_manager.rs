@@ -247,6 +247,8 @@ impl StructDictionary {
 
             match serde_json::from_str::<ComponentDict>(&content) {
                 Ok(dict) => {
+                    check_byte_order(dict.byte_order.as_deref())
+                        .map_err(|e| format!("{}: {}", path.display(), e))?;
                     tracing::info!(
                         "Loaded struct dict: {} ({} structs)",
                         dict.component,
@@ -832,12 +834,28 @@ impl RecordTable {
             "record_apid '{}' is not a number",
             self.record_apid
         ))?;
+        for a in &self.skip_apids {
+            parse_num_u32(a).ok_or(format!("skip_apids entry '{}' is not a number", a))?;
+        }
+        check_byte_order(self.byte_order.as_deref())?;
         Ok(())
     }
 
     /// True when this table's record values are big-endian.
     pub fn big_endian(&self) -> bool {
         matches!(self.byte_order.as_deref(), Some("be"))
+    }
+}
+
+/// A dictionary's byte_order stamp is evidence about the wire, so
+/// only the two spellings the generators write are accepted: an
+/// unrecognized value would silently decode as little-endian, which
+/// is exactly the plausible-garbage failure the stamp exists to
+/// prevent.
+pub fn check_byte_order(stamp: Option<&str>) -> Result<(), String> {
+    match stamp {
+        None | Some("le") | Some("be") => Ok(()),
+        Some(other) => Err(format!("byte_order '{}' is not \"le\" or \"be\"", other)),
     }
 }
 
@@ -1151,5 +1169,39 @@ mod nested_tests {
         let out = expanded_fields(&dict, &two_level.fields, 0);
         let names: Vec<(&str, usize)> = out.iter().map(|x| (x.name.as_str(), x.offset)).collect();
         assert_eq!(names, vec![("d.x", 0), ("d.pair.a", 2), ("d.pair.b", 4)]);
+    }
+
+    /// @test A byte_order stamp is evidence, so only the two
+    /// generator spellings load: a record table or struct dictionary
+    /// with any other value is refused by name instead of decoding
+    /// little-endian by default, and a skip_apids entry that is not a
+    /// number is refused too.
+    #[test]
+    fn byte_order_and_skip_apids_are_validated() {
+        assert!(check_byte_order(None).is_ok());
+        assert!(check_byte_order(Some("le")).is_ok());
+        assert!(check_byte_order(Some("be")).is_ok());
+        for bad in ["BE", "big", "big-endian", ""] {
+            let e = check_byte_order(Some(bad)).unwrap_err();
+            assert!(e.contains(&format!("'{bad}'")), "{e}");
+        }
+        let table = |byte_order: &str, skip: &str| {
+            serde_json::from_str::<RecordTable>(&format!(
+                r#"{{"record_apid": "0x001", "id_offset": 2, "id_size": 4,
+                     "header_size": 17, "byte_order": "{byte_order}",
+                     "skip_apids": ["{skip}"],
+                     "records": [{{"id": 1, "channel": "a.b", "type": "uint", "size": 4}}]}}"#
+            ))
+            .unwrap()
+        };
+        assert!(table("be", "0x002").validate().is_ok());
+        assert!(table("big", "0x002")
+            .validate()
+            .unwrap_err()
+            .contains("byte_order 'big'"));
+        assert!(table("be", "events")
+            .validate()
+            .unwrap_err()
+            .contains("skip_apids entry 'events'"));
     }
 }

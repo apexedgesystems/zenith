@@ -370,6 +370,22 @@ pub fn duplicate_listen_port(targets: &[TargetSection]) -> Option<(u16, &str, &s
     None
 }
 
+/// A TM-framed target's frame length must hold at least a header,
+/// one minimal packet and the trailer, or the deframer could never
+/// emit anything -- a length that cannot hold one refuses boot like
+/// every other definition error instead of clamping silently.
+pub fn invalid_tm_frame_size(t: &TargetSection) -> Option<String> {
+    use crate::protocol::ccsds_tm::MIN_FRAME;
+    if !t.protocol.starts_with("tm+") || t.tm_frame_size >= MIN_FRAME {
+        return None;
+    }
+    Some(format!(
+        "tm_frame_size {} is below the {}-octet minimum (header + one idle \
+         packet + trailer)",
+        t.tm_frame_size, MIN_FRAME
+    ))
+}
+
 /* ----------------------------- Loading ----------------------------- */
 
 /// Parse a TOML config file from disk into a `ServerConfig`. Returns
@@ -411,6 +427,22 @@ mod tests {
     /// @test Two UDP targets on one listen port are named in the
     /// refusal; distinct ports, TCP targets, and portless entries
     /// (caught separately at carrier validation) all pass.
+    /// @test An undersized TM frame length is refused by name for the
+    /// TM stacks only; other protocols ignore the field.
+    #[test]
+    fn undersized_tm_frames_are_refused() {
+        let mut t = target("tm", "tcp-listen", Some(50050));
+        t.protocol = "tm+ccsds-spp".to_string();
+        t.tm_frame_size = 8;
+        let msg = invalid_tm_frame_size(&t).expect("8 octets cannot hold a frame");
+        assert!(msg.contains("tm_frame_size 8 "), "{msg}");
+        t.tm_frame_size = 1024;
+        assert!(invalid_tm_frame_size(&t).is_none());
+        t.protocol = "ccsds-spp".to_string();
+        t.tm_frame_size = 1;
+        assert!(invalid_tm_frame_size(&t).is_none(), "field is unused here");
+    }
+
     #[test]
     fn duplicate_listen_ports_are_refused_by_name() {
         let dup = [
