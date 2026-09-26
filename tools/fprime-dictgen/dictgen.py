@@ -34,6 +34,9 @@ RECORD_HEADER = 17
 DESCRIPTOR_OFFSET_OF_ID = 2
 ID_SIZE = 4
 TELEMETRY_APID = "0x001"
+# The dictionary format this transform was written and verified
+# against; a different version gets a warning, not silence.
+TESTED_SPEC_VERSION = "1.0.0"
 # Stock F-prime packet types deliberately not decoded (events, files,
 # packetized tlm, data products, idle, params, handshake, unknown).
 SKIP_APIDS = ["0x002", "0x003", "0x004", "0x005", "0x006", "0x007", "0x0FE", "0x0FF"]
@@ -57,6 +60,24 @@ def resolve_type(t: dict, typedefs: dict, depth: int = 0) -> dict | None:
     return None
 
 
+def describe_kind(t: dict, typedefs: dict) -> str:
+    """Why a channel type is not converted, by what it resolves to."""
+    kind = t.get("kind")
+    if kind == "string":
+        return "string: variable-length on the wire"
+    if kind == "qualifiedIdentifier":
+        td = typedefs.get(t.get("name"), {})
+        tk = td.get("kind", "unknown")
+        if tk == "struct":
+            return f"struct {t.get('name')}: aggregate values are not converted"
+        if tk == "array":
+            return f"array {t.get('name')}: aggregate values are not converted"
+        if tk == "alias":
+            return f"alias {t.get('name')}: resolves to a non-numeric type"
+        return f"{tk} {t.get('name')}: not a numeric type"
+    return f"{kind}: not a numeric type"
+
+
 def zenith_type(concrete: dict) -> tuple[str, int]:
     size = concrete["size"] // 8
     if concrete["kind"] == "float":
@@ -69,12 +90,21 @@ def zenith_type(concrete: dict) -> tuple[str, int]:
 def main() -> None:
     if len(sys.argv) != 3:
         sys.exit(__doc__)
-    spec = json.load(open(sys.argv[1]))
-    fdict = json.load(open(spec["dictionary"]))
+    spec_path = sys.argv[1]
+    spec = json.load(open(spec_path))
+    # The dictionary path is relative to the spec file, which lives
+    # with the deployment, not to wherever the generator is invoked.
+    dict_path = os.path.join(os.path.dirname(os.path.abspath(spec_path)), spec["dictionary"])
+    fdict = json.load(open(dict_path))
     out_dir = sys.argv[2]
     os.makedirs(out_dir, exist_ok=True)
 
     meta = fdict.get("metadata", {})
+    if meta.get("dictionarySpecVersion") != TESTED_SPEC_VERSION:
+        print(f"warning: dictionary spec {meta.get('dictionarySpecVersion')} is not "
+              f"the tested {TESTED_SPEC_VERSION}; check the record header shape "
+              f"against the framework's serialization before trusting the output",
+              file=sys.stderr)
     typedefs = {t.get("qualifiedName"): t for t in fdict.get("typeDefinitions", [])}
 
     records = []
@@ -83,7 +113,7 @@ def main() -> None:
     for ch in fdict["telemetryChannels"]:
         concrete = resolve_type(ch["type"], typedefs)
         if concrete is None:
-            skipped.append((ch["name"], ch["type"].get("kind", "?")))
+            skipped.append((ch["name"], describe_kind(ch["type"], typedefs)))
             continue
         ftype, fsize = zenith_type(concrete)
         entry = {"id": ch["id"], "channel": ch["name"],
@@ -131,8 +161,8 @@ def main() -> None:
         f.write("\n")
 
     print(f"{converted} channels converted, {len(skipped)} skipped:")
-    for name, kind in skipped:
-        print(f"  skipped {name} ({kind}: variable-length on the wire)")
+    for name, why in skipped:
+        print(f"  skipped {name} ({why})")
     print(f"framework {meta.get('frameworkVersion')}, "
           f"dictionary spec {meta.get('dictionarySpecVersion')}")
 
