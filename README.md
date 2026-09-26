@@ -239,7 +239,7 @@ host = "0.0.0.0"
 port = 8080
 
 [storage]
-path = "./data/zenith.db"
+path = "/var/lib/zenith/zenith.db"
 retention_hours = 24
 max_db_size_mb = 2048
 
