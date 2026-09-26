@@ -131,6 +131,38 @@ impl RecordSpec {
     }
 }
 
+/// The bytes of one deframed TM frame that the packet stage should
+/// see. A dropped frame counts as one unroutable unit and arms
+/// resync; the next verified frame then starts at its first packet
+/// header (the orphaned head of a straddling packet is discarded
+/// with the extractor's residue), or is skipped whole when no packet
+/// starts in it.
+fn tm_field<'a>(
+    frame: &'a ccsds_tm::Frame,
+    extractor: &mut ccsds_spp::Extractor,
+    resync: &mut bool,
+    unroutable: &mut usize,
+) -> Option<&'a [u8]> {
+    match frame {
+        ccsds_tm::Frame::Dropped => {
+            *unroutable += 1;
+            *resync = true;
+            None
+        }
+        ccsds_tm::Frame::Verified {
+            field,
+            first_header,
+        } => {
+            if !*resync {
+                return Some(field);
+            }
+            *resync = false;
+            extractor.reset();
+            first_header.map(|p| &field[p..])
+        }
+    }
+}
+
 /// A live pipeline: stream bytes -> addressed packets.
 enum PacketPipeline {
     Spp {
@@ -145,11 +177,15 @@ enum PacketPipeline {
         deframer: ccsds_tm::Deframer,
         extractor: ccsds_spp::Extractor,
         apid_map: HashMap<u16, u32>,
+        /// A frame was dropped: the packet stage resumes at the next
+        /// frame's first packet header, not at its first byte.
+        resync: bool,
     },
     TmSppRecords {
         deframer: ccsds_tm::Deframer,
         extractor: ccsds_spp::Extractor,
         records: RecordSpec,
+        resync: bool,
     },
     SlipRaw {
         slip: slip::Decoder,
@@ -175,6 +211,7 @@ impl PacketPipeline {
                 deframer: ccsds_tm::Deframer::new(*frame_size),
                 extractor: ccsds_spp::Extractor::new(),
                 apid_map: apid_map.clone(),
+                resync: false,
             },
             PipelineSpec::TmSppRecords {
                 frame_size,
@@ -183,6 +220,7 @@ impl PacketPipeline {
                 deframer: ccsds_tm::Deframer::new(*frame_size),
                 extractor: ccsds_spp::Extractor::new(),
                 records: records.clone(),
+                resync: false,
             },
             PipelineSpec::SlipRaw { uid } => PacketPipeline::SlipRaw {
                 slip: slip::Decoder::new(),
@@ -240,11 +278,13 @@ impl PacketPipeline {
                 deframer,
                 extractor,
                 apid_map,
+                resync,
             } => {
-                let (fields, bad_frames) = deframer.feed(bytes);
-                unroutable += bad_frames;
-                for field in fields {
-                    for (hdr, payload) in extractor.feed(&field) {
+                for frame in &deframer.feed(bytes) {
+                    let Some(field) = tm_field(frame, extractor, resync, &mut unroutable) else {
+                        continue;
+                    };
+                    for (hdr, payload) in extractor.feed(field) {
                         if hdr.apid == ccsds_spp::IDLE_APID {
                             continue; // protocol fill, not data
                         }
@@ -262,11 +302,13 @@ impl PacketPipeline {
                 deframer,
                 extractor,
                 records,
+                resync,
             } => {
-                let (fields, bad_frames) = deframer.feed(bytes);
-                unroutable += bad_frames;
-                for field in fields {
-                    for (hdr, payload) in extractor.feed(&field) {
+                for frame in &deframer.feed(bytes) {
+                    let Some(field) = tm_field(frame, extractor, resync, &mut unroutable) else {
+                        continue;
+                    };
+                    for (hdr, payload) in extractor.feed(field) {
                         if hdr.apid == ccsds_spp::IDLE_APID
                             || records.skip_apids.contains(&hdr.apid)
                         {

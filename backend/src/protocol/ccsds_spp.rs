@@ -95,6 +95,13 @@ impl Extractor {
         Self::default()
     }
 
+    /// Forget any partial packet: the bytes that would have completed
+    /// it are known to be gone (a dropped frame upstream), so the
+    /// residue can only mislead the next parse.
+    pub fn reset(&mut self) {
+        self.buf.clear();
+    }
+
     /// Feed stream bytes; returns every complete packet now available
     /// as (header, data field bytes).
     ///

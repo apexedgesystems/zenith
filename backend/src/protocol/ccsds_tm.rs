@@ -12,7 +12,15 @@
 //! No sync marker: framing rides the stream's own reliability
 //! (TCP delivers bytes in order or not at all), so deframing is
 //! strict fixed-size chunking, and a CRC failure costs exactly that
-//! frame, never alignment.
+//! frame, never frame alignment. Packet alignment is the consumer's:
+//! a packet may straddle frames, so each verified frame carries its
+//! first-header pointer and a dropped frame is reported in sequence,
+//! letting the packet stage discard the orphaned head and resume at
+//! the next packet boundary.
+//!
+//! Frames are taken as header + data field + trailer: no secondary
+//! header and no operational control field. A build that enables
+//! either needs those lengths configured here first.
 
 /// Primary header length in octets.
 pub const HEADER_SIZE: usize = 6;
@@ -52,30 +60,52 @@ impl Deframer {
         }
     }
 
-    /// Feed stream bytes; returns each completed frame's verified
-    /// packet data field plus a count of CRC-failed frames (dropped
-    /// whole -- their packets never reach the stream).
-    pub fn feed(&mut self, data: &[u8]) -> (Vec<Vec<u8>>, usize) {
+    /// Feed stream bytes; returns each completed frame in order:
+    /// verified ones with their packet data field and first-header
+    /// pointer, CRC-failed ones as `Dropped` (whole -- their bytes
+    /// never reach the stream).
+    pub fn feed(&mut self, data: &[u8]) -> Vec<Frame> {
         self.buf.extend_from_slice(data);
-        let mut fields = Vec::new();
-        let mut bad = 0usize;
+        let mut frames = Vec::new();
         let mut pos = 0usize;
         while self.buf.len() - pos >= self.frame_size {
             let frame = &self.buf[pos..pos + self.frame_size];
             let stated =
                 u16::from_be_bytes([frame[self.frame_size - 2], frame[self.frame_size - 1]]);
             if crc16(&frame[..self.frame_size - TRAILER_SIZE]) == stated {
-                fields.push(frame[HEADER_SIZE..self.frame_size - TRAILER_SIZE].to_vec());
+                let field = &frame[HEADER_SIZE..self.frame_size - TRAILER_SIZE];
+                let fhp = (u16::from_be_bytes([frame[4], frame[5]]) & 0x07FF) as usize;
+                frames.push(Frame::Verified {
+                    field: field.to_vec(),
+                    // 0x7FF: no packet starts here; 0x7FE: idle only.
+                    // Anything past the field is malformed and treated
+                    // the same way.
+                    first_header: (fhp < field.len()).then_some(fhp),
+                });
             } else {
-                bad += 1;
+                frames.push(Frame::Dropped);
             }
             pos += self.frame_size;
         }
         if pos > 0 {
             self.buf.drain(..pos);
         }
-        (fields, bad)
+        frames
     }
+}
+
+/// One deframed transfer frame, in stream order.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Frame {
+    /// CRC verified: the packet data field and the offset within it
+    /// where the first packet header starts (None when no packet
+    /// starts in this frame).
+    Verified {
+        field: Vec<u8>,
+        first_header: Option<usize>,
+    },
+    /// CRC failed: the whole frame is gone.
+    Dropped,
 }
 
 /// Pack one frame for tests and future downlink emitters: header
@@ -83,7 +113,9 @@ impl Deframer {
 /// offset zero, standard-conformant idle-packet fill, CRC trailer.
 /// Content must leave at least 7 octets for the idle packet or
 /// exactly fill the field.
-#[allow(dead_code)]
+// The binary compiles this module directly and has no emitter yet;
+// tests are its only caller for now.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn pack_frame(frame_size: usize, scid: u16, frame_count: u8, content: &[u8]) -> Vec<u8> {
     let field_len = frame_size - HEADER_SIZE - TRAILER_SIZE;
     assert!(content.len() == field_len || content.len() + 7 <= field_len);
@@ -135,9 +167,18 @@ mod tests {
         let mut d = Deframer::new(64);
         let mut fields = Vec::new();
         for byte in &frame {
-            let (f, bad) = d.feed(&[*byte]);
-            assert_eq!(bad, 0);
-            fields.extend(f);
+            for f in d.feed(&[*byte]) {
+                match f {
+                    Frame::Verified {
+                        field,
+                        first_header,
+                    } => {
+                        assert_eq!(first_header, Some(0), "content packed at offset zero");
+                        fields.push(field);
+                    }
+                    Frame::Dropped => panic!("clean frame dropped"),
+                }
+            }
         }
         assert_eq!(fields.len(), 1);
         assert_eq!(fields[0].len(), 64 - HEADER_SIZE - TRAILER_SIZE);
@@ -173,13 +214,45 @@ mod tests {
         let mut stream = a.clone();
         stream.extend_from_slice(&b);
         stream.extend_from_slice(&c);
-        let (fields, bad) = d.feed(&stream);
-        assert_eq!(bad, 1);
-        assert_eq!(fields.len(), 2);
-        assert_eq!(
-            &fields[0][..a.len().min(7)],
-            &a[HEADER_SIZE..HEADER_SIZE + 7]
-        );
-        assert_eq!(&fields[1][..7], &c[HEADER_SIZE..HEADER_SIZE + 7]);
+        let frames = d.feed(&stream);
+        assert_eq!(frames.len(), 3, "every frame is reported, in order");
+        assert_eq!(frames[1], Frame::Dropped);
+        let field = |i: usize| match &frames[i] {
+            Frame::Verified { field, .. } => field.clone(),
+            Frame::Dropped => panic!("frame {i} should verify"),
+        };
+        assert_eq!(&field(0)[..7], &a[HEADER_SIZE..HEADER_SIZE + 7]);
+        assert_eq!(&field(2)[..7], &c[HEADER_SIZE..HEADER_SIZE + 7]);
+    }
+
+    /// @test The first-header pointer comes out of the header as the
+    /// packet stage needs it: an offset inside the data field, or
+    /// None for the two reserved values (no packet starts here; idle
+    /// only) and for a pointer past the field.
+    #[test]
+    fn first_header_pointer_is_reported() {
+        let content = crate::protocol::ccsds_spp::pack(0x0D0, 1, &[1]);
+        for (fhp, expect) in [
+            (0u16, Some(0usize)),
+            (5, Some(5)),
+            (0x7FF, None),
+            (0x7FE, None),
+            (64, None),
+        ] {
+            let mut frame = pack_frame(64, 0x044, 0, &content);
+            let status = 0x1800u16 | (fhp & 0x07FF);
+            frame[4..6].copy_from_slice(&status.to_be_bytes());
+            let crc = crc16(&frame[..64 - TRAILER_SIZE]);
+            frame[62..64].copy_from_slice(&crc.to_be_bytes());
+            let frames = Deframer::new(64).feed(&frame);
+            assert_eq!(
+                frames,
+                vec![Frame::Verified {
+                    field: frame[HEADER_SIZE..64 - TRAILER_SIZE].to_vec(),
+                    first_header: expect,
+                }],
+                "fhp {fhp:#x}"
+            );
+        }
     }
 }
