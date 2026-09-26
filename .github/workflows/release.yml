@@ -1,19 +1,32 @@
 # ==============================================================================
 # Release -- publish the container image and the GitHub release on a
-# version tag
+# version tag; rehearse the same steps on manual dispatch
 #
-# A tag vX.Y.Z on main runs, in order:
-#   1. version check: the tag must equal the workspace Cargo.toml
-#      version and the frontend package version (tools/version-check.sh)
-#   2. one native image build per architecture (amd64, arm64), each
-#      pushed by digest
-#   3. one manifest list tagged vX.Y.Z and latest
-#   4. the GitHub release, with the CHANGELOG section for the version
-#      as its body and the pull-not-build compose file attached
+# Jobs, in order:
+#   check    -- derive the version from the ref (v0.0.0-ci on dispatch),
+#               and on a tag prove it against the workspace Cargo.toml and
+#               the frontend package (tools/version-check.sh) and prove
+#               CHANGELOG.md has its section (tools/changelog-section.sh),
+#               before any build spends a minute
+#   build    -- one native image build per architecture (amd64, arm64),
+#               with SBOM and provenance attestations; pushed by digest on
+#               a tag, built and discarded on a rehearsal
+#   publish  -- tag only: one manifest list tagged vX.Y.Z (and latest for a
+#               full release; a pre-release such as v0.0.2-rc1 leaves latest
+#               alone), then the GitHub release with the CHANGELOG section as
+#               its body and the compose file, the image manifest and
+#               SHA256SUMS attached
+#
+# Triggers:
+#   tag v*            -- full release: everything, then publish.
+#   workflow_dispatch -- everything except publish: a green rehearsal is
+#                        proof the next tag will publish.
+#
+# Runs are serialized: releases land one at a time.
 #
 # Produces:
 #   ghcr.io/<owner>/zenith:vX.Y.Z
-#   ghcr.io/<owner>/zenith:latest
+#   ghcr.io/<owner>/zenith:latest   (full releases only)
 # ==============================================================================
 name: Release
 
@@ -21,10 +34,15 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
   packages: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
@@ -32,19 +50,45 @@ env:
 
 jobs:
   check:
-    name: Version check
+    name: Version and changelog
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       version: ${{ steps.v.outputs.version }}
+      prerelease: ${{ steps.v.outputs.prerelease }}
+      publish: ${{ steps.v.outputs.publish }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
-      - name: Tag agrees with the declared version
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Derive the version
         id: v
         run: |
-          tools/version-check.sh "${GITHUB_REF_NAME}"
-          echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
+            version="${GITHUB_REF_NAME}"      # v0.0.2, or v0.0.2-rc1 for a pre-release
+            publish=true
+          else
+            version="v0.0.0-ci"               # rehearsal: same steps, throwaway version
+            publish=false
+          fi
+          case "$version" in
+            *-*) prerelease=true ;;
+            *)   prerelease=false ;;
+          esac
+          {
+            echo "version=$version"
+            echo "prerelease=$prerelease"
+            echo "publish=$publish"
+          } >> "$GITHUB_OUTPUT"
+          echo "version $version (prerelease=$prerelease publish=$publish)"
+
+      - name: Tag agrees with the declared version
+        if: steps.v.outputs.publish == 'true'
+        run: tools/version-check.sh "${{ steps.v.outputs.version }}"
+
+      - name: CHANGELOG has this version's section
+        if: steps.v.outputs.publish == 'true'
+        run: tools/changelog-section.sh "${{ steps.v.outputs.version }}" > /dev/null
 
   build:
     name: Build ${{ matrix.arch }}
@@ -60,36 +104,41 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Login to GHCR
-        uses: docker/login-action@v4
+        if: needs.check.outputs.publish == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
-      - name: Build and push by digest
+      - name: Build (and push by digest on a tag)
         id: build
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: .
           platforms: linux/${{ matrix.arch }}
-          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          provenance: mode=max
+          sbom: true
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ needs.check.outputs.publish }}
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
 
       - name: Record the digest
+        if: needs.check.outputs.publish == 'true'
         run: |
           mkdir -p /tmp/digests
           digest="${{ steps.build.outputs.digest }}"
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload the digest
-        uses: actions/upload-artifact@v6
+        if: needs.check.outputs.publish == 'true'
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
           name: digest-${{ matrix.arch }}
           path: /tmp/digests/*
@@ -99,52 +148,63 @@ jobs:
   publish:
     name: Manifest and release
     needs: [check, build]
+    if: needs.check.outputs.publish == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Download the digests
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           path: /tmp/digests
           pattern: digest-*
           merge-multiple: true
 
       - name: Login to GHCR
-        uses: docker/login-action@v4
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Create the manifest list
         working-directory: /tmp/digests
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
+          PRERELEASE: ${{ needs.check.outputs.prerelease }}
         run: |
           image="${REGISTRY}/${IMAGE_NAME}"
           refs=""
           for digest in *; do
             refs="${refs} ${image}@sha256:${digest}"
           done
-          # shellcheck disable=SC2086 # one reference per digest, split on purpose
-          docker buildx imagetools create \
-            -t "${image}:${{ needs.check.outputs.version }}" \
-            -t "${image}:latest" \
-            ${refs}
-          docker buildx imagetools inspect "${image}:${{ needs.check.outputs.version }}"
+          tags="-t ${image}:${VERSION}"
+          if [ "${PRERELEASE}" = "false" ]; then
+            tags="${tags} -t ${image}:latest"
+          fi
+          # shellcheck disable=SC2086 # one flag per tag, one reference per digest, split on purpose
+          docker buildx imagetools create ${tags} ${refs}
+          docker buildx imagetools inspect "${image}:${VERSION}" | tee "${GITHUB_WORKSPACE}/image-manifest.txt"
 
-      - name: Extract the changelog section
+      - name: Assemble the release assets
+        env:
+          VERSION: ${{ needs.check.outputs.version }}
         run: |
-          tools/changelog-section.sh "${{ needs.check.outputs.version }}" > /tmp/release-notes.md
-          cat /tmp/release-notes.md
+          mkdir -p release
+          cp deploy/docker-compose.yml image-manifest.txt release/
+          tools/changelog-section.sh "${VERSION}" > release-notes.md
+          (cd release && sha256sum -- * > SHA256SUMS)
+          cat release/SHA256SUMS
 
       - name: Create the GitHub release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3
         with:
           name: ${{ needs.check.outputs.version }}
-          body_path: /tmp/release-notes.md
-          files: deploy/docker-compose.yml
+          prerelease: ${{ needs.check.outputs.prerelease == 'true' }}
+          body_path: release-notes.md
+          files: release/*

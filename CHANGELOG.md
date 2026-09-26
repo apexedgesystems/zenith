@@ -4,8 +4,10 @@ Notable changes to zenith, newest first. Format after
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
 follow semantic versioning. The declared version lives in the
 workspace Cargo.toml, the frontend package matches it, and a release
-tag must equal both (tools/version-check.sh). The history starts at
-the 2026-08 architecture review; work before that is the v0.0.1 tag.
+tag must equal both (tools/version-check.sh). While the major
+version is 0, a minor release may contain breaking changes; each is
+called out in its entry. The history starts at the 2026-08
+architecture review; work before that is the v0.0.1 tag.
 
 ## Unreleased
 

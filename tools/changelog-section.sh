@@ -7,6 +7,7 @@
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 tag=${1:?usage: changelog-section.sh vX.Y.Z}
+tag=${tag%%-*}   # a pre-release (vX.Y.Z-rc1) ships the notes of its base version
 out=$(awk -v tag="$tag" '
   /^## / { if (found) exit; if ($2 == tag) { found = 1; next } }
   found { print }

@@ -541,12 +541,19 @@ section.
 To cut a release: bump the two version fields, retitle the
 changelog section, merge, then tag `vX.Y.Z` on main and push the
 tag. The release workflow checks the tag against the declared
-version, builds the image natively for amd64 and arm64, publishes
-the multi-arch manifest as `ghcr.io/apexedgesystems/zenith:vX.Y.Z`
-and `:latest`, and creates the GitHub release with that changelog
-section as its body and the pull-not-build compose file attached.
-A tag whose version has no changelog section fails before anything
-is published.
+version and the changelog before any build starts, builds the image
+natively for amd64 and arm64 with SBOM and provenance attestations,
+publishes the multi-arch manifest as
+`ghcr.io/apexedgesystems/zenith:vX.Y.Z` and `:latest`, and creates
+the GitHub release with that changelog section as its body and the
+compose file, the image manifest and SHA256SUMS attached. A
+pre-release tag (`vX.Y.Z-rc1`) publishes under its own tag, marks
+the release as a pre-release, and leaves `:latest` alone.
+
+Rehearse before tagging: `gh workflow run release.yml --ref <branch>`
+runs every step except publishing, with a throwaway version, so a
+green rehearsal is proof the next tag will publish. Workflow actions
+are pinned by commit; dependabot proposes their updates.
 
 ## License
 
