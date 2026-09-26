@@ -123,17 +123,17 @@ ELF ident) decode correctly with zero configuration.
 
 ## Stack
 
-| Layer         | Technology                                                                               |
-| ------------- | ---------------------------------------------------------------------------------------- |
-| Backend       | Rust (axum, tokio, rusqlite)                                                             |
-| Frontend      | React 19, TypeScript strict, Canvas API                                                  |
-| Storage       | SQLite (WAL mode) with read connection pool (1 writer + N readers)                       |
-| Protocol      | APROTO over TCP + SLIP framing                                                           |
-| Tests         | `cargo test --lib` (39+ unit tests) + Vitest with React Testing Library (35+ unit tests) |
-| Benches       | criterion + pprof flamegraphs                                                            |
-| Auth          | JWT bearer middleware (config-disabled by default)                                       |
-| Rate limiting | Per-IP token bucket on POST endpoints (when auth is on)                                  |
-| Deploy        | Docker (multi-stage Rust + Node -> Debian slim)                                          |
+| Layer         | Technology                                                                              |
+| ------------- | --------------------------------------------------------------------------------------- |
+| Backend       | Rust (axum, tokio, rusqlite)                                                            |
+| Frontend      | React 19, TypeScript strict, Canvas API                                                 |
+| Storage       | SQLite (WAL mode) with read connection pool (1 writer + N readers)                      |
+| Protocol      | APROTO over TCP + SLIP framing                                                          |
+| Tests         | `cargo test --lib` (128 unit tests) + Vitest with React Testing Library (56 unit tests) |
+| Benches       | criterion + pprof flamegraphs                                                           |
+| Auth          | JWT bearer middleware (config-disabled by default)                                      |
+| Rate limiting | Per-IP token bucket on POST endpoints (when auth is on)                                 |
+| Deploy        | Docker (multi-stage Rust + Node -> Debian slim)                                         |
 
 ## Build Artifacts (from Apex release)
 
@@ -229,8 +229,8 @@ make run
 | `make stop`          | Stop the running container                                                                     |
 | `make dev`           | Build + run in foreground (logs to stdout)                                                     |
 | `make test`          | Run **both** backend and frontend test suites                                                  |
-| `make test-backend`  | Backend only: `cargo test --lib` (currently 42 unit tests)                                     |
-| `make test-frontend` | Frontend only: `vitest run` (currently 35 unit tests)                                          |
+| `make test-backend`  | Backend only: `cargo test --lib` (currently 128 unit tests)                                    |
+| `make test-frontend` | Frontend only: `vitest run` (currently 56 unit tests)                                          |
 | `make bench`         | Run criterion benches (`protocol`, `storage`, `decoder`)                                       |
 | `make format`        | Run rustfmt across the backend                                                                 |
 | `make lint`          | Run clippy with `-D warnings`                                                                  |
