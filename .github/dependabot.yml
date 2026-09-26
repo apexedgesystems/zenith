@@ -44,20 +44,19 @@ updates:
       - dependency-name: typescript
         update-types: ["version-update:semver-major"]
     groups:
-      # Packages that must move together move together, majors
-      # included: a solo major of one half is unresolvable against
-      # the other half's peer range, and dependabot never
-      # cross-solves peers between its own PRs (four such PRs died
-      # that way in 2026-09). Family groups are matched first.
+      # Packages whose peer ranges bind them to each other move
+      # together, majors included: a solo major of one half cannot
+      # resolve against the other half, and dependabot does not
+      # cross-solve peers between separate PRs. Family groups are
+      # matched first.
       vite:
         patterns: ["vite", "@vitejs/*"]
       vitest:
         patterns: ["vitest", "@vitest/*"]
       # Everything else minor+patch only, for the same reason as
-      # cargo: the first grouped npm PR died on an unsolvable peer
-      # conflict (typescript 7 vs typescript-eslint <6.1.0) that
-      # took 18 innocent updates down with it. Remaining majors
-      # arrive solo and prove themselves against CI alone.
+      # cargo: one unresolvable peer conflict must not hold a whole
+      # group of routine updates. Remaining majors arrive solo and
+      # prove themselves against CI alone.
       npm:
         patterns: ["*"]
         update-types: ["minor", "patch"]
