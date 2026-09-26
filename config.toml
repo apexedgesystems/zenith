@@ -156,7 +156,7 @@ health = [
 # the connected state tracks the live session. Stock wire is CCSDS TM
 # frames wrapping space packets whose telemetry APID carries
 # id-addressed channel records -- all described by the generated
-# records.json and per-channel dictionaries.
+# records.json in the target directory.
 [[targets]]
 name = "F-prime Demo"
 host = "127.0.0.1"
@@ -166,8 +166,7 @@ carrier = "tcp-listen"
 listen_port = 50050
 tm_frame_size = 1024
 auto_connect = true
-telemetry_config = "/data/targets/fprime-demo/telemetry.json"
-records_config = "/data/targets/fprime-demo/records.json"
+dir = "/data/targets/fprime-demo"
 
 # Target: Rover MCU demo (apex horizon rover; bundle from
 # `make zenith-target APP=ApexRoverMcuDemo`). This instance runs no

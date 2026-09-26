@@ -370,8 +370,7 @@ protocol = "tm+ccsds-spp+records"  # CCSDS TM frames -> space
 carrier = "tcp-listen"         # The deployment dials IN to zenith
 listen_port = 50050
 tm_frame_size = 1024           # Mission constant of the build
-records_config = "/data/targets/fprime-demo/records.json"
-telemetry_config = "/data/targets/fprime-demo/telemetry.json"
+dir = "/data/targets/fprime-demo"  # records.json + telemetry.json inside
 ```
 
 A target's definition fully describes its transport: the protocol
