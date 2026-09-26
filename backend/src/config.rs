@@ -192,6 +192,11 @@ pub struct TargetSection {
     /// never hear it.
     #[serde(default)]
     pub listen_port: Option<u16>,
+    /// Retired spelling of `listen_port`. Accepted only so a config
+    /// that still uses it refuses boot by name instead of silently
+    /// losing its port.
+    #[serde(default)]
+    pub udp_listen_port: Option<u16>,
     /// tm+ccsds-spp targets: the fixed TM transfer frame length in
     /// octets (a mission constant of the producing build).
     #[serde(default = "default_tm_frame_size")]
@@ -370,6 +375,15 @@ pub fn duplicate_listen_port(targets: &[TargetSection]) -> Option<(u16, &str, &s
     None
 }
 
+/// A retired key must not be ignored: serde drops unknown keys, so
+/// the retired spelling is still parsed and refused with the new
+/// name, which is the only way the operator learns why last week's
+/// config stopped booting.
+pub fn retired_key(t: &TargetSection) -> Option<String> {
+    t.udp_listen_port
+        .map(|p| format!("udp_listen_port = {p} was renamed: use listen_port = {p}"))
+}
+
 /// A TM-framed target's frame length must hold at least a header,
 /// one minimal packet and the trailer, or the deframer could never
 /// emit anything -- a length that cannot hold one refuses boot like
@@ -413,6 +427,7 @@ mod tests {
             raw_uid: None,
             carrier: carrier.to_string(),
             listen_port: listen,
+            udp_listen_port: None,
             tm_frame_size: default_tm_frame_size(),
             records_config: None,
             connect_init: None,
@@ -427,6 +442,18 @@ mod tests {
     /// @test Two UDP targets on one listen port are named in the
     /// refusal; distinct ports, TCP targets, and portless entries
     /// (caught separately at carrier validation) all pass.
+    /// @test The retired udp_listen_port key refuses boot naming the
+    /// new key and carrying the value over, instead of being dropped.
+    #[test]
+    fn retired_listen_port_key_is_refused_by_name() {
+        let mut t = target("old", "udp", None);
+        t.udp_listen_port = Some(2234);
+        let msg = retired_key(&t).expect("retired key must refuse");
+        assert!(msg.contains("listen_port = 2234"), "{msg}");
+        t.udp_listen_port = None;
+        assert!(retired_key(&t).is_none());
+    }
+
     /// @test An undersized TM frame length is refused by name for the
     /// TM stacks only; other protocols ignore the field.
     #[test]

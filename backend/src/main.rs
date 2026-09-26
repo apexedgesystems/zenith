@@ -2771,6 +2771,7 @@ async fn add_target(
         raw_uid: None,
         carrier: "tcp".to_string(),
         listen_port: None,
+        udp_listen_port: None,
         tm_frame_size: 1024,
         records_config: None,
         connect_init: None,
@@ -3915,6 +3916,10 @@ async fn main() {
             std::process::exit(1);
         }
         if let Some(e) = config::invalid_tm_frame_size(tc) {
+            eprintln!("FATAL: target '{}': {}", tc.name, e);
+            std::process::exit(1);
+        }
+        if let Some(e) = config::retired_key(tc) {
             eprintln!("FATAL: target '{}': {}", tc.name, e);
             std::process::exit(1);
         }
