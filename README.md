@@ -503,6 +503,51 @@ whether auth is on. View it at `GET /api/audit` or via the Audit Log
 page in the UI. Each entry has timestamp, actor, action, target,
 detail, status, and source IP.
 
+## Deploying Beyond a Trusted LAN
+
+The default posture is a trusted LAN: auth off, every endpoint open.
+For any host others can reach, the deployment enables auth and puts
+TLS in front:
+
+1. Generate a password hash: `docker run --rm -i
+ghcr.io/apexedgesystems/zenith:latest --hash-password` (reads the
+   password from stdin, prints an argon2 PHC string).
+2. In `config.toml`, set `[auth] enabled = true`, `username`, and
+   `password_hash`. Leave `secret` out of the file and pass it as
+   `ZENITH_AUTH_SECRET` (at least 16 characters, generated, never
+   reused); startup refuses the default secret while auth is on.
+3. Bind the front door to the loopback (`[server] host =
+"127.0.0.1"`) and terminate TLS in a reverse proxy on the same
+   host that forwards to it. The proxy must pass WebSocket upgrades
+   through for `/ws` (the UI's telemetry stream); tokens never ride
+   the query string, so request logs stay clean.
+4. If the UI is served from another origin, list it in `[server]
+cors_allowed_origins`; otherwise leave it empty (same-origin only).
+
+With auth on, every `/api/*` route except login and health requires a
+bearer token, the per-IP rate limit applies to POSTs, and every
+audited action carries the operator's name. The audit log is on
+regardless.
+
+## Releases
+
+The declared version lives in the workspace `Cargo.toml`;
+`frontend/package.json` must match it, and `make version-check`
+proves both (`make version-check TAG=vX.Y.Z` also proves a tag).
+[CHANGELOG.md](CHANGELOG.md) keeps an `Unreleased` section that each
+feature branch adds to; a release turns it into a `vX.Y.Z - date`
+section.
+
+To cut a release: bump the two version fields, retitle the
+changelog section, merge, then tag `vX.Y.Z` on main and push the
+tag. The release workflow checks the tag against the declared
+version, builds the image natively for amd64 and arm64, publishes
+the multi-arch manifest as `ghcr.io/apexedgesystems/zenith:vX.Y.Z`
+and `:latest`, and creates the GitHub release with that changelog
+section as its body and the pull-not-build compose file attached.
+A tag whose version has no changelog section fails before anything
+is published.
+
 ## License
 
 MIT
