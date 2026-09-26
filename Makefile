@@ -76,7 +76,7 @@ test-backend:
 ## Run frontend unit tests (Vitest)
 test-frontend:
 	$(COMPOSE) run --rm -T dev bash -c \
-		'cd frontend && npm ci --silent && npm run test'
+		'cd frontend && npm ci && npm run test'
 
 ## Run criterion benchmarks
 bench:
