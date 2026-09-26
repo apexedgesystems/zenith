@@ -100,7 +100,7 @@ ELF ident) decode correctly with zero configuration.
 
 | Page              | Purpose                                                                                                                                                                                                                                                                                                                                                 |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Dashboard**     | Per-target health cards auto-discovered from struct dicts. Executive summary banner. Component registry with reachability dots. Connect / disconnect / add target.                                                                                                                                                                                      |
+| **Dashboard**     | Per-target health cards auto-discovered from struct dicts. Executive summary banner. Component registry with status dots (probed by command on apex targets; "telemetry heard in the last 30 s" on telemetry-only links). Connect / disconnect / add target.                                                                                            |
 | **Telemetry**     | Multi-signal strip charts with hover crosshair, per-plot time windows, threshold lines, drag-to-reorder, layout presets from `telemetry.json`, user-saved layouts in DB, pause/resume, 2-column grid, PNG/CSV export, historical data backfill. Tiered (downsampled) history renders as min/max envelope bands with mean [min..max] crosshair readouts. |
 | **Operations**    | System controls: Sleep/Wake, Pause/Resume, Set Verbosity, Restart Executive (with auto-reconnect). Per-component Lock/Unlock with visual lock state. Library hot-swap (lock + upload .so + reload + auto-unlock). In-page audit feed of issued commands.                                                                                                |
 | **Command**       | Generic APROTO command console: pick a component from the catalog, fill typed fields, send. Quick command presets. Response display with "Interpret as..." dropdown that decodes the raw bytes against any per-target struct of matching size.                                                                                                          |
@@ -112,7 +112,9 @@ ELF ident) decode correctly with zero configuration.
 
 ## Sidebar Features
 
-- Live target list with connection state dots
+- Live target list with connection state dots (green connected; amber
+  listening, for a tcp-listen target waiting for its deployment to
+  dial in; grey down)
 - **Per-target storage strip** -- shows samples + bytes per target
 - **Right-click target menu**: Connect / Disconnect, Copy address,
   **Auto-reconnect toggle** (persisted across browser sessions),
