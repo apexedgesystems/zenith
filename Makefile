@@ -32,7 +32,7 @@ COMPOSE := docker compose
 ## tagged as `zenith-zenith` (compose's auto-name from project+service),
 ## which is the tag that `make run` / `docker compose up` actually pulls.
 ## Building with `docker build -t zenith` directly creates a separately
-## tagged image that compose ignores -- hit this on 2026-04-09.
+## tagged image that compose ignores.
 build:
 	$(COMPOSE) build zenith
 
@@ -76,7 +76,7 @@ test-backend:
 ## Run frontend unit tests (Vitest)
 test-frontend:
 	$(COMPOSE) run --rm -T dev bash -c \
-		'cd frontend && npm ci --silent && npm run test'
+		'cd frontend && npm ci && npm run test'
 
 ## Run criterion benchmarks
 bench:

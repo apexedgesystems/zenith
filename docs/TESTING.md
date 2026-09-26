@@ -11,10 +11,10 @@ Rust or Node toolchain required.
 # Run all tests (backend + frontend)
 make test
 
-# Backend only (42 unit tests, Rust)
+# Backend only (128 unit tests, Rust)
 make test-backend
 
-# Frontend only (35 unit tests, Vitest + React Testing Library)
+# Frontend only (56 unit tests, Vitest + React Testing Library)
 make test-frontend
 
 # Lint (clippy with -D warnings)
@@ -41,7 +41,7 @@ cargo test --lib -- --nocapture           # Show stdout for passing tests
 
 # Frontend
 cd frontend
-npm ci --silent
+npm ci
 npm run test                              # All tests
 npx vitest run src/utils/targets.test.ts  # Single file
 npx vitest run -t "encodes hex"           # Pattern match

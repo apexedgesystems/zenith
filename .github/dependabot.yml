@@ -37,11 +37,26 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+    # TypeScript majors wait for typescript-eslint: its peer range
+    # excludes typescript 7, so a solo bump can never install. Delete
+    # this entry when typescript-eslint declares support.
+    ignore:
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
     groups:
-      # Same minor+patch scoping as cargo, and for the same reason:
-      # the first grouped npm PR died on an unsolvable peer conflict
-      # (typescript 7 vs typescript-eslint <6.1.0) that took 18
-      # innocent updates down with it.
+      # Packages whose peer ranges bind them to each other move
+      # together, majors included: a solo major of one half cannot
+      # resolve against the other half, and dependabot does not
+      # cross-solve peers between separate PRs. Family groups are
+      # matched first.
+      vite:
+        patterns: ["vite", "@vitejs/*"]
+      vitest:
+        patterns: ["vitest", "@vitest/*"]
+      # Everything else minor+patch only, for the same reason as
+      # cargo: one unresolvable peer conflict must not hold a whole
+      # group of routine updates. Remaining majors arrive solo and
+      # prove themselves against CI alone.
       npm:
         patterns: ["*"]
         update-types: ["minor", "patch"]
