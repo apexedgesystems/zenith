@@ -159,6 +159,8 @@ impl TelemetryDecoder {
                     .filter(|f| {
                         f.field_type != "array"
                             && f.field_type != "string"
+                            && f.field_type != "struct"
+                            && f.field_type != "nested"
                             && !f.name.starts_with("pad")
                             && !f.name.starts_with("reserved")
                             && f.size != 0
@@ -325,6 +327,13 @@ impl TelemetryDecoder {
 /// per-dictionary evidence, not a global.
 fn decode_numeric(data: &[u8], field: &FieldDef, big_endian: bool) -> Option<f64> {
     let bytes = data.get(field.offset..field.offset + field.size)?;
+    // Nothing wider than 8 bytes is a numeric field (nested structs
+    // and other aggregates share the cache): not a value, not a
+    // failure -- the same answer the width match gives an unknown
+    // (type, size) pair.
+    if bytes.len() > 8 {
+        return None;
+    }
     // Normalize to little-endian once; single-byte types are
     // order-free.
     let mut buf = [0u8; 8];
@@ -695,6 +704,142 @@ mod tests {
             assert_eq!(get("Imu.count"), 258.0, "{label}");
             assert!((get("Imu.temp") - 1.5).abs() < 1e-6, "{label}");
             assert_eq!(get("Imu.bias"), -2.0, "{label}");
+        }
+    }
+
+    /// @test Aggregate fields wider than a machine word share the
+    /// struct with the scalars and are not values: an OUTPUT struct
+    /// with a 12-byte nested position decodes its scalar neighbours
+    /// and skips the aggregate instead of failing on it -- the shape
+    /// every generated vehicle-state dictionary has.
+    #[test]
+    fn aggregate_fields_are_skipped_not_fatal() {
+        let f = |name: &str, ftype: &str, off: usize, size: usize| FieldDef {
+            name: name.to_string(),
+            field_type: ftype.to_string(),
+            offset: off,
+            size,
+            value: serde_json::Value::Null,
+            element_type: None,
+            dims: None,
+            constraints: None,
+            struct_ref: None,
+        };
+        let dict = StructDictionary {
+            components: HashMap::from([(
+                "Plant".to_string(),
+                ComponentDict {
+                    component: "Plant".to_string(),
+                    byte_order: None,
+                    structs: HashMap::from([(
+                        "VehicleState".to_string(),
+                        StructDef {
+                            category: "OUTPUT".to_string(),
+                            size: 20,
+                            opcode: None,
+                            fields: vec![
+                                f("pos", "struct", 0, 12),
+                                f("mass", "float", 12, 4),
+                                f("mode", "uint", 16, 4),
+                            ],
+                            layout_hash: None,
+                            canonical_spec: None,
+                            packed: None,
+                        },
+                    )]),
+                    enums: HashMap::new(),
+                    capabilities: Vec::new(),
+                },
+            )]),
+        };
+        let decoder = TelemetryDecoder::new(&dict, &[(0x77, "Plant", Some("Plant"))]);
+        let mut payload = vec![0xAA; 12];
+        payload.extend_from_slice(&2.5f32.to_le_bytes());
+        payload.extend_from_slice(&7u32.to_le_bytes());
+        let samples = decoder.decode(
+            &target_id(),
+            1000,
+            &PushTelemetryPacket {
+                full_uid: 0x77,
+                payload,
+            },
+        );
+        let names: Vec<&str> = samples.iter().map(|s| &*s.channel).collect();
+        assert_eq!(names, vec!["Plant.mass", "Plant.mode"], "{names:?}");
+        assert!((samples[0].value - 2.5).abs() < 1e-6);
+        assert_eq!(samples[1].value, 7.0);
+    }
+
+    /// @test Eight-byte values decode in both orders: uint64, int64
+    /// and float64 from big-endian wire bytes under a "be" stamp, and
+    /// the unstamped default from little-endian bytes.
+    #[test]
+    fn eight_byte_values_decode_in_both_orders() {
+        let f = |name: &str, ftype: &str, off: usize| FieldDef {
+            name: name.to_string(),
+            field_type: ftype.to_string(),
+            offset: off,
+            size: 8,
+            value: serde_json::Value::Null,
+            element_type: None,
+            dims: None,
+            constraints: None,
+            struct_ref: None,
+        };
+        let comp = |byte_order: Option<&str>| ComponentDict {
+            component: "Wide".to_string(),
+            byte_order: byte_order.map(String::from),
+            structs: HashMap::from([(
+                "Output".to_string(),
+                StructDef {
+                    category: "OUTPUT".to_string(),
+                    size: 24,
+                    opcode: None,
+                    fields: vec![
+                        f("ticks", "uint", 0),
+                        f("delta", "int", 8),
+                        f("ratio", "float", 16),
+                    ],
+                    layout_hash: None,
+                    canonical_spec: None,
+                    packed: None,
+                },
+            )]),
+            enums: HashMap::new(),
+            capabilities: Vec::new(),
+        };
+        let (ticks, delta, ratio) = (1u64 << 40, -3i64, 0.125f64);
+        let mut be = Vec::new();
+        be.extend_from_slice(&ticks.to_be_bytes());
+        be.extend_from_slice(&delta.to_be_bytes());
+        be.extend_from_slice(&ratio.to_be_bytes());
+        let mut le = Vec::new();
+        le.extend_from_slice(&ticks.to_le_bytes());
+        le.extend_from_slice(&delta.to_le_bytes());
+        le.extend_from_slice(&ratio.to_le_bytes());
+        for (stamp, payload, label) in [(Some("be"), be, "be"), (None, le, "default le")] {
+            let dict = StructDictionary {
+                components: HashMap::from([("Wide".to_string(), comp(stamp))]),
+            };
+            let decoder = TelemetryDecoder::new(&dict, &[(0x43, "Wide", Some("Wide"))]);
+            let samples = decoder.decode(
+                &target_id(),
+                1000,
+                &PushTelemetryPacket {
+                    full_uid: 0x43,
+                    payload,
+                },
+            );
+            let get = |n: &str| {
+                samples
+                    .iter()
+                    .find(|s| &*s.channel == n)
+                    .unwrap_or_else(|| panic!("{label}: missing {n}"))
+                    .value
+            };
+            assert_eq!(get("Wide.ticks"), ticks as f64, "{label}");
+            assert_eq!(get("Wide.delta"), -3.0, "{label}");
+            assert_eq!(get("Wide.ratio"), 0.125, "{label}");
         }
     }
 
