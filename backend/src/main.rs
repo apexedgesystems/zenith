@@ -69,6 +69,9 @@ struct TargetState {
     /// read this instead of locking `client`, which a file transfer can
     /// hold for the duration of an upload.
     connected: Arc<std::sync::atomic::AtomicBool>,
+    /// Lock-free view of the link's listening flag: a listening
+    /// carrier bound and waiting for its peer (false for dial-out).
+    listening: Arc<std::sync::atomic::AtomicBool>,
     /// Pipeline counters shared by the router, DB writer, WebSocket
     /// subscribers, and the client's command accounting.
     metrics: Arc<TargetMetrics>,
@@ -142,6 +145,9 @@ struct TargetInfo {
     host: String,
     port: u16,
     connected: bool,
+    /// A listening carrier bound and waiting for the target to dial
+    /// in: up from the operator's side, no peer yet.
+    listening: bool,
     /// Command-surface capabilities the target's dictionaries declare
     /// (e.g. "readback"). Empty for older dictionary sets.
     capabilities: Vec<String>,
@@ -230,6 +236,7 @@ async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             id.clone(),
             serde_json::json!({
                 "connected": t.connected.load(std::sync::atomic::Ordering::Acquire),
+                "listening": t.listening.load(std::sync::atomic::Ordering::Acquire),
                 "last_sample_age_ms":
                     if last > 0 { Some(now_ms.saturating_sub(last)) } else { None },
                 "db_write_failures": t
@@ -512,12 +519,14 @@ async fn list_targets(State(state): State<AppState>) -> Json<serde_json::Value> 
         // Lock-free flag read: locking the client here would make the
         // 3s frontend poll stall behind any in-flight file transfer.
         let connected = t.connected.load(std::sync::atomic::Ordering::Acquire);
+        let listening = t.listening.load(std::sync::atomic::Ordering::Acquire);
         targets.push(TargetInfo {
             id: id.clone(),
             name: t.config.name.clone(),
             host: t.config.host.clone(),
             port: t.config.port,
             connected,
+            listening,
             capabilities: t.struct_dicts.capabilities(),
             health_nonzero_bad: t.config.health_nonzero_bad.clone(),
             protocol: t.config.protocol.clone(),
@@ -2781,12 +2790,14 @@ async fn add_target(
     let mut new_client = build_link(Protocol::AprotoSlip, push_tlm_tx.clone(), &tc, None, None);
     new_client.set_metrics(metrics.clone());
     let connected = new_client.connected_handle();
+    let listening = new_client.listening_handle();
     st.targets.insert(
         id.clone(),
         TargetState {
             config: tc,
             client: Arc::new(Mutex::new(new_client)),
             connected,
+            listening,
             metrics,
             push_tlm_tx,
             sample_tx,
@@ -3217,6 +3228,8 @@ async fn get_metrics(State(state): State<AppState>) -> Json<serde_json::Value> {
         let mut snap = t.metrics.snapshot(now_ms);
         snap["connected"] =
             serde_json::json!(t.connected.load(std::sync::atomic::Ordering::Acquire));
+        snap["listening"] =
+            serde_json::json!(t.listening.load(std::sync::atomic::Ordering::Acquire));
         targets.insert(id.clone(), snap);
     }
     Json(serde_json::json!({ "targets": targets }))
@@ -3955,12 +3968,14 @@ async fn main() {
         );
         new_client.set_metrics(metrics.clone());
         let connected = new_client.connected_handle();
+        let listening = new_client.listening_handle();
         targets.insert(
             id,
             TargetState {
                 config: tc.clone(),
                 client: Arc::new(Mutex::new(new_client)),
                 connected,
+                listening,
                 metrics,
                 push_tlm_tx,
                 sample_tx,

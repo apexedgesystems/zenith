@@ -27,6 +27,7 @@ interface Target {
   host: string;
   port: number;
   connected: boolean;
+  listening?: boolean;
   health_nonzero_bad?: string[];
 }
 
@@ -594,6 +595,7 @@ export default function DashboardPage({
   const queryClient = useQueryClient();
   const target = targets.find((t) => t.id === selectedTarget);
   const isConnected = target?.connected ?? false;
+  const isListening = !isConnected && (target?.listening ?? false);
 
   // Pipeline counters via the shared cache (atomic-snapshot endpoint,
   // no device I/O; 2 s).
@@ -734,8 +736,14 @@ export default function DashboardPage({
             style={{
               backgroundColor: isConnected
                 ? "rgba(63,185,80,0.1)"
-                : "rgba(248,81,73,0.1)",
-              color: isConnected ? "var(--color-ok)" : "var(--color-crit)",
+                : isListening
+                  ? "rgba(210,153,34,0.1)"
+                  : "rgba(248,81,73,0.1)",
+              color: isConnected
+                ? "var(--color-ok)"
+                : isListening
+                  ? "var(--color-warn)"
+                  : "var(--color-crit)",
             }}
           >
             <div
@@ -743,12 +751,18 @@ export default function DashboardPage({
               style={{
                 backgroundColor: isConnected
                   ? "var(--color-ok)"
-                  : "var(--color-crit)",
+                  : isListening
+                    ? "var(--color-warn)"
+                    : "var(--color-crit)",
               }}
             />
-            {isConnected ? "Connected" : "Disconnected"}
+            {isConnected
+              ? "Connected"
+              : isListening
+                ? "Listening for the target"
+                : "Disconnected"}
           </div>
-          {isConnected ? (
+          {isConnected || isListening ? (
             <button
               onClick={disconnect}
               className="text-xs px-3 py-1"

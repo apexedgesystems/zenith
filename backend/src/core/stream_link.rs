@@ -432,6 +432,10 @@ pub struct StreamLink {
     /// disconnect or the next connect.
     init_handle: Option<tokio::task::JoinHandle<()>>,
     connected: Arc<AtomicBool>,
+    /// Bound and accepting (listening carriers only): true from bind
+    /// until the listener task ends. Status endpoints read this
+    /// without the link mutex, like `connected`.
+    listening: Arc<AtomicBool>,
     /// Generation counter, the shared link discipline: a
     /// stale reader must not clear a newer connection's flag.
     generation: Arc<AtomicU64>,
@@ -516,6 +520,7 @@ impl StreamLink {
             carrier,
             init,
             push_tlm_tx,
+            listening: Arc::new(AtomicBool::new(false)),
             reader_handle: None,
             init_handle: None,
             connected: Arc::new(AtomicBool::new(false)),
@@ -563,7 +568,18 @@ impl StreamLink {
             let spec = self.spec.clone();
             let init = self.init.clone();
             let push_tx = self.push_tlm_tx.clone();
+            let listening = self.listening.clone();
+            listening.store(true, Ordering::Release);
             let handle = tokio::spawn(async move {
+                // Cleared however the loop ends: accept failure, or a
+                // newer generation superseding this listener.
+                struct ListenGuard(Arc<AtomicBool>);
+                impl Drop for ListenGuard {
+                    fn drop(&mut self) {
+                        self.0.store(false, Ordering::Release);
+                    }
+                }
+                let _guard = ListenGuard(listening);
                 loop {
                     let (stream, peer) = match listener.accept().await {
                         Ok(x) => x,
@@ -738,6 +754,7 @@ impl StreamLink {
 
     pub fn disconnect(&mut self) {
         self.connected.store(false, Ordering::Release);
+        self.listening.store(false, Ordering::Release);
         if let Some(h) = self.reader_handle.take() {
             h.abort();
         }
@@ -754,7 +771,7 @@ impl StreamLink {
     /// A tcp-listen link whose listener task is alive: bound and
     /// accepting, whether or not a peer is attached right now.
     pub fn is_listening(&self) -> bool {
-        matches!(self.carrier, Carrier::TcpListen { .. })
+        self.listening.load(Ordering::Acquire)
             && self
                 .reader_handle
                 .as_ref()
@@ -763,6 +780,11 @@ impl StreamLink {
 
     pub fn connected_handle(&self) -> Arc<AtomicBool> {
         self.connected.clone()
+    }
+
+    /// Lock-free handle to the listening flag (see `is_listening`).
+    pub fn listening_handle(&self) -> Arc<AtomicBool> {
+        self.listening.clone()
     }
 }
 

@@ -48,6 +48,28 @@ describe("targetsEqual", () => {
   });
 });
 
+describe("targetsEqual listening state", () => {
+  const base: Target = {
+    id: "target-0",
+    name: "T",
+    host: "h",
+    port: 1,
+    connected: false,
+  };
+  it("treats a change in listening as a change", () => {
+    expect(targetsEqual([base], [{ ...base, listening: true }])).toBe(false);
+    expect(
+      targetsEqual(
+        [{ ...base, listening: true }],
+        [{ ...base, listening: true }],
+      ),
+    ).toBe(true);
+  });
+  it("treats an absent flag as false", () => {
+    expect(targetsEqual([base], [{ ...base, listening: false }])).toBe(true);
+  });
+});
+
 describe("formatBytes", () => {
   it("formats sub-KB as bytes", () => {
     expect(formatBytes(0)).toBe("0 B");

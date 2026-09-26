@@ -151,6 +151,15 @@ impl ProtocolLink {
         }
     }
 
+    /// Lock-free handle to the listening flag; permanently false for
+    /// links that dial out.
+    pub fn listening_handle(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        match self {
+            ProtocolLink::Aproto(_) => Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            ProtocolLink::Stream(c) => c.listening_handle(),
+        }
+    }
+
     /// Lock-free handle to the connection flag (status endpoints must
     /// not wait on the link mutex).
     pub fn connected_handle(&self) -> Arc<AtomicBool> {
