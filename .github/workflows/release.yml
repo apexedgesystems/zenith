@@ -1,14 +1,18 @@
 # ==============================================================================
-# Release -- Build and publish container image on version tag
+# Release -- publish the container image and the GitHub release on a
+# version tag
 #
-# Triggered by pushing a version tag (v*). Builds the production Docker
-# image and publishes it to GitHub Container Registry (ghcr.io).
-#
-# Usage:
-#   git tag v0.1.0 && git push origin v0.1.0
+# A tag vX.Y.Z on main runs, in order:
+#   1. version check: the tag must equal the workspace Cargo.toml
+#      version and the frontend package version (tools/version-check.sh)
+#   2. one native image build per architecture (amd64, arm64), each
+#      pushed by digest
+#   3. one manifest list tagged vX.Y.Z and latest
+#   4. the GitHub release, with the CHANGELOG section for the version
+#      as its body and the pull-not-build compose file attached
 #
 # Produces:
-#   ghcr.io/<owner>/zenith:v0.1.0
+#   ghcr.io/<owner>/zenith:vX.Y.Z
 #   ghcr.io/<owner>/zenith:latest
 # ==============================================================================
 name: Release
@@ -19,26 +23,44 @@ on:
       - "v*"
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
 jobs:
-  publish:
-    name: Build & Publish Container
+  check:
+    name: Version check
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
-    env:
-      REGISTRY: ghcr.io
-      IMAGE_NAME: ${{ github.repository }}
-
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.v.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+      - name: Tag agrees with the declared version
+        id: v
+        run: |
+          tools/version-check.sh "${GITHUB_REF_NAME}"
+          echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
 
-      - name: Extract version from tag
-        id: version
-        run: echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+  build:
+    name: Build ${{ matrix.arch }}
+    needs: check
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
 
       - name: Login to GHCR
         uses: docker/login-action@v4
@@ -50,13 +72,79 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Build and push
+      - name: Build and push by digest
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: .
-          push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+      - name: Record the digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload the digest
+        uses: actions/upload-artifact@v6
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    name: Manifest and release
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download the digests
+        uses: actions/download-artifact@v7
+        with:
+          path: /tmp/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - name: Login to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Create the manifest list
+        working-directory: /tmp/digests
+        run: |
+          image="${REGISTRY}/${IMAGE_NAME}"
+          refs=""
+          for digest in *; do
+            refs="${refs} ${image}@sha256:${digest}"
+          done
+          # shellcheck disable=SC2086 # one reference per digest, split on purpose
+          docker buildx imagetools create \
+            -t "${image}:${{ needs.check.outputs.version }}" \
+            -t "${image}:latest" \
+            ${refs}
+          docker buildx imagetools inspect "${image}:${{ needs.check.outputs.version }}"
+
+      - name: Extract the changelog section
+        run: |
+          tools/changelog-section.sh "${{ needs.check.outputs.version }}" > /tmp/release-notes.md
+          cat /tmp/release-notes.md
+
+      - name: Create the GitHub release
+        uses: softprops/action-gh-release@v3
+        with:
+          name: ${{ needs.check.outputs.version }}
+          body_path: /tmp/release-notes.md
+          files: deploy/docker-compose.yml
