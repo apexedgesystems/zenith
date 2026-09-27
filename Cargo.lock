@@ -2895,7 +2895,7 @@ dependencies = [
 
 [[package]]
 name = "zenith"
-version = "0.0.2"
+version = "0.2.0"
 dependencies = [
  "argon2",
  "axum 0.8.9",

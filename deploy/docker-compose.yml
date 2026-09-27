@@ -3,7 +3,7 @@
 #   docker compose -f deploy/docker-compose.yml up -d
 #
 # ZENITH_IMAGE selects the image (default: the latest release on
-# GHCR); pin a version with ZENITH_IMAGE=ghcr.io/apexedgesystems/zenith:v0.0.2.
+# GHCR); pin a version with ZENITH_IMAGE=ghcr.io/apexedgesystems/zenith:v0.2.0.
 # The image carries a default config and the demo target directories,
 # so it boots as is. To run your own targets, uncomment the mounts
 # below and point them at your config.toml and target directories.

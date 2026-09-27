@@ -198,7 +198,7 @@ curl -O https://raw.githubusercontent.com/apexedgesystems/zenith/main/deploy/doc
 docker compose up -d
 ```
 
-Pin a version with `ZENITH_IMAGE=ghcr.io/apexedgesystems/zenith:v0.0.2`.
+Pin a version with `ZENITH_IMAGE=ghcr.io/apexedgesystems/zenith:v0.2.0`.
 Three settings come from the environment when set: `ZENITH_PORT`
 (the front door, default 8080), `ZENITH_DB_PATH` (default
 `/var/lib/zenith/zenith.db`, inside the persistent volume), and
