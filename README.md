@@ -223,6 +223,12 @@ definition describes its own transport (what it dials, what it
 listens on) and the transport layer binds exactly that, so no
 per-target port publishing is ever needed.
 
+To run the flight side of the bundled demos yourself, two
+walkthroughs stand up the stock frameworks from scratch and end at
+zenith charts: [docs/DEMO_CFS.md](docs/DEMO_CFS.md) and
+[docs/DEMO_FPRIME.md](docs/DEMO_FPRIME.md). The apex ops demo ships
+with Apex CSF.
+
 ### Build from source
 
 ```bash
