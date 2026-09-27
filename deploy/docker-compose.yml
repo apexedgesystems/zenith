@@ -1,0 +1,39 @@
+# Run a published zenith image -- nothing to build.
+#
+#   docker compose -f deploy/docker-compose.yml up -d
+#
+# ZENITH_IMAGE selects the image (default: the latest release on
+# GHCR); pin a version with ZENITH_IMAGE=ghcr.io/apexedgesystems/zenith:v0.0.2.
+# The image carries a default config and the demo target directories,
+# so it boots as is. To run your own targets, uncomment the mounts
+# below and point them at your config.toml and target directories.
+services:
+  zenith:
+    image: ${ZENITH_IMAGE:-ghcr.io/apexedgesystems/zenith:latest}
+    # Host networking: each target's definition in config.toml
+    # describes its own transport (dials, listens, ports) and the
+    # transport layer binds exactly that. Zenith itself serves one
+    # port, the HTTP/WebSocket front door.
+    network_mode: host
+    environment:
+      ZENITH_PORT: ${ZENITH_PORT:-8080}
+      # ZENITH_DB_PATH: /var/lib/zenith/zenith.db
+      # ZENITH_AUTH_SECRET: set this when [auth] enabled = true
+    volumes:
+      - zenith-data:/var/lib/zenith
+      # - ./config.toml:/etc/zenith/config.toml:ro
+      # - ./targets:/data/targets:ro
+    restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "wget -qO /dev/null http://localhost:${ZENITH_PORT:-8080}/api/health || exit 1",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  zenith-data:

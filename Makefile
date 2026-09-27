@@ -78,6 +78,12 @@ test-frontend:
 	$(COMPOSE) run --rm -T dev bash -c \
 		'cd frontend && npm ci && npm run test'
 
+## Verify the declared version agrees everywhere (and with a tag:
+## make version-check TAG=v0.0.2). The release workflow runs this
+## before publishing.
+version-check:
+	tools/version-check.sh $(TAG)
+
 ## Run criterion benchmarks
 bench:
 	$(COMPOSE) run --rm -T dev bash -c \

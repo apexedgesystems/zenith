@@ -176,6 +176,52 @@ refreshed dictionaries. Back curation up with
 
 ## Quickstart
 
+### Run the published image
+
+Nothing to build. The image carries a default config and the demo
+target directories for all three frameworks, so it boots as is:
+
+```bash
+docker run -d --name zenith --network host \
+  -v zenith-data:/var/lib/zenith \
+  ghcr.io/apexedgesystems/zenith:latest
+# http://localhost:8080
+```
+
+Or with compose, which adds the health check and restart policy:
+
+```bash
+curl -O https://raw.githubusercontent.com/apexedgesystems/zenith/main/deploy/docker-compose.yml
+docker compose up -d
+```
+
+Pin a version with `ZENITH_IMAGE=ghcr.io/apexedgesystems/zenith:v0.0.2`.
+Three settings come from the environment when set: `ZENITH_PORT`
+(the front door, default 8080), `ZENITH_DB_PATH` (default
+`/var/lib/zenith/zenith.db`, inside the persistent volume), and
+`ZENITH_AUTH_SECRET` (see Authentication and Audit). Everything else
+is the config file.
+
+To run your own targets, write a `config.toml` (the Configuration
+section below is the reference; the bundled default is
+[deploy/config.toml](deploy/config.toml)) and mount it with the
+target directories:
+
+```bash
+docker run -d --name zenith --network host \
+  -v zenith-data:/var/lib/zenith \
+  -v "$PWD/config.toml:/etc/zenith/config.toml:ro" \
+  -v "$PWD/targets:/data/targets:ro" \
+  ghcr.io/apexedgesystems/zenith:latest
+```
+
+The container runs on the host network on purpose: each target's
+definition describes its own transport (what it dials, what it
+listens on) and the transport layer binds exactly that, so no
+per-target port publishing is ever needed.
+
+### Build from source
+
 ```bash
 # 1. Generate the target config directory from the apex build
 #    (in the apex repo; emits manifest, struct dicts, commands, and
@@ -193,7 +239,7 @@ host = "0.0.0.0"
 port = 8080
 
 [storage]
-path = "./data/zenith.db"
+path = "/var/lib/zenith/zenith.db"
 retention_hours = 24
 max_db_size_mb = 2048
 
@@ -456,6 +502,60 @@ The audit log captures every state-changing action regardless of
 whether auth is on. View it at `GET /api/audit` or via the Audit Log
 page in the UI. Each entry has timestamp, actor, action, target,
 detail, status, and source IP.
+
+## Deploying Beyond a Trusted LAN
+
+The default posture is a trusted LAN: auth off, every endpoint open.
+For any host others can reach, the deployment enables auth and puts
+TLS in front:
+
+1. Generate a password hash: `docker run --rm -i
+ghcr.io/apexedgesystems/zenith:latest --hash-password` (reads the
+   password from stdin, prints an argon2 PHC string).
+2. In `config.toml`, set `[auth] enabled = true`, `username`, and
+   `password_hash`. Leave `secret` out of the file and pass it as
+   `ZENITH_AUTH_SECRET` (at least 16 characters, generated, never
+   reused); startup refuses the default secret while auth is on.
+3. Bind the front door to the loopback (`[server] host =
+"127.0.0.1"`) and terminate TLS in a reverse proxy on the same
+   host that forwards to it. The proxy must pass WebSocket upgrades
+   through for `/ws` (the UI's telemetry stream); tokens never ride
+   the query string, so request logs stay clean.
+4. If the UI is served from another origin, list it in `[server]
+cors_allowed_origins`; otherwise leave it empty (same-origin only).
+
+With auth on, every `/api/*` route except login and health requires a
+bearer token, the per-IP rate limit applies to POSTs, and every
+audited action carries the operator's name. The audit log is on
+regardless.
+
+## Releases
+
+The declared version lives in the workspace `Cargo.toml`;
+`frontend/package.json` must match it, and `make version-check`
+proves both (`make version-check TAG=vX.Y.Z` also proves a tag).
+[CHANGELOG.md](CHANGELOG.md) keeps an `Unreleased` section that each
+feature branch adds to; a release turns it into a `vX.Y.Z - date`
+section. Entries are written for the person upgrading: what changed
+for them, one line each, breaking changes first. Engineering detail
+stays in commit messages.
+
+To cut a release: bump the two version fields, retitle the
+changelog section, merge, then tag `vX.Y.Z` on main and push the
+tag. The release workflow checks the tag against the declared
+version and the changelog before any build starts, builds the image
+natively for amd64 and arm64 with SBOM and provenance attestations,
+publishes the multi-arch manifest as
+`ghcr.io/apexedgesystems/zenith:vX.Y.Z` and `:latest`, and creates
+the GitHub release with that changelog section as its body and the
+compose file, the image manifest and SHA256SUMS attached. A
+pre-release tag (`vX.Y.Z-rc1`) publishes under its own tag, marks
+the release as a pre-release, and leaves `:latest` alone.
+
+Rehearse before tagging: `gh workflow run release.yml --ref <branch>`
+runs every step except publishing, with a throwaway version, so a
+green rehearsal is proof the next tag will publish. Workflow actions
+are pinned by commit; dependabot proposes their updates.
 
 ## License
 

@@ -407,7 +407,42 @@ pub fn invalid_tm_frame_size(t: &TargetSection) -> Option<String> {
 pub fn load(path: &Path) -> Result<ServerConfig, String> {
     let content =
         std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path.display(), e))?;
-    toml::from_str(&content).map_err(|e| format!("parse error: {}", e))
+    let cfg: ServerConfig = toml::from_str(&content).map_err(|e| format!("parse error: {}", e))?;
+    apply_env_overrides(cfg, |k| std::env::var(k).ok())
+}
+
+/// The few settings a deployment sets from outside the file: the
+/// front-door port, the database path, and the token-signing secret.
+/// Everything else is what the file says, so a container can ship a
+/// complete config and still take these from its environment.
+///
+/// - `ZENITH_PORT`: `[server] port`
+/// - `ZENITH_DB_PATH`: `[storage] path`
+/// - `ZENITH_AUTH_SECRET`: `[auth] secret` (keeps the secret out of
+///   a mounted file and out of the image)
+///
+/// A set-but-unparseable value refuses to load: a wrong port is a
+/// misconfiguration, not a hint to fall back to the file.
+pub fn apply_env_overrides(
+    mut cfg: ServerConfig,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<ServerConfig, String> {
+    if let Some(v) = lookup("ZENITH_PORT") {
+        cfg.server.port = v
+            .trim()
+            .parse::<u16>()
+            .map_err(|_| format!("ZENITH_PORT '{}' is not a port number", v))?;
+    }
+    if let Some(v) = lookup("ZENITH_DB_PATH") {
+        if v.trim().is_empty() {
+            return Err("ZENITH_DB_PATH is set but empty".to_string());
+        }
+        cfg.storage.path = v;
+    }
+    if let Some(v) = lookup("ZENITH_AUTH_SECRET") {
+        cfg.auth.secret = v;
+    }
+    Ok(cfg)
 }
 
 /* ----------------------------- Tests ----------------------------- */
@@ -468,6 +503,35 @@ mod tests {
         t.protocol = "ccsds-spp".to_string();
         t.tm_frame_size = 1;
         assert!(invalid_tm_frame_size(&t).is_none(), "field is unused here");
+    }
+
+    /// @test Environment overrides reach exactly the three settings a
+    /// deployment sets from outside the file, an unset variable leaves
+    /// the file's value, and a set-but-invalid port refuses to load
+    /// by name.
+    #[test]
+    fn env_overrides_cover_port_db_path_and_secret() {
+        let base = || -> ServerConfig { toml::from_str("[server]\nport = 8080\n").unwrap() };
+        let vars = std::collections::HashMap::from([
+            ("ZENITH_PORT", "9090"),
+            ("ZENITH_DB_PATH", "/srv/zenith/zenith.db"),
+            ("ZENITH_AUTH_SECRET", "a-signing-secret-of-length"),
+        ]);
+        let cfg = apply_env_overrides(base(), |k| vars.get(k).map(|v| v.to_string())).unwrap();
+        assert_eq!(cfg.server.port, 9090);
+        assert_eq!(cfg.storage.path, "/srv/zenith/zenith.db");
+        assert_eq!(cfg.auth.secret, "a-signing-secret-of-length");
+
+        let untouched = apply_env_overrides(base(), |_| None).unwrap();
+        assert_eq!(untouched.server.port, 8080);
+        assert_eq!(untouched.storage.path, base().storage.path);
+
+        let e = apply_env_overrides(base(), |k| (k == "ZENITH_PORT").then(|| "http".to_string()))
+            .unwrap_err();
+        assert!(e.contains("ZENITH_PORT 'http'"), "{e}");
+        let e =
+            apply_env_overrides(base(), |k| (k == "ZENITH_DB_PATH").then(String::new)).unwrap_err();
+        assert!(e.contains("ZENITH_DB_PATH"), "{e}");
     }
 
     #[test]

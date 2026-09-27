@@ -1,0 +1,69 @@
+# Changelog
+
+Notable changes to zenith, newest first. Format after
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions
+follow semantic versioning. The declared version lives in the
+workspace Cargo.toml, the frontend package matches it, and a release
+tag must equal both (tools/version-check.sh). While the major
+version is 0, a minor release may contain breaking changes; each is
+called out in its entry. The history starts at the 2026-08
+architecture review; work before that is the v0.0.1 tag.
+
+## Unreleased
+
+Zenith grows from an Apex CSF console into one console for three
+flight frameworks, published as a container that runs as pulled.
+
+### Breaking
+
+- Target config keys: `arm_hex` is replaced by a generated
+  `connect_init` file of named steps; `udp_listen_port` is renamed
+  `listen_port` (boot refuses the old key and names the new one).
+- The container runs on the host network. Each target's definition
+  declares its own ports; nothing is published per target anymore.
+
+### Added
+
+- NASA cFS targets over UDP, with a dictionary generator that reads
+  the flight build's debug info and a connect-time step that arms the
+  downlink.
+- F-prime targets: the deployment dials in, TM frames are verified,
+  and a record dictionary generated from the topology dictionary
+  names every channel.
+- Byte order stamped in dictionaries; big-endian wires decode without
+  configuration.
+- A pull-not-build image with a default config and demo targets for
+  all three frameworks; `ZENITH_PORT`, `ZENITH_DB_PATH` and
+  `ZENITH_AUTH_SECRET` override the file from the environment.
+- Retention tiers (age-based envelope ladder) with chart bands for
+  downsampled history, and a Storage page with a capacity gauge and
+  live pipeline accounting.
+- Command lifecycle: READBACK results, verify-before-apply on
+  tunables, RTS plans validated before upload.
+- Configurable dashboard cards, command favorites, saved preferences.
+- A listening target shows as listening; telemetry-only targets show
+  component status by telemetry heard.
+
+### Changed
+
+- Everything framework-specific comes from generated target files;
+  a target declares its protocol, carrier, ports and connect-time
+  init in config.
+
+### Security
+
+- Argon2 credentials, JWT sessions with short-lived WebSocket
+  tickets, per-IP rate limiting, bounded uploads and history
+  queries, audit entries attributed to the operator.
+
+### Fixed
+
+- Ingest survives write failures and the database survives a crash;
+  retention removes what it says it removes.
+- Every dropped sample is counted at the stage that dropped it, and
+  the health page reflects it.
+- Commands that never get an ACK time out instead of hanging.
+
+## v0.0.1 - 2026-04-10
+
+First tagged build: the Apex CSF operations console.
