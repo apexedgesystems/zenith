@@ -39,17 +39,19 @@ docker run -it --rm --network host --sysctl fs.mqueue.msg_max=1024 \
   -v "$PWD/cfs:/cfs" cfs-rig bash
 ```
 
-Inside, the bundle's own build steps, unchanged:
+Inside, the bundle's own build steps, unchanged. The bundle ships
+its Makefile and `sample_defs/` at the top level with named
+configurations; `native_std` is the native simulation build:
 
 ```bash
-cp cfe/cmake/Makefile.sample Makefile
-cp -r cfe/cmake/sample_defs sample_defs
-make SIMULATION=native prep && make && make install
+make native_std.prep      # configures the build tree
+make native_std.install   # compiles and stages the executable
 ```
 
-The bundle leaves the executive at `build/exe/cpu1/core-cpu1`, with
-the core apps as shared objects beside it and full debug info
-(DWARF), which is what the next step reads.
+The bundle leaves the executive at
+`build-native_std/exe/cpu1/core-cpu1`, with the core apps as shared
+objects beside it and full debug info (DWARF), which is what the
+next step reads.
 
 ## 2. Generate the zenith target directory
 
@@ -76,7 +78,7 @@ that produced the bundled directory is the shape to copy:
     {
       "component": "cfe_es",
       "name": "CFE_ES",
-      "elf": "cfs/build/exe/cpu1/core-cpu1",
+      "elf": "cfs/build-native_std/exe/cpu1/core-cpu1",
       "type": "CFE_ES_HousekeepingTlm_t",
       "apid": "0x000",
       "uid": "0x00C00000"
@@ -127,7 +129,7 @@ Start the bundle from its executable directory (it reads its
 startup script from there):
 
 ```bash
-cd build/exe/cpu1 && ./core-cpu1
+cd build-native_std/exe/cpu1 && ./core-cpu1
 ```
 
 It logs "Awaiting enable command": a stock cFS is silent until the

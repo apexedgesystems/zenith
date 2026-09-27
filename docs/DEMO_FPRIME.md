@@ -38,11 +38,17 @@ listening carrier expects:
 
 ```bash
 pip install fprime-bootstrap
-fprime-bootstrap project          # project name: FprimeDemo
+fprime-bootstrap project --tag v4.3.0   # project name: FprimeDemo
 cd FprimeDemo && . fprime-venv/bin/activate
-fprime-util new --deployment      # deployment name: FprimeDemoDeployment
+fprime-util new --deployment            # deployment name: FprimeDemoDeployment
+cd FprimeDemoDeployment
 fprime-util generate && fprime-util build
 ```
+
+The `--tag` pins the framework to the version this walkthrough was
+verified against; without it the tool takes the latest release,
+which may lay records out differently than the bundled dictionary
+expects.
 
 The build leaves two things zenith needs:
 
