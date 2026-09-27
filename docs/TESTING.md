@@ -11,10 +11,10 @@ Rust or Node toolchain required.
 # Run all tests (backend + frontend)
 make test
 
-# Backend only (128 unit tests, Rust)
+# Backend only (130 unit tests, Rust)
 make test-backend
 
-# Frontend only (56 unit tests, Vitest + React Testing Library)
+# Frontend only (62 unit tests, Vitest + React Testing Library)
 make test-frontend
 
 # Lint (clippy with -D warnings)

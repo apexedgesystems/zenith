@@ -12,7 +12,7 @@
 #               with SBOM and provenance attestations; pushed by digest on
 #               a tag, built and discarded on a rehearsal
 #   publish  -- tag only: one manifest list tagged vX.Y.Z (and latest for a
-#               full release; a pre-release such as v0.0.2-rc1 leaves latest
+#               full release; a pre-release such as v0.2.0-rc1 leaves latest
 #               alone), then the GitHub release with the CHANGELOG section as
 #               its body and the compose file, the image manifest and
 #               SHA256SUMS attached
@@ -65,7 +65,7 @@ jobs:
         id: v
         run: |
           if [ "${GITHUB_EVENT_NAME}" = "push" ]; then
-            version="${GITHUB_REF_NAME}"      # v0.0.2, or v0.0.2-rc1 for a pre-release
+            version="${GITHUB_REF_NAME}"      # v0.2.0, or v0.2.0-rc1 for a pre-release
             publish=true
           else
             version="v0.0.0-ci"               # rehearsal: same steps, throwaway version

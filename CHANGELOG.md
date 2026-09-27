@@ -9,16 +9,20 @@ version is 0, a minor release may contain breaking changes; each is
 called out in its entry. The history starts at the 2026-08
 architecture review; work before that is the v0.0.1 tag.
 
-## Unreleased
+## v0.2.0 - 2026-09-27
 
 Zenith grows from an Apex CSF console into one console for three
 flight frameworks, published as a container that runs as pulled.
+Apex CSF targets have the full command surface; NASA cFS and F-prime
+targets are telemetry only in this release, and their command pages
+say so.
 
 ### Breaking
 
 - Target config keys: `arm_hex` is replaced by a generated
   `connect_init` file of named steps; `udp_listen_port` is renamed
-  `listen_port` (boot refuses the old key and names the new one).
+  `listen_port`; `health_nonzero_bad` is renamed `health` (boot
+  refuses each old key and names the new one).
 - The container runs on the host network. Each target's definition
   declares its own ports; nothing is published per target anymore.
 
@@ -43,6 +47,10 @@ flight frameworks, published as a container that runs as pulled.
 - Configurable dashboard cards, command favorites, saved preferences.
 - A listening target shows as listening; telemetry-only targets show
   component status by telemetry heard.
+- Dashboard health rules can compare (`{ field = "x", ge = 2 }`), not
+  only test nonzero; enum-typed values show their name beside the
+  number when the dictionary names the enum.
+- Walkthroughs for standing up the cFS and F-prime demo rigs.
 
 ### Changed
 
