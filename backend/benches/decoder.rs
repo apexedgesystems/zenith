@@ -16,12 +16,15 @@ use zenith::core::transport::PushTelemetryPacket;
 
 /* ----------------------------- Test fixture ----------------------------- */
 
-/// Build a struct dictionary that mirrors a realistic Apex demo target:
-///   - WaveGenerator: OUTPUT(8B), STATE(48B), TUNABLE_PARAM(32B)
-///   - SystemMonitor: OUTPUT(24B)
+/// Build a struct dictionary shaped like a small real target: one
+/// component with three struct categories and one with a single
+/// output, two instances of the first, so the lookup table has the
+/// (uid, size) joins the hot path resolves in production.
+///   - Oscillator: OUTPUT(8B), STATE(48B), TUNABLE_PARAM(32B)
+///   - Monitor: OUTPUT(24B)
 fn make_dict() -> StructDictionary {
     let wavegen = ComponentDict {
-        component: "WaveGenerator".to_string(),
+        component: "Oscillator".to_string(),
         byte_order: None,
         structs: HashMap::from([
             (
@@ -212,7 +215,7 @@ fn make_dict() -> StructDictionary {
     };
 
     let sysmon = ComponentDict {
-        component: "SystemMonitor".to_string(),
+        component: "Monitor".to_string(),
         byte_order: None,
         structs: HashMap::from([(
             "Output".to_string(),
@@ -293,8 +296,8 @@ fn make_dict() -> StructDictionary {
 
     StructDictionary {
         components: HashMap::from([
-            ("WaveGenerator".to_string(), wavegen),
-            ("SystemMonitor".to_string(), sysmon),
+            ("Oscillator".to_string(), wavegen),
+            ("Monitor".to_string(), sysmon),
         ]),
     }
 }
@@ -302,16 +305,16 @@ fn make_dict() -> StructDictionary {
 /// Manifest UIDs that match the dict above.
 fn make_uids() -> Vec<(u32, String)> {
     vec![
-        (0x00D000, "WaveGenerator#0".to_string()),
-        (0x00D001, "WaveGenerator#1".to_string()),
-        (0x00D100, "SystemMonitor".to_string()),
+        (0x00D000, "Oscillator#0".to_string()),
+        (0x00D001, "Oscillator#1".to_string()),
+        (0x00D100, "Monitor".to_string()),
     ]
 }
 
 /// Build a sequence of realistic push packets for the bench loop.
 fn make_packets() -> Vec<PushTelemetryPacket> {
     let mut packets = Vec::new();
-    // 2 WaveGen Output (8B), 2 WaveGen State (48B), 1 SystemMonitor Output (24B)
+    // 2 Oscillator Output (8B), 2 Oscillator State (48B), 1 Monitor Output (24B)
     for &uid in &[0x00D000u32, 0x00D001] {
         packets.push(PushTelemetryPacket {
             full_uid: uid,
