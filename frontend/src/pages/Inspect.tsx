@@ -5,6 +5,7 @@ import {
   formatValue,
   hexToBytes as rawHexToBytes,
   type FieldDef,
+  type EnumTable,
 } from "../api/decode";
 
 /** Whitespace-tolerant hex (the INSPECT browser displays spaced hex
@@ -42,6 +43,7 @@ interface StructDef {
 interface ComponentDict {
   component: string;
   structs: Record<string, StructDef>;
+  enums?: EnumTable;
 }
 
 const CATEGORIES = [
@@ -54,7 +56,11 @@ const CATEGORIES = [
 
 /* ----------------------------- Decoding ----------------------------- */
 
-function decodeFieldValue(view: DataView, field: FieldDef): string {
+function decodeFieldValue(
+  view: DataView,
+  field: FieldDef,
+  enums?: EnumTable,
+): string {
   // Shared decoder; unknown shapes fall back to spaced raw hex, which
   // is what the INSPECT browser historically showed for them.
   const v = decodeField(view, field);
@@ -71,7 +77,7 @@ function decodeFieldValue(view: DataView, field: FieldDef): string {
       .join(" ");
   }
   if (field.type === "bool") return v ? "true" : "false";
-  return formatValue(v, field);
+  return formatValue(v, field, enums);
 }
 
 /* ----------------------------- Page ----------------------------- */
@@ -283,7 +289,7 @@ export default function InspectPage({
         if (field.size === 0) continue;
         if (field.name.startsWith("pad") || field.name.startsWith("reserved"))
           continue;
-        rows.push({ field, value: decodeFieldValue(view, field) });
+        rows.push({ field, value: decodeFieldValue(view, field, dict?.enums) });
       }
       setDecoded(rows);
       setLastFetchTs(Date.now());
@@ -293,7 +299,7 @@ export default function InspectPage({
     } finally {
       setLoading(false);
     }
-  }, [selectedTarget, selectedUid, selectedCategory, matchingStruct]);
+  }, [selectedTarget, selectedUid, selectedCategory, matchingStruct, dict]);
 
   /* ---- Reset on component/category change ---- */
 

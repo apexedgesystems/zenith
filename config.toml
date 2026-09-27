@@ -66,9 +66,10 @@ name = "Local SIL - Ops Demo"
 host = "127.0.0.1"
 port = 9000
 # protocol = "aproto-slip"   # wire protocol (default; validated at boot)
-# health_nonzero_bad = [...]  # dashboard fields flagged bad when nonzero
-#                             # (display policy; defaults cover the apex
-#                             # counters -- override per target as needed)
+# health = [...]              # dashboard health rules (display policy;
+#                             # a bare name is bad when nonzero, a table
+#                             # names one comparison: { field = "x", ge = 2 };
+#                             # defaults cover the apex counters)
 auto_connect = false
 manifest = "/data/targets/sil-ops-demo/app_manifest.json"
 structs_dir = "/data/targets/sil-ops-demo/structs"
@@ -139,7 +140,7 @@ telemetry_config = "/data/targets/cfs-cpu1/telemetry.json"
 # Display policy for this target's health cards: which counters are
 # bad when nonzero. Chosen from the live surface -- error counters
 # only, not the ones that grow in normal stock operation.
-health_nonzero_bad = [
+health = [
   "commanderrorcounter",
   "ingesterrors",
   "internalerrorcounter",

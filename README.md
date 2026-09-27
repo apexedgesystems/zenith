@@ -54,7 +54,10 @@ describe what's running on that target:
 targets/
   pi-ops-demo/            # An Apex application
     app_manifest.json     # Component registry: fullUid, name, type, instance
-    structs/              # apex_data_gen output, one JSON per component
+    structs/              # apex_data_gen output, one JSON per component;
+                          #   a field may name an entry in the file's
+                          #   enums table ("enum": "DriveMode") and the
+                          #   UI shows the value's name beside the number
       ApexExecutive.json  #   - struct definitions with field types and offsets
       Scheduler.json      #   - categories: STATIC_PARAM / TUNABLE_PARAM /
       WaveGenerator.json  #     STATE / INPUT / OUTPUT / TELEMETRY
@@ -364,6 +367,25 @@ listen port, a broken connect_init file, and two targets claiming
 one listen port all refuse to boot. The deployment needs no per-target network config: the
 container runs on the host network and binds exactly what
 definitions declare.
+
+A target's `health` list is the dashboard's display policy: which
+fields read as bad, and when. A bare name means bad when nonzero
+(the apex error counters are the default list); a table names one
+comparison against a number:
+
+```toml
+health = [
+  "is_slipping",                          # bad when nonzero
+  { field = "last_cmd_result", ge = 2 },  # 1 is an ACK; 2 and up are NACKs
+  { field = "board_link", eq = 2 },       # 0 never used, 1 up, 2 lost
+]
+```
+
+Operators are `eq`, `ne`, `ge`, `gt`, `le`, `lt`, one per rule; a
+rule with none or several refuses to boot. Field names match
+lowercased with underscores stripped. This is ground-side judgement,
+not vehicle truth, so it stays in the zenith config rather than the
+generated bundle.
 
 ## Config Validation
 

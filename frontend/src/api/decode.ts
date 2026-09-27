@@ -19,6 +19,32 @@ export interface FieldDef {
     step?: number;
     allowed?: number[];
   };
+  /** The dictionary enum that names this field's values, if any. */
+  enum?: string;
+}
+
+/** A dictionary's enum table: enum name -> { values: name -> number }. */
+export type EnumTable = Record<
+  string,
+  { underlying_type?: string; values?: Record<string, number> }
+>;
+
+/** The name an enum gives a value, or null when the field has no enum,
+ *  the table lacks it, or the value is outside it. */
+export function enumLabel(
+  v: DecodedValue,
+  field?: FieldDef,
+  enums?: EnumTable,
+): string | null {
+  if (!field?.enum || !enums) return null;
+  const values = enums[field.enum]?.values;
+  if (!values) return null;
+  const n = typeof v === "bigint" ? Number(v) : v;
+  if (typeof n !== "number") return null;
+  for (const [name, val] of Object.entries(values)) {
+    if (val === n) return name;
+  }
+  return null;
 }
 
 /** Strict hex -> bytes. Returns null on odd length or non-hex input
@@ -121,8 +147,14 @@ export function decodeField(view: DataView, field: FieldDef): DecodedValue {
 
 /** Uniform display formatting so every page renders the same value
  *  the same way. */
-export function formatValue(v: DecodedValue, field?: FieldDef): string {
+export function formatValue(
+  v: DecodedValue,
+  field?: FieldDef,
+  enums?: EnumTable,
+): string {
   if (v === null) return "--";
+  const label = enumLabel(v, field, enums);
+  if (label !== null) return `${label} (${String(v)})`;
   if (typeof v === "bigint") return v.toString();
   if (typeof v === "string") return v;
   if (Array.isArray(v)) return `[${v.map((e) => formatValue(e)).join(", ")}]`;

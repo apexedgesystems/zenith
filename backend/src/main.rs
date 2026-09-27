@@ -151,9 +151,10 @@ struct TargetInfo {
     /// Command-surface capabilities the target's dictionaries declare
     /// (e.g. "readback"). Empty for older dictionary sets.
     capabilities: Vec<String>,
-    /// Dashboard display policy from this target's config: field names
-    /// flagged bad when nonzero.
-    health_nonzero_bad: Vec<String>,
+    /// Dashboard display policy from this target's config: which
+    /// fields read as bad, and when (normalized field key, comparison,
+    /// bound).
+    health: Vec<config::HealthCheck>,
     /// Wire protocol this target speaks.
     protocol: String,
 }
@@ -528,7 +529,7 @@ async fn list_targets(State(state): State<AppState>) -> Json<serde_json::Value> 
             connected,
             listening,
             capabilities: t.struct_dicts.capabilities(),
-            health_nonzero_bad: t.config.health_nonzero_bad.clone(),
+            health: t.config.health_checks().unwrap_or_default(),
             protocol: t.config.protocol.clone(),
         });
     }
@@ -2135,6 +2136,7 @@ fn encode_field(
                     dims: None,
                     constraints: None,
                     struct_ref: None,
+                    enum_ref: None,
                 };
                 encode_field(buf, &elem, v)
             })
@@ -2766,7 +2768,8 @@ async fn add_target(
         protocol: crate::core::transport::Protocol::AprotoSlip
             .name()
             .to_string(),
-        health_nonzero_bad: crate::config::default_health_nonzero_bad_public(),
+        health: crate::config::default_health_public(),
+        health_nonzero_bad: None,
         apid_map: None,
         raw_uid: None,
         carrier: "tcp".to_string(),
@@ -3920,6 +3923,10 @@ async fn main() {
             std::process::exit(1);
         }
         if let Some(e) = config::retired_key(tc) {
+            eprintln!("FATAL: target '{}': {}", tc.name, e);
+            std::process::exit(1);
+        }
+        if let Err(e) = tc.health_checks() {
             eprintln!("FATAL: target '{}': {}", tc.name, e);
             std::process::exit(1);
         }

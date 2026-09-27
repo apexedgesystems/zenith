@@ -1,5 +1,6 @@
 /* Pure helpers for working with the Target list. Extracted from App.tsx
    so they can be unit-tested in isolation. */
+import type { HealthRule } from "./health";
 
 export interface Target {
   id: string;
@@ -11,7 +12,7 @@ export interface Target {
   listening?: boolean;
   capabilities?: string[];
   /** Dashboard display policy served from this target's config. */
-  health_nonzero_bad?: string[];
+  health?: HealthRule[];
 }
 
 /** Format a byte count as a short human-readable string (e.g. "1.2 MB"). */

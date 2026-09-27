@@ -209,6 +209,7 @@ impl TelemetryDecoder {
                 dims: None,
                 constraints: None,
                 struct_ref: None,
+                enum_ref: None,
             };
             let channel: Arc<str> = Arc::from(r.channel.as_str());
             self.uid_names.insert(r.id, channel.clone());
@@ -516,6 +517,7 @@ mod tests {
             dims: None,
             constraints: None,
             struct_ref: None,
+            enum_ref: None,
         };
         let comp = ComponentDict {
             component: "WaveGenerator".to_string(),
@@ -581,6 +583,7 @@ mod tests {
             dims: None,
             constraints: None,
             struct_ref: None,
+            enum_ref: None,
         };
         let make = |comp: &str, field: &str| ComponentDict {
             component: comp.to_string(),
@@ -638,6 +641,7 @@ mod tests {
             dims: None,
             constraints: None,
             struct_ref: None,
+            enum_ref: None,
         };
         let comp = |byte_order: Option<&str>| ComponentDict {
             component: "Imu".to_string(),
@@ -724,6 +728,7 @@ mod tests {
             dims: None,
             constraints: None,
             struct_ref: None,
+            enum_ref: None,
         };
         let dict = StructDictionary {
             components: HashMap::from([(
@@ -785,6 +790,7 @@ mod tests {
             dims: None,
             constraints: None,
             struct_ref: None,
+            enum_ref: None,
         };
         let comp = |byte_order: Option<&str>| ComponentDict {
             component: "Wide".to_string(),
@@ -976,6 +982,7 @@ mod tests {
             dims: None,
             constraints: None,
             struct_ref: None,
+            enum_ref: None,
         };
         let comp = ComponentDict {
             component: "X".to_string(),

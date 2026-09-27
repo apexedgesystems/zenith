@@ -809,6 +809,7 @@ mod tests {
             dims: None,
             constraints: None,
             struct_ref: None,
+            enum_ref: None,
         };
         let comp = ComponentDict {
             component: "WaveGenerator".to_string(),

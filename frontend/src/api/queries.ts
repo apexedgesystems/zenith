@@ -9,6 +9,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { arrayOf, field, isObject, request, Validator } from "./client";
+import type { HealthRule } from "../utils/health";
 
 /* ------------------------------ targets ------------------------------ */
 
@@ -24,7 +25,7 @@ export interface Target {
    *  (e.g. "readback"). Absent on older backends. */
   capabilities?: string[];
   /** Dashboard display policy served from this target's config. */
-  health_nonzero_bad?: string[];
+  health?: HealthRule[];
 }
 
 const isTarget: Validator<Target> = (v) => {
