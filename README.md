@@ -103,7 +103,7 @@ ELF ident) decode correctly with zero configuration.
 
 | Page              | Purpose                                                                                                                                                                                                                                                                                                                                                 |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Dashboard**     | Per-target health cards auto-discovered from struct dicts. Executive summary banner. Component registry with status dots (probed by command on apex targets; "telemetry heard in the last 30 s" on telemetry-only links). Connect / disconnect / add target.                                                                                            |
+| **Dashboard**     | Per-target health cards auto-discovered from struct dicts, flagged by the target's health rules, enum-typed values shown by name. Executive summary banner. Component registry with status dots (probed by command on apex targets; "telemetry heard in the last 30 s" on telemetry-only links). Connect / disconnect / add target.                     |
 | **Telemetry**     | Multi-signal strip charts with hover crosshair, per-plot time windows, threshold lines, drag-to-reorder, layout presets from `telemetry.json`, user-saved layouts in DB, pause/resume, 2-column grid, PNG/CSV export, historical data backfill. Tiered (downsampled) history renders as min/max envelope bands with mean [min..max] crosshair readouts. |
 | **Operations**    | System controls: Sleep/Wake, Pause/Resume, Set Verbosity, Restart Executive (with auto-reconnect). Per-component Lock/Unlock with visual lock state. Library hot-swap (lock + upload .so + reload + auto-unlock). In-page audit feed of issued commands.                                                                                                |
 | **Command**       | Generic APROTO command console: pick a component from the catalog, fill typed fields, send. Quick command presets. Response display with "Interpret as..." dropdown that decodes the raw bytes against any per-target struct of matching size.                                                                                                          |
@@ -132,7 +132,7 @@ ELF ident) decode correctly with zero configuration.
 | Frontend      | React 19, TypeScript strict, Canvas API                                                 |
 | Storage       | SQLite (WAL mode) with read connection pool (1 writer + N readers)                      |
 | Protocol      | APROTO over TCP + SLIP framing                                                          |
-| Tests         | `cargo test --lib` (128 unit tests) + Vitest with React Testing Library (56 unit tests) |
+| Tests         | `cargo test --lib` (130 unit tests) + Vitest with React Testing Library (62 unit tests) |
 | Benches       | criterion + pprof flamegraphs                                                           |
 | Auth          | JWT bearer middleware (config-disabled by default)                                      |
 | Rate limiting | Per-IP token bucket on POST endpoints (when auth is on)                                 |
@@ -284,8 +284,8 @@ make run
 | `make stop`          | Stop the running container                                                                     |
 | `make dev`           | Build + run in foreground (logs to stdout)                                                     |
 | `make test`          | Run **both** backend and frontend test suites                                                  |
-| `make test-backend`  | Backend only: `cargo test --lib` (currently 128 unit tests)                                    |
-| `make test-frontend` | Frontend only: `vitest run` (currently 56 unit tests)                                          |
+| `make test-backend`  | Backend only: `cargo test --lib` (currently 130 unit tests)                                    |
+| `make test-frontend` | Frontend only: `vitest run` (currently 62 unit tests)                                          |
 | `make bench`         | Run criterion benches (`protocol`, `storage`, `decoder`)                                       |
 | `make format`        | Run rustfmt across the backend                                                                 |
 | `make lint`          | Run clippy with `-D warnings`                                                                  |
