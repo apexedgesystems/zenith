@@ -35,6 +35,23 @@ def is_signed(t):
         return "unsigned" not in str(t)
 
 
+ENUMS = {}  # enum type name -> {"underlying_type": ..., "values": {name: value}}
+
+
+def enum_entry(t):
+    """Record an enum type once and return its dictionary name, or
+    None for an anonymous enum (nothing to name it by)."""
+    name = t.tag or t.name
+    if not name:
+        return None
+    if name not in ENUMS:
+        ENUMS[name] = {
+            "underlying_type": f"{'' if is_signed(t) else 'u'}int{t.sizeof * 8}_t",
+            "values": {f.name: int(f.enumval) for f in t.fields()},
+        }
+    return name
+
+
 def walk(t, prefix, base_off, out, top_level):
     t = t.strip_typedefs()
     code = t.code
@@ -65,7 +82,10 @@ def walk(t, prefix, base_off, out, top_level):
     elif code == gdb.TYPE_CODE_BOOL:
         entry["type"] = "uint"
     elif code == gdb.TYPE_CODE_ENUM:
-        entry["type"] = "uint"
+        entry["type"] = "int" if is_signed(t) else "uint"
+        enum_name = enum_entry(t)
+        if enum_name:
+            entry["enum"] = enum_name
     elif code == gdb.TYPE_CODE_FLT:
         entry["type"] = "float"
     else:
@@ -83,12 +103,14 @@ for item in SPEC:
         f["offset"] -= PRIMARY_HEADER
         if f["offset"] >= 0:
             shifted.append(f)
+    used = {f["enum"] for f in shifted if "enum" in f}
     results.append(
         {
             "component": item["component"],
             "struct": item["type"],
             "size": t.sizeof - PRIMARY_HEADER,
             "fields": shifted,
+            "enums": {k: v for k, v in ENUMS.items() if k in used},
         }
     )
 

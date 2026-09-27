@@ -7,6 +7,9 @@ info via gdb, and writes the target directory zenith consumes:
 
     <out>/app_manifest.json      component names, uids, dict joins
     <out>/structs/<comp>.json    one zenith struct dict per component
+                                 (enum-typed fields carry "enum": <name>
+                                 and the file's enums table names the
+                                 values)
 
 The layouts come from the same binaries the flight software runs --
 not from headers, docs, or memory -- so the dictionaries cannot
@@ -92,6 +95,10 @@ def main() -> None:
                 }
             },
         }
+        # Enum-typed fields name their enum; the table that names the
+        # values rides in the same file, as the apex generator's does.
+        if r.get("enums"):
+            dict_json["enums"] = r["enums"]
         path = os.path.join(structs_dir, f"{e['component']}.json")
         with open(path, "w") as f:
             json.dump(dict_json, f, indent=2)
