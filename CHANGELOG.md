@@ -9,7 +9,7 @@ version is 0, a minor release may contain breaking changes; each is
 called out in its entry. The history starts at the 2026-08
 architecture review; work before that is the v0.0.1 tag.
 
-## v0.2.0 - 2026-09-26
+## v0.2.0 - 2026-09-27
 
 Zenith grows from an Apex CSF console into one console for three
 flight frameworks, published as a container that runs as pulled.
