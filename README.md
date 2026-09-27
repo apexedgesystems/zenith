@@ -365,6 +365,25 @@ one listen port all refuse to boot. The deployment needs no per-target network c
 container runs on the host network and binds exactly what
 definitions declare.
 
+A target's `health` list is the dashboard's display policy: which
+fields read as bad, and when. A bare name means bad when nonzero
+(the apex error counters are the default list); a table names one
+comparison against a number:
+
+```toml
+health = [
+  "is_slipping",                          # bad when nonzero
+  { field = "last_cmd_result", ge = 2 },  # 1 is an ACK; 2 and up are NACKs
+  { field = "board_link", eq = 2 },       # 0 never used, 1 up, 2 lost
+]
+```
+
+Operators are `eq`, `ne`, `ge`, `gt`, `le`, `lt`, one per rule; a
+rule with none or several refuses to boot. Field names match
+lowercased with underscores stripped. This is ground-side judgement,
+not vehicle truth, so it stays in the zenith config rather than the
+generated bundle.
+
 ## Config Validation
 
 On startup, zenith validates all loaded artifacts and logs warnings

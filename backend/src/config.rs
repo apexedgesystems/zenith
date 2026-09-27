@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /* ----------------------------- Config Types ----------------------------- */
 
@@ -162,12 +162,19 @@ pub struct TargetSection {
     /// silently defaulting.
     #[serde(default = "default_protocol")]
     pub protocol: String,
-    /// Display policy: telemetry field names (lowercased, underscores
-    /// stripped) flagged as bad when nonzero on the dashboard health
-    /// cards. Ground-side judgement, not vehicle truth, so it lives in
-    /// zenith config -- override per target to fit its components.
-    #[serde(default = "default_health_nonzero_bad")]
-    pub health_nonzero_bad: Vec<String>,
+    /// Display policy for the dashboard health cards: which fields
+    /// read as bad, and when. A bare name means "bad when nonzero";
+    /// a table names the field and one comparison (eq, ne, ge, gt,
+    /// le, lt) against a number. Ground-side judgement, not vehicle
+    /// truth, so it lives in zenith config -- override per target to
+    /// fit its components. Field names match lowercased with
+    /// underscores stripped.
+    #[serde(default = "default_health")]
+    pub health: Vec<HealthRule>,
+    /// Retired spelling of `health` (bare names only). Parsed only so
+    /// a config that still uses it refuses boot by name.
+    #[serde(default)]
+    pub health_nonzero_bad: Option<Vec<String>>,
     /// CCSDS SPP targets: APID -> component fullUid routing table
     /// (keys and values as strings, decimal or 0x hex). Long term this
     /// arrives as generated target config alongside the manifest.
@@ -259,11 +266,121 @@ fn default_tm_frame_size() -> usize {
 }
 /// The default policy, callable from target-add paths that build a
 /// TargetSection literal.
-pub fn default_health_nonzero_bad_public() -> Vec<String> {
-    default_health_nonzero_bad()
+/// One health rule as written in config: a bare field name, or a
+/// table with the field and exactly one comparison.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum HealthRule {
+    NonzeroBad(String),
+    Compare {
+        field: String,
+        #[serde(default)]
+        eq: Option<f64>,
+        #[serde(default)]
+        ne: Option<f64>,
+        #[serde(default)]
+        ge: Option<f64>,
+        #[serde(default)]
+        gt: Option<f64>,
+        #[serde(default)]
+        le: Option<f64>,
+        #[serde(default)]
+        lt: Option<f64>,
+    },
 }
 
-fn default_health_nonzero_bad() -> Vec<String> {
+/// A health rule as the engine and the UI consume it: the normalized
+/// field key, the comparison, and the bound.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct HealthCheck {
+    pub field: String,
+    pub op: String,
+    pub value: f64,
+}
+
+/// Normalize a field name the way the dashboard matches it.
+pub fn health_field_key(name: &str) -> String {
+    name.to_lowercase().replace('_', "")
+}
+
+impl HealthRule {
+    /// The rule in its consumable form; an error names what is wrong
+    /// (no comparison, more than one, or an empty field name).
+    pub fn check(&self) -> Result<HealthCheck, String> {
+        match self {
+            HealthRule::NonzeroBad(name) => {
+                if name.trim().is_empty() {
+                    return Err("health rule with an empty field name".to_string());
+                }
+                Ok(HealthCheck {
+                    field: health_field_key(name),
+                    op: "ne".to_string(),
+                    value: 0.0,
+                })
+            }
+            HealthRule::Compare {
+                field,
+                eq,
+                ne,
+                ge,
+                gt,
+                le,
+                lt,
+            } => {
+                if field.trim().is_empty() {
+                    return Err("health rule with an empty field name".to_string());
+                }
+                let given: Vec<(&str, f64)> = [
+                    ("eq", eq),
+                    ("ne", ne),
+                    ("ge", ge),
+                    ("gt", gt),
+                    ("le", le),
+                    ("lt", lt),
+                ]
+                .into_iter()
+                .filter_map(|(op, v)| v.map(|v| (op, v)))
+                .collect();
+                match given.as_slice() {
+                    [(op, value)] => Ok(HealthCheck {
+                        field: health_field_key(field),
+                        op: op.to_string(),
+                        value: *value,
+                    }),
+                    [] => Err(format!(
+                        "health rule for '{}' has no comparison (eq, ne, ge, gt, le, lt)",
+                        field
+                    )),
+                    many => Err(format!(
+                        "health rule for '{}' has {} comparisons; give one",
+                        field,
+                        many.len()
+                    )),
+                }
+            }
+        }
+    }
+}
+
+impl TargetSection {
+    /// Every health rule in consumable form, or the first error.
+    pub fn health_checks(&self) -> Result<Vec<HealthCheck>, String> {
+        self.health.iter().map(HealthRule::check).collect()
+    }
+}
+
+pub fn default_health_public() -> Vec<HealthRule> {
+    default_health()
+}
+
+fn default_health() -> Vec<HealthRule> {
+    default_health_names()
+        .into_iter()
+        .map(HealthRule::NonzeroBad)
+        .collect()
+}
+
+fn default_health_names() -> Vec<String> {
     [
         "overruns",
         "frameoverruns",
@@ -380,8 +497,19 @@ pub fn duplicate_listen_port(targets: &[TargetSection]) -> Option<(u16, &str, &s
 /// name, which is the only way the operator learns why last week's
 /// config stopped booting.
 pub fn retired_key(t: &TargetSection) -> Option<String> {
-    t.udp_listen_port
-        .map(|p| format!("udp_listen_port = {p} was renamed: use listen_port = {p}"))
+    if let Some(p) = t.udp_listen_port {
+        return Some(format!(
+            "udp_listen_port = {p} was renamed: use listen_port = {p}"
+        ));
+    }
+    if t.health_nonzero_bad.is_some() {
+        return Some(
+            "health_nonzero_bad was renamed: use health = [...] (bare names keep the \
+             nonzero-bad meaning; tables add comparisons)"
+                .to_string(),
+        );
+    }
+    None
 }
 
 /// A TM-framed target's frame length must hold at least a header,
@@ -457,7 +585,8 @@ mod tests {
             host: "127.0.0.1".to_string(),
             port: 9000,
             protocol: "ccsds-spp".to_string(),
-            health_nonzero_bad: Vec::new(),
+            health: Vec::new(),
+            health_nonzero_bad: None,
             apid_map: None,
             raw_uid: None,
             carrier: carrier.to_string(),
@@ -477,6 +606,66 @@ mod tests {
     /// @test Two UDP targets on one listen port are named in the
     /// refusal; distinct ports, TCP targets, and portless entries
     /// (caught separately at carrier validation) all pass.
+    /// @test Health rules parse in both forms and normalize to one
+    /// check each: a bare name is nonzero-bad, a table carries its one
+    /// comparison; no comparison, two comparisons, an empty name, and
+    /// the retired health_nonzero_bad key are all refused by name.
+    #[test]
+    fn health_rules_normalize_and_validate() {
+        let t: TargetSection = toml::from_str(
+            r#"
+            name = "t"
+            host = "h"
+            port = 1
+            health = [
+              "is_slipping",
+              { field = "last_cmd_result", ge = 2 },
+              { field = "Board_Link", eq = 2 },
+            ]
+            "#,
+        )
+        .unwrap();
+        let checks = t.health_checks().unwrap();
+        assert_eq!(
+            checks,
+            vec![
+                HealthCheck {
+                    field: "isslipping".into(),
+                    op: "ne".into(),
+                    value: 0.0
+                },
+                HealthCheck {
+                    field: "lastcmdresult".into(),
+                    op: "ge".into(),
+                    value: 2.0
+                },
+                HealthCheck {
+                    field: "boardlink".into(),
+                    op: "eq".into(),
+                    value: 2.0
+                },
+            ]
+        );
+        for (rules, why) in [
+            (r#"[{ field = "x" }]"#, "no comparison"),
+            (r#"[{ field = "x", ge = 1, lt = 5 }]"#, "2 comparisons"),
+            (r#"[""]"#, "empty field name"),
+        ] {
+            let t: TargetSection = toml::from_str(&format!(
+                "name = \"t\"\nhost = \"h\"\nport = 1\nhealth = {rules}\n"
+            ))
+            .unwrap();
+            let e = t.health_checks().unwrap_err();
+            assert!(e.contains(why), "{e}");
+        }
+        let old: TargetSection =
+            toml::from_str("name = \"t\"\nhost = \"h\"\nport = 1\nhealth_nonzero_bad = [\"x\"]\n")
+                .unwrap();
+        assert!(retired_key(&old)
+            .unwrap()
+            .contains("health_nonzero_bad was renamed"));
+    }
+
     /// @test The retired udp_listen_port key refuses boot naming the
     /// new key and carrying the value over, instead of being dropped.
     #[test]

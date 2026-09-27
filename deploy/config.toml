@@ -48,7 +48,7 @@ manifest = "/data/targets/cfs-cpu1/app_manifest.json"
 structs_dir = "/data/targets/cfs-cpu1/structs"
 telemetry_config = "/data/targets/cfs-cpu1/telemetry.json"
 connect_init = "/data/targets/cfs-cpu1/on_connect.json"
-health_nonzero_bad = [
+health = [
   "commanderrorcounter",
   "ingesterrors",
   "internalerrorcounter",

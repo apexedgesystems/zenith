@@ -1,4 +1,5 @@
 import { memo, useMemo, useState } from "react";
+import { isBadValue, type HealthRule } from "../utils/health";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { deletePref, savePref, usePref } from "../api/queries";
 import {
@@ -28,7 +29,7 @@ interface Target {
   port: number;
   connected: boolean;
   listening?: boolean;
-  health_nonzero_bad?: string[];
+  health?: HealthRule[];
 }
 
 interface RegistryComponent {
@@ -51,13 +52,14 @@ interface HealthCard {
   metrics: { label: string; value: string; bad?: boolean }[];
 }
 
-/** Display policy from the target's config (health_nonzero_bad):
- *  fields flagged bad when nonzero. The key normalization (lowercase,
- *  underscores stripped) matches the backend's documented convention.
- *  Policy lives in per-target config, not in this file. */
-function isBad(field: FieldDef, value: number, rules: Set<string>): boolean {
-  const key = field.name.toLowerCase().replace(/_/g, "");
-  return rules.has(key) && value > 0;
+/** Display policy from the target's config (health rules), evaluated
+ *  by the shared helper. Policy lives in per-target config, not here. */
+function isBad(
+  field: FieldDef,
+  value: number,
+  rules: readonly HealthRule[],
+): boolean {
+  return isBadValue(field.name, value, rules);
 }
 
 /* ----------------------------- Struct Dict Loader ----------------------------- */
@@ -185,7 +187,7 @@ async function buildHealthCards(
   selectedTarget: string,
   registry: RegistryComponent[],
   tlmStructs: Map<string, TelemetryStruct>,
-  badRules: Set<string>,
+  badRules: readonly HealthRule[],
 ): Promise<{ exec: HealthCard["metrics"] | null; cards: HealthCard[] }> {
   const cards: HealthCard[] = [];
   let exec: HealthCard["metrics"] | null = null;
@@ -214,7 +216,7 @@ async function buildHealthCards(
             if (typeof value === "number" && !isFinite(value)) continue;
             metrics.push({
               label: field.name,
-              value: formatValue(value, field),
+              value: formatValue(value, field, execStruct.enums),
               bad: typeof value === "number" && isBad(field, value, badRules),
             });
           }
@@ -285,7 +287,7 @@ async function buildHealthCards(
         if (typeof value === "number" && !isFinite(value)) continue;
         metrics.push({
           label: field.name,
-          value: formatValue(value, field),
+          value: formatValue(value, field, tlmStruct.enums),
           bad: typeof value === "number" && isBad(field, value, badRules),
         });
       }
@@ -666,11 +668,8 @@ export default function DashboardPage({
     });
   };
 
-  const badRules = useMemo(
-    () =>
-      new Set<string>(
-        targets.find((t) => t.id === selectedTarget)?.health_nonzero_bad ?? [],
-      ),
+  const badRules = useMemo<HealthRule[]>(
+    () => targets.find((t) => t.id === selectedTarget)?.health ?? [],
     [targets, selectedTarget],
   );
   const healthQuery = useQuery({
