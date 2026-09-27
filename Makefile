@@ -79,7 +79,7 @@ test-frontend:
 		'cd frontend && npm ci && npm run test'
 
 ## Verify the declared version agrees everywhere (and with a tag:
-## make version-check TAG=v0.0.2). The release workflow runs this
+## make version-check TAG=v0.2.0). The release workflow runs this
 ## before publishing.
 version-check:
 	tools/version-check.sh $(TAG)

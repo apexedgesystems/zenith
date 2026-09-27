@@ -3,7 +3,7 @@
 # for use as a release body. Exit 1 if the version has no section:
 # a release without notes is a release cut too early.
 #
-#   tools/changelog-section.sh v0.0.2
+#   tools/changelog-section.sh v0.2.0
 set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 tag=${1:?usage: changelog-section.sh vX.Y.Z}
