@@ -180,7 +180,7 @@ host = "172.26.0.2"
 port = 9001
 auto_connect = true
 dir = "/data/targets/rover-mcu"
-health_nonzero_bad = ["isslipping", "isoffterrain"]
+health = ["isslipping", "isoffterrain"]
 
 [[targets.poll]]
 uid = "0x00DE00"   # GroundVehicle OUTPUT (256 B)
