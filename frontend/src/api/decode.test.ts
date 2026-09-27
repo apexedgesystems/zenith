@@ -91,3 +91,27 @@ describe("formatValue", () => {
     expect(formatValue(250000)).toBe((250000).toLocaleString());
   });
 });
+
+describe("enum labels", () => {
+  const field = {
+    name: "mode",
+    type: "uint",
+    offset: 0,
+    size: 1,
+    enum: "DriveMode",
+  };
+  const enums = {
+    DriveMode: {
+      underlying_type: "uint8_t",
+      values: { HOLD: 0, TRAJECTORY: 1, WAYPOINT: 2 },
+    },
+  };
+  it("names a value the enum knows and keeps the number", () => {
+    expect(formatValue(1, field, enums)).toBe("TRAJECTORY (1)");
+  });
+  it("falls back to the number outside the enum, without a table, or without a ref", () => {
+    expect(formatValue(7, field, enums)).toBe("7");
+    expect(formatValue(1, field)).toBe("1");
+    expect(formatValue(1, { ...field, enum: undefined }, enums)).toBe("1");
+  });
+});

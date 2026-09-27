@@ -2136,6 +2136,7 @@ fn encode_field(
                     dims: None,
                     constraints: None,
                     struct_ref: None,
+                    enum_ref: None,
                 };
                 encode_field(buf, &elem, v)
             })

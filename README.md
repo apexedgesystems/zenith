@@ -54,7 +54,10 @@ describe what's running on that target:
 targets/
   pi-ops-demo/            # An Apex application
     app_manifest.json     # Component registry: fullUid, name, type, instance
-    structs/              # apex_data_gen output, one JSON per component
+    structs/              # apex_data_gen output, one JSON per component;
+                          #   a field may name an entry in the file's
+                          #   enums table ("enum": "DriveMode") and the
+                          #   UI shows the value's name beside the number
       ApexExecutive.json  #   - struct definitions with field types and offsets
       Scheduler.json      #   - categories: STATIC_PARAM / TUNABLE_PARAM /
       WaveGenerator.json  #     STATE / INPUT / OUTPUT / TELEMETRY

@@ -97,6 +97,7 @@ mod tests {
             dims: None,
             constraints: None,
             struct_ref: None,
+            enum_ref: None,
         }
     }
 

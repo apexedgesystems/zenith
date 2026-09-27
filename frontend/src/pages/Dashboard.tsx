@@ -12,6 +12,7 @@ import {
   decodeField,
   formatValue,
   hexToBytes,
+  type EnumTable,
   type FieldDef,
 } from "../api/decode";
 import {
@@ -45,6 +46,8 @@ interface TelemetryStruct {
   opcode: number;
   size: number;
   fields: FieldDef[];
+  /** The component dictionary's enum table, for value labels. */
+  enums?: EnumTable;
 }
 
 interface HealthCard {
@@ -106,6 +109,7 @@ async function loadTelemetryStructs(
           structName: s.name,
           opcode,
           size: s.size,
+          enums: dict.enums,
           fields: sdef.fields.filter(
             (f: FieldDef) =>
               f.size > 0 &&

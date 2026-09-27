@@ -44,6 +44,7 @@ fn make_dict() -> StructDictionary {
                             dims: None,
                             constraints: None,
                             struct_ref: None,
+                            enum_ref: None,
                         },
                         FieldDef {
                             name: "phase".to_string(),
@@ -55,6 +56,7 @@ fn make_dict() -> StructDictionary {
                             dims: None,
                             constraints: None,
                             struct_ref: None,
+                            enum_ref: None,
                         },
                     ],
                 },
@@ -79,6 +81,7 @@ fn make_dict() -> StructDictionary {
                             dims: None,
                             constraints: None,
                             struct_ref: None,
+                            enum_ref: None,
                         },
                         FieldDef {
                             name: "phase".to_string(),
@@ -90,6 +93,7 @@ fn make_dict() -> StructDictionary {
                             dims: None,
                             constraints: None,
                             struct_ref: None,
+                            enum_ref: None,
                         },
                         FieldDef {
                             name: "cycleCount".to_string(),
@@ -101,6 +105,7 @@ fn make_dict() -> StructDictionary {
                             dims: None,
                             constraints: None,
                             struct_ref: None,
+                            enum_ref: None,
                         },
                         FieldDef {
                             name: "amplitude".to_string(),
@@ -112,6 +117,7 @@ fn make_dict() -> StructDictionary {
                             dims: None,
                             constraints: None,
                             struct_ref: None,
+                            enum_ref: None,
                         },
                         FieldDef {
                             name: "frequency".to_string(),
@@ -123,6 +129,7 @@ fn make_dict() -> StructDictionary {
                             dims: None,
                             constraints: None,
                             struct_ref: None,
+                            enum_ref: None,
                         },
                         FieldDef {
                             name: "offset".to_string(),
@@ -134,6 +141,7 @@ fn make_dict() -> StructDictionary {
                             dims: None,
                             constraints: None,
                             struct_ref: None,
+                            enum_ref: None,
                         },
                         FieldDef {
                             name: "lastUpdateMs".to_string(),
@@ -145,6 +153,7 @@ fn make_dict() -> StructDictionary {
                             dims: None,
                             constraints: None,
                             struct_ref: None,
+                            enum_ref: None,
                         },
                         FieldDef {
                             name: "errorCount".to_string(),
@@ -156,6 +165,7 @@ fn make_dict() -> StructDictionary {
                             dims: None,
                             constraints: None,
                             struct_ref: None,
+                            enum_ref: None,
                         },
                         FieldDef {
                             name: "lastSampleNs".to_string(),
@@ -167,6 +177,7 @@ fn make_dict() -> StructDictionary {
                             dims: None,
                             constraints: None,
                             struct_ref: None,
+                            enum_ref: None,
                         },
                         FieldDef {
                             name: "warmupRemain".to_string(),
@@ -178,6 +189,7 @@ fn make_dict() -> StructDictionary {
                             dims: None,
                             constraints: None,
                             struct_ref: None,
+                            enum_ref: None,
                         },
                         FieldDef {
                             name: "padding".to_string(),
@@ -189,6 +201,7 @@ fn make_dict() -> StructDictionary {
                             dims: None,
                             constraints: None,
                             struct_ref: None,
+                            enum_ref: None,
                         },
                     ],
                 },
@@ -221,6 +234,7 @@ fn make_dict() -> StructDictionary {
                         dims: None,
                         constraints: None,
                         struct_ref: None,
+                        enum_ref: None,
                     },
                     FieldDef {
                         name: "tempC".to_string(),
@@ -232,6 +246,7 @@ fn make_dict() -> StructDictionary {
                         dims: None,
                         constraints: None,
                         struct_ref: None,
+                        enum_ref: None,
                     },
                     FieldDef {
                         name: "ramKb".to_string(),
@@ -243,6 +258,7 @@ fn make_dict() -> StructDictionary {
                         dims: None,
                         constraints: None,
                         struct_ref: None,
+                        enum_ref: None,
                     },
                     FieldDef {
                         name: "fdCount".to_string(),
@@ -254,6 +270,7 @@ fn make_dict() -> StructDictionary {
                         dims: None,
                         constraints: None,
                         struct_ref: None,
+                        enum_ref: None,
                     },
                     FieldDef {
                         name: "uptimeS".to_string(),
@@ -265,6 +282,7 @@ fn make_dict() -> StructDictionary {
                         dims: None,
                         constraints: None,
                         struct_ref: None,
+                        enum_ref: None,
                     },
                 ],
             },

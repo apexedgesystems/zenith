@@ -84,6 +84,11 @@ pub struct FieldDef {
     /// field's bytes instantiate (one or more times, two levels max).
     #[serde(default, rename = "struct")]
     pub struct_ref: Option<String>,
+    /// For integer fields whose values are named: the entry in the
+    /// dictionary's `enums` table that names them. Display only; the
+    /// wire value is what the field's type says.
+    #[serde(default, rename = "enum", skip_serializing_if = "Option::is_none")]
+    pub enum_ref: Option<String>,
 }
 
 /// A struct definition with its fields.
@@ -1153,6 +1158,7 @@ mod nested_tests {
             dims: None,
             constraints: None,
             struct_ref: None,
+            enum_ref: None,
         }
     }
 
