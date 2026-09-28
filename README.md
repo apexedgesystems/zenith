@@ -126,17 +126,17 @@ ELF ident) decode correctly with zero configuration.
 
 ## Stack
 
-| Layer         | Technology                                                                              |
-| ------------- | --------------------------------------------------------------------------------------- |
-| Backend       | Rust (axum, tokio, rusqlite)                                                            |
-| Frontend      | React 19, TypeScript strict, Canvas API                                                 |
-| Storage       | SQLite (WAL mode) with read connection pool (1 writer + N readers)                      |
-| Protocol      | APROTO over TCP + SLIP framing                                                          |
-| Tests         | `cargo test --lib` (130 unit tests) + Vitest with React Testing Library (62 unit tests) |
-| Benches       | criterion + pprof flamegraphs                                                           |
-| Auth          | JWT bearer middleware (config-disabled by default)                                      |
-| Rate limiting | Per-IP token bucket on POST endpoints (when auth is on)                                 |
-| Deploy        | Docker (multi-stage Rust + Node -> Debian slim)                                         |
+| Layer         | Technology                                                                                 |
+| ------------- | ------------------------------------------------------------------------------------------ |
+| Backend       | Rust (axum, tokio, rusqlite)                                                               |
+| Frontend      | React 19, TypeScript strict, Canvas API                                                    |
+| Storage       | SQLite (WAL mode) with read connection pool (1 writer + N readers)                         |
+| Protocol      | APROTO over TCP + SLIP framing                                                             |
+| Tests         | `cargo test --lib` (131 unit tests) + Vitest with React Testing Library (62 unit tests)    |
+| Benches       | criterion + pprof flamegraphs                                                              |
+| Auth          | JWT bearer middleware for API clients (off by default; the browser UI does not log in yet) |
+| Rate limiting | Per-IP token bucket on POST endpoints (when auth is on)                                    |
+| Deploy        | Docker (multi-stage Rust + Node -> Debian slim)                                            |
 
 ## Build Artifacts (from Apex release)
 
@@ -284,7 +284,7 @@ make run
 | `make stop`          | Stop the running container                                                                     |
 | `make dev`           | Build + run in foreground (logs to stdout)                                                     |
 | `make test`          | Run **both** backend and frontend test suites                                                  |
-| `make test-backend`  | Backend only: `cargo test --lib` (currently 130 unit tests)                                    |
+| `make test-backend`  | Backend only: `cargo test --lib` (currently 131 unit tests)                                    |
 | `make test-frontend` | Frontend only: `vitest run` (currently 62 unit tests)                                          |
 | `make bench`         | Run criterion benches (`protocol`, `storage`, `decoder`)                                       |
 | `make format`        | Run rustfmt across the backend                                                                 |
@@ -498,6 +498,13 @@ of at least 16 characters. The secret signs tokens and is never a
 login credential. Startup refuses to boot with the default secret,
 a missing hash, or a malformed hash while auth is enabled.
 
+What auth covers today: the HTTP API and the WebSocket, for clients
+that hold a token (scripts, a second tool, a proxy). The browser UI
+has no login page and sends no token, so with auth on the console
+cannot load its pages. Enable auth for API-client deployments; for
+operators on an untrusted network, put an authenticating reverse
+proxy in front of the console (see Deploying Beyond a Trusted LAN).
+
 When auth is enabled:
 
 - All `/api/*` routes except `/api/auth/login` and `/api/health`
@@ -515,8 +522,8 @@ When auth is enabled:
 When auth is disabled (the default for development), the middleware
 is a pass-through, all endpoints are open, no rate limiting applies,
 and audit entries record the anonymous actor "operator". This is a
-deliberate trusted-LAN development posture -- enable auth for any
-deployment where the network is not fully trusted.
+deliberate trusted-LAN development posture; see Deploying Beyond a
+Trusted LAN for any host others can reach.
 
 Independent of auth, every request is bounded: history and CSV row
 limits clamp at 200k, uploads cap at `[server] upload_max_mb`
@@ -534,27 +541,35 @@ detail, status, and source IP.
 ## Deploying Beyond a Trusted LAN
 
 The default posture is a trusted LAN: auth off, every endpoint open.
-For any host others can reach, the deployment enables auth and puts
-TLS in front:
+For any host others can reach, bind the front door to the loopback
+(`[server] host = "127.0.0.1"`) and put a reverse proxy on the same
+host in front of it that terminates TLS and passes WebSocket
+upgrades through for `/ws` (the UI's telemetry stream). Then pick
+the mode that matches who connects:
 
-1. Generate a password hash: `docker run --rm -i
-ghcr.io/apexedgesystems/zenith:latest --hash-password` (reads the
-   password from stdin, prints an argon2 PHC string).
-2. In `config.toml`, set `[auth] enabled = true`, `username`, and
-   `password_hash`. Leave `secret` out of the file and pass it as
-   `ZENITH_AUTH_SECRET` (at least 16 characters, generated, never
-   reused); startup refuses the default secret while auth is on.
-3. Bind the front door to the loopback (`[server] host =
-"127.0.0.1"`) and terminate TLS in a reverse proxy on the same
-   host that forwards to it. The proxy must pass WebSocket upgrades
-   through for `/ws` (the UI's telemetry stream); tokens never ride
-   the query string, so request logs stay clean.
-4. If the UI is served from another origin, list it in `[server]
+- **Operators in a browser.** Keep zenith's auth off and let the
+  proxy authenticate users itself (basic auth, OIDC, client
+  certificates). The browser UI has no login of its own, so this is
+  the only way to put it on an untrusted network today. Audit rows
+  record the anonymous actor "operator", not the proxy's user.
+- **API clients only.** Enable zenith's auth: generate a password
+  hash with `docker run --rm -i ghcr.io/apexedgesystems/zenith:latest
+--hash-password` (reads the password from stdin, prints an argon2
+  PHC string); in `config.toml` set `[auth] enabled = true`,
+  `username` and `password_hash`; leave `secret` out of the file and
+  pass it as `ZENITH_AUTH_SECRET` (at least 16 characters, generated,
+  never reused; startup refuses the default secret while auth is
+  on). Clients log in at `POST /api/auth/login`, send the token as
+  `Authorization: Bearer`, and trade it for a 30 s `/ws` ticket.
+  Tokens never ride the query string, so request logs stay clean.
+  The browser console does not work in this mode.
+
+If the UI is served from another origin, list it in `[server]
 cors_allowed_origins`; otherwise leave it empty (same-origin only).
 
 With auth on, every `/api/*` route except login and health requires a
 bearer token, the per-IP rate limit applies to POSTs, and every
-audited action carries the operator's name. The audit log is on
+audited action carries the token's subject. The audit log is on
 regardless.
 
 ## Releases

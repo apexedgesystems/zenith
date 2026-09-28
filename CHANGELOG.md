@@ -9,6 +9,23 @@ version is 0, a minor release may contain breaking changes; each is
 called out in its entry. The history starts at the 2026-08
 architecture review; work before that is the v0.0.1 tag.
 
+## Unreleased
+
+### Fixed
+
+- A config file that fails to parse, or a missing config path, refuses
+  to boot with the error instead of starting a default server with no
+  targets.
+- The image build uses the committed lockfiles: the backend builds
+  with `--locked` and the frontend installs with `npm ci` alone, so a
+  lockfile that disagrees with its manifest fails the build.
+
+### Changed
+
+- Authentication is documented as covering API clients. The browser
+  console does not log in when auth is on; the remote-deployment
+  section describes an authenticating reverse proxy for operators.
+
 ## v0.2.0 - 2026-09-27
 
 Zenith grows from an Apex CSF console into one console for three
