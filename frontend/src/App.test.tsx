@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 /* The session gate, end to end in the DOM. Every test loads a fresh
@@ -112,13 +113,57 @@ describe("App session gate", () => {
     expect(
       within(dialog).getByText(/Your session ended\./),
     ).toBeInTheDocument();
-    // The shell is still mounted underneath.
-    expect(screen.getByRole("link", { name: "Dashboard" })).toBeInTheDocument();
+    // The shell is still mounted underneath, out of view.
+    const nav = screen.getByText("Dashboard", { selector: "a" });
+    expect(nav).toBeInTheDocument();
+    expect(nav).not.toBeVisible();
     await waitFor(() =>
       expect(
         calls.filter((c) => c === "POST /api/targets/t/command"),
       ).toHaveLength(1),
     );
+  });
+
+  it("keeps the page unreadable under the sign-in form, with what was typed, and shows it again after signing in", async () => {
+    let ended = false;
+    const { apiFetch } = await renderApp((method, path) => {
+      if (path === "/api/auth/session" && method === "POST") {
+        ended = false;
+        return json(live);
+      }
+      if (ended) return new Response("session ended", { status: 401 });
+      return path === "/api/auth/session" ? json(live) : data(path);
+    });
+    await screen.findByRole("button", { name: "Sign out" });
+    const user = userEvent.setup();
+    await user.click(screen.getByRole("button", { name: "+ Add Target" }));
+    const typed = screen.getByPlaceholderText("Name");
+    await user.type(typed, "unsent-name");
+
+    ended = true;
+    await act(async () => {
+      await apiFetch("/api/targets");
+    });
+    const dialog = await screen.findByRole("dialog", { name: "Sign in again" });
+    expect(dialog).toBeVisible();
+    // Nothing of the page can be read or reached while signed out...
+    expect(screen.queryByRole("link", { name: "Dashboard" })).toBeNull();
+    expect(screen.getByText("Dashboard", { selector: "a" })).not.toBeVisible();
+    expect(typed).not.toBeVisible();
+    expect(typed.closest("[inert]")).not.toBeNull();
+    // ...and nothing of it is lost.
+    expect(typed).toHaveValue("unsent-name");
+
+    await user.type(within(dialog).getByLabelText("Password"), "pw{Enter}");
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("dialog", { name: "Sign in again" }),
+      ).toBeNull(),
+    );
+    expect(screen.getByRole("link", { name: "Dashboard" })).toBeVisible();
+    expect(typed).toBeVisible();
+    expect(typed.closest("[inert]")).toBeNull();
+    expect(typed).toHaveValue("unsent-name");
   });
 
   it("prompts to stay signed in before the idle deadline and keeps the session alive on request", async () => {

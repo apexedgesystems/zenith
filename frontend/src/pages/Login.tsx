@@ -140,13 +140,15 @@ export default function LoginPage({
   );
 
   if (overlay) {
+    // Opaque: the page underneath stays mounted but must not be
+    // readable while nobody is signed in.
     return (
       <div
         role="dialog"
         aria-modal="true"
         aria-label="Sign in again"
         className="fixed inset-0 z-[60] flex items-center justify-center"
-        style={{ backgroundColor: "rgba(0,0,0,0.6)" }}
+        style={{ backgroundColor: "var(--color-body)" }}
       >
         {form}
       </div>
