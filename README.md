@@ -103,6 +103,7 @@ ELF ident) decode correctly with zero configuration.
 
 | Page              | Purpose                                                                                                                                                                                                                                                                                                                                                 |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Login**         | Shown when auth is on and nobody is signed in: user name and password, a refusal shown in place. After an idle or absolute expiry the same form covers the page the session ended on, which stays mounted but hidden, so unsent input survives and nothing is resent.                                                                                   |
 | **Dashboard**     | Per-target health cards auto-discovered from struct dicts, flagged by the target's health rules, enum-typed values shown by name. Executive summary banner. Component registry with status dots (probed by command on apex targets; "telemetry heard in the last 30 s" on telemetry-only links). Connect / disconnect / add target.                     |
 | **Telemetry**     | Multi-signal strip charts with hover crosshair, per-plot time windows, threshold lines, drag-to-reorder, layout presets from `telemetry.json`, user-saved layouts in DB, pause/resume, 2-column grid, PNG/CSV export, historical data backfill. Tiered (downsampled) history renders as min/max envelope bands with mean [min..max] crosshair readouts. |
 | **Operations**    | System controls: Sleep/Wake, Pause/Resume, Set Verbosity, Restart Executive (with auto-reconnect). Per-component Lock/Unlock with visual lock state. Library hot-swap (lock + upload .so + reload + auto-unlock). In-page audit feed of issued commands.                                                                                                |
@@ -111,7 +112,7 @@ ELF ident) decode correctly with zero configuration.
 | **INSPECT**       | Browse any registered data block on any component for any category (STATIC_PARAM / TUNABLE_PARAM / STATE / INPUT / OUTPUT). Decoded field table with type info. Auto-refresh toggle (1 Hz) for live state debugging.                                                                                                                                    |
 | **File Transfer** | Drag-and-drop file upload to any path on the target via APROTO. Single-file with size cap. Per-target export of telemetry as CSV.                                                                                                                                                                                                                       |
 | **Storage**       | Live capacity gauge against the configured cap with fill rate and time-to-cap projection, per-target usage bars with trim/delete controls, the pipeline accounting table (decoded = written + counted drops), FIFO/retention counters, retention-ladder card (per-band populations), manual downsample.                                                 |
-| **Audit Log**     | Append-only log of operator actions: every command, file upload, target connect/disconnect/add/remove, library swap, storage trim. Filterable by actor / target / IP / status. Auto-refresh option.                                                                                                                                                     |
+| **Audit Log**     | Append-only log of operator actions: every command, file upload, target connect/disconnect/add/remove, library swap, storage trim; with auth on also sign-in, refused sign-in, sign-out, and telemetry streams closed because their session ended. Filterable by actor / target / IP / status. Auto-refresh option.                                     |
 
 ## Sidebar Features
 
@@ -132,7 +133,7 @@ ELF ident) decode correctly with zero configuration.
 | Frontend      | React 19, TypeScript strict, Canvas API                                                    |
 | Storage       | SQLite (WAL mode) with read connection pool (1 writer + N readers)                         |
 | Protocol      | APROTO over TCP + SLIP framing                                                             |
-| Tests         | `cargo test --lib` (131 unit tests) + Vitest with React Testing Library (62 unit tests)    |
+| Tests         | `cargo test --lib` (151 unit tests) + Vitest with React Testing Library (102 unit tests)   |
 | Benches       | criterion + pprof flamegraphs                                                              |
 | Auth          | Console sign-in with server-side sessions; JWT bearer tokens for API clients (default off) |
 | Rate limiting | Per-IP token bucket on POST endpoints (when auth is on)                                    |
@@ -284,8 +285,8 @@ make run
 | `make stop`          | Stop the running container                                                                     |
 | `make dev`           | Build + run in foreground (logs to stdout)                                                     |
 | `make test`          | Run **both** backend and frontend test suites                                                  |
-| `make test-backend`  | Backend only: `cargo test --lib` (currently 131 unit tests)                                    |
-| `make test-frontend` | Frontend only: `vitest run` (currently 62 unit tests)                                          |
+| `make test-backend`  | Backend only: `cargo test --lib` (currently 151 unit tests)                                    |
+| `make test-frontend` | Frontend only: `vitest run` (currently 102 unit tests)                                         |
 | `make bench`         | Run criterion benches (`protocol`, `storage`, `decoder`)                                       |
 | `make format`        | Run rustfmt across the backend                                                                 |
 | `make lint`          | Run clippy with `-D warnings`                                                                  |
