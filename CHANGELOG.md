@@ -27,7 +27,8 @@ architecture review; work before that is the v0.0.1 tag.
 
 - Authentication is documented as covering API clients. The browser
   console does not log in when auth is on; the remote-deployment
-  section describes an authenticating reverse proxy for operators.
+  section describes an authenticating reverse proxy for operators and
+  names the telemetry socket path it must upgrade.
 
 ## v0.2.0 - 2026-09-27
 

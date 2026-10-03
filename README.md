@@ -544,8 +544,8 @@ The default posture is a trusted LAN: auth off, every endpoint open.
 For any host others can reach, bind the front door to the loopback
 (`[server] host = "127.0.0.1"`) and put a reverse proxy on the same
 host in front of it that terminates TLS and passes WebSocket
-upgrades through for `/ws` (the UI's telemetry stream). Then pick
-the mode that matches who connects:
+upgrades through for `/api/targets/{id}/telemetry/live` (the UI's
+telemetry stream). Then pick the mode that matches who connects:
 
 - **Operators in a browser.** Keep zenith's auth off and let the
   proxy authenticate users itself (basic auth, OIDC, client
@@ -560,8 +560,10 @@ the mode that matches who connects:
   pass it as `ZENITH_AUTH_SECRET` (at least 16 characters, generated,
   never reused; startup refuses the default secret while auth is
   on). Clients log in at `POST /api/auth/login`, send the token as
-  `Authorization: Bearer`, and trade it for a 30 s `/ws` ticket.
-  Tokens never ride the query string, so request logs stay clean.
+  `Authorization: Bearer`, and trade it at `POST /api/auth/ws-ticket`
+  for a 30 s ticket that opens the telemetry socket. Long-lived
+  tokens never ride the query string; only that ticket does, so
+  request logs stay clean.
   The browser console does not work in this mode.
 
 If the UI is served from another origin, list it in `[server]
