@@ -14,7 +14,7 @@ make test
 # Backend only (151 unit tests, Rust)
 make test-backend
 
-# Frontend only (62 unit tests, Vitest + React Testing Library)
+# Frontend only (68 unit tests, Vitest + React Testing Library)
 make test-frontend
 
 # Lint (clippy with -D warnings)

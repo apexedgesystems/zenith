@@ -11,6 +11,7 @@ import {
   fieldName,
   groupChannels,
 } from "../types/telemetry";
+import { apiFetch } from "../api/apiFetch";
 
 const MAX_LIVE_POINTS = 6000; // WS buffer cap for sidebar live values
 const WS_BATCH_MS = 100; // Flush WS batch every 100ms
@@ -60,7 +61,7 @@ export default function TelemetryPage({
 
   // Load layouts
   useEffect(() => {
-    fetch(`/api/targets/${selectedTarget}/telemetry/layouts`)
+    apiFetch(`/api/targets/${selectedTarget}/telemetry/layouts`)
       .then((r) => (r.ok ? r.json() : { layouts: [] }))
       .then((data) => {
         setLayouts(data.layouts || []);
@@ -252,7 +253,7 @@ export default function TelemetryPage({
         plottedChannels.map(async (ch) => {
           if (cancelled) return;
           try {
-            const r = await fetch(
+            const r = await apiFetch(
               `/api/targets/${selectedTarget}/telemetry/history?channel=${encodeURIComponent(
                 ch,
               )}&start_ms=${startMs}&end_ms=${now}&limit=${limit}`,
@@ -462,7 +463,7 @@ export default function TelemetryPage({
     const name = form?.name?.trim();
     if (!name) return;
     try {
-      const r = await fetch(
+      const r = await apiFetch(
         `/api/targets/${selectedTarget}/telemetry/layouts/save`,
         {
           method: "POST",
@@ -487,7 +488,7 @@ export default function TelemetryPage({
       if (r.ok) {
         setSaveMsg(`Saved "${name}"`);
         setTimeout(() => setSaveMsg(null), 2000);
-        const lr = await fetch(
+        const lr = await apiFetch(
           `/api/targets/${selectedTarget}/telemetry/layouts`,
         );
         if (lr.ok) {

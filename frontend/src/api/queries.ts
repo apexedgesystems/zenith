@@ -9,6 +9,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { arrayOf, field, isObject, request, Validator } from "./client";
+import { apiFetch } from "./apiFetch";
 import type { HealthRule } from "../utils/health";
 
 /* ------------------------------ targets ------------------------------ */
@@ -319,7 +320,7 @@ export function usePref<T>(scope: string, kind: string, name: string) {
     queryKey: ["pref", scope, kind, name],
     staleTime: 60_000,
     queryFn: async () => {
-      const r = await fetch(`/api/prefs/${scope}/${kind}/${name}`);
+      const r = await apiFetch(`/api/prefs/${scope}/${kind}/${name}`);
       if (r.status === 404) return null;
       if (!r.ok) throw new Error(await r.text());
       return (await r.json()) as T;
@@ -333,7 +334,7 @@ export async function savePref(
   name: string,
   value: unknown,
 ): Promise<void> {
-  const r = await fetch(`/api/prefs/${scope}/${kind}/${name}`, {
+  const r = await apiFetch(`/api/prefs/${scope}/${kind}/${name}`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(value),
@@ -346,7 +347,7 @@ export async function deletePref(
   kind: string,
   name: string,
 ): Promise<void> {
-  const r = await fetch(`/api/prefs/${scope}/${kind}/${name}`, {
+  const r = await apiFetch(`/api/prefs/${scope}/${kind}/${name}`, {
     method: "DELETE",
   });
   if (!r.ok) throw new Error(await r.text());

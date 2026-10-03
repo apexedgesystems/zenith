@@ -13,6 +13,7 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import { useDialogs } from "./components/dialogs";
 import { type Target, formatBytes, formatCount } from "./utils/targets";
 import { useAllTargetStorage, useTargets } from "./api/queries";
+import { apiFetch } from "./api/apiFetch";
 
 /* ----------------------------- Nav ----------------------------- */
 
@@ -204,7 +205,7 @@ function App() {
       // Authoritative state via fresh fetch (NOT the polled ref)
       let liveTargets: Target[];
       try {
-        const r = await fetch("/api/targets");
+        const r = await apiFetch("/api/targets");
         if (!r.ok) return;
         const data = await r.json();
         liveTargets = data.targets || [];
@@ -225,7 +226,7 @@ function App() {
         if (now - lastTry < 10_000) continue; // 10s cooldown after last attempt
         inflight.add(t.id);
         cooldown.set(t.id, now);
-        fetch(`/api/targets/${t.id}/connect`, { method: "POST" })
+        apiFetch(`/api/targets/${t.id}/connect`, { method: "POST" })
           .catch(() => {})
           .finally(() => {
             inflight.delete(t.id);
@@ -253,16 +254,16 @@ function App() {
   };
 
   const connectTarget = async (id: string) => {
-    await fetch(`/api/targets/${id}/connect`, { method: "POST" });
+    await apiFetch(`/api/targets/${id}/connect`, { method: "POST" });
   };
 
   const disconnectTarget = async (id: string) => {
-    await fetch(`/api/targets/${id}/disconnect`, { method: "POST" });
+    await apiFetch(`/api/targets/${id}/disconnect`, { method: "POST" });
   };
 
   const removeTarget = async (id: string) => {
     if (!(await confirmDialog("Remove this target?", "Remove target"))) return;
-    await fetch(`/api/targets/${id}/remove`, { method: "POST" });
+    await apiFetch(`/api/targets/${id}/remove`, { method: "POST" });
     if (selectedTarget === id) {
       const remaining = targets.filter((t) => t.id !== id);
       setSelectedTarget(remaining.length > 0 ? remaining[0].id : "");
@@ -284,7 +285,7 @@ function App() {
     )
       return;
     try {
-      const r = await fetch(`/api/targets/${id}/storage/trim`, {
+      const r = await apiFetch(`/api/targets/${id}/storage/trim`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ count }),
@@ -299,7 +300,7 @@ function App() {
 
   const addTarget = async (name: string, host: string, port: number) => {
     try {
-      const r = await fetch("/api/targets/add", {
+      const r = await apiFetch("/api/targets/add", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name, host, port }),

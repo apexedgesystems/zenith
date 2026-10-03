@@ -1,11 +1,14 @@
 /** THE typed API client.
  *
- *  Every backend call goes through request(): one place for base
+ *  Typed backend calls go through request(): one place for base
  *  paths, error surfacing, and runtime shape validation. A backend
  *  field rename fails HERE with the endpoint named -- loudly at the
  *  boundary -- instead of surfacing as undefined.toFixed() somewhere
- *  in a render three components away.
+ *  in a render three components away. Requests leave through
+ *  apiFetch, the one choke point every caller shares.
  */
+
+import { apiFetch } from "./apiFetch";
 
 export class ApiError extends Error {
   constructor(
@@ -33,7 +36,7 @@ export async function request<T>(
 ): Promise<T> {
   let resp: Response;
   try {
-    resp = await fetch(`/api${endpoint}`, init);
+    resp = await apiFetch(`/api${endpoint}`, init);
   } catch (e) {
     throw new ApiError(endpoint, 0, `network error: ${String(e)}`);
   }
