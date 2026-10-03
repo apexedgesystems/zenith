@@ -27,6 +27,8 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # Auth
 jsonwebtoken = "9"
 argon2 = { version = "0.5", features = ["std"] }
+# Browser session ids are stored as SHA-256 digests, never in the clear
+sha2 = "0.11"
 
 # Logging
 tracing = "0.1"

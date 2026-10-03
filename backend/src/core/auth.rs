@@ -1,8 +1,11 @@
 //! Authentication primitives: credential verification, token
-//! mint/validate, and boot-time config validation. The axum middleware
-//! and handlers in the binary are thin wrappers over these functions
-//! so the security-critical logic lives where the test suite runs.
+//! mint/validate, which credential a request presents, and boot-time
+//! config validation. The axum middleware and handlers in the binary
+//! are thin wrappers over these functions (and over core::session for
+//! browser sessions) so the security-critical logic lives where the
+//! test suite runs.
 
+use axum::http::{header, HeaderMap};
 use serde::Deserialize;
 
 /// Token time-to-live for interactive logins.
@@ -20,6 +23,53 @@ struct Claims {
     sub: String,
     #[serde(default)]
     ws: bool,
+}
+
+/// The credential a request presents. The middleware honours them in
+/// this order -- a bearer header, then a socket ticket on the query
+/// string, then the browser session cookie -- and the first one
+/// present decides: a bad bearer token never falls back to a cookie.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Credential<'a> {
+    Bearer(&'a str),
+    Ticket(&'a str),
+    Cookie(&'a str),
+    None,
+}
+
+/// Which credential the request presents (see [`Credential`]).
+pub fn credential<'a>(headers: &'a HeaderMap, query: Option<&'a str>) -> Credential<'a> {
+    if let Some(token) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+    {
+        return Credential::Bearer(token);
+    }
+    let ticket = query.and_then(|q| {
+        q.split('&').find_map(|kv| {
+            let (name, value) = kv.split_once('=')?;
+            (name == "ticket").then_some(value)
+        })
+    });
+    if let Some(ticket) = ticket {
+        return Credential::Ticket(ticket);
+    }
+    match crate::core::session::cookie_value(headers) {
+        Some(id) => Credential::Cookie(id),
+        None => Credential::None,
+    }
+}
+
+/// The actor recorded for a refused sign-in: the submitted name when
+/// it is the configured user, otherwise a fixed marker, so a password
+/// typed into the user field never lands in the audit log.
+pub fn refused_sign_in_actor<'a>(submitted: &'a str, configured: &str) -> &'a str {
+    if submitted == configured {
+        submitted
+    } else {
+        "(unknown user)"
+    }
 }
 
 /// Verify a login against the configured username and argon2 PHC hash.
@@ -115,6 +165,19 @@ pub fn boot_errors(auth: &crate::config::AuthSection) -> Vec<String> {
     } else if argon2::PasswordHash::new(&auth.password_hash).is_err() {
         errors.push("[auth] password_hash is not a valid PHC string".to_string());
     }
+    if auth.session_max_hours == 0 {
+        errors.push(
+            "[auth] session_max_hours is 0; a browser session needs an absolute limit \
+             of at least 1 hour (default 10)"
+                .to_string(),
+        );
+    } else if u64::from(auth.session_idle_min) > u64::from(auth.session_max_hours) * 60 {
+        errors.push(format!(
+            "[auth] session_idle_min ({} min) is longer than session_max_hours ({} h); \
+             the idle limit must fit inside the absolute one (0 disables it)",
+            auth.session_idle_min, auth.session_max_hours
+        ));
+    }
     errors
 }
 
@@ -201,6 +264,7 @@ mod tests {
             secret: DEFAULT_SECRET.to_string(),
             username: "admin".into(),
             password_hash: String::new(),
+            ..AuthSection::default()
         };
         assert!(
             boot_errors(&auth).is_empty(),
@@ -216,5 +280,101 @@ mod tests {
 
         auth.password_hash = good_hash;
         assert!(boot_errors(&auth).is_empty(), "proper config passes");
+    }
+
+    /// @test Session limits: an absolute limit of zero and an idle limit
+    /// longer than the absolute one each refuse boot naming the key; an
+    /// idle limit of 0 (off) or equal to the absolute one passes; the
+    /// keys are not checked while auth is off.
+    #[test]
+    fn boot_validation_covers_session_limits() {
+        use crate::config::AuthSection;
+        let mut auth = AuthSection {
+            enabled: true,
+            secret: "long-enough-secret-value".into(),
+            password_hash: hash_password("pw").unwrap(),
+            ..AuthSection::default()
+        };
+        assert!(boot_errors(&auth).is_empty(), "defaults pass");
+
+        auth.session_max_hours = 0;
+        let errs = boot_errors(&auth);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("session_max_hours"), "{errs:?}");
+
+        auth.session_max_hours = 2;
+        auth.session_idle_min = 121;
+        let errs = boot_errors(&auth);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("session_idle_min (121 min)"), "{errs:?}");
+
+        auth.session_idle_min = 120;
+        assert!(boot_errors(&auth).is_empty(), "equal limits pass");
+        auth.session_idle_min = 0;
+        assert!(boot_errors(&auth).is_empty(), "idle limit off passes");
+
+        auth.session_max_hours = 0;
+        auth.enabled = false;
+        assert!(boot_errors(&auth).is_empty(), "inert while auth is off");
+    }
+
+    /// @test The session keys default to a 30 minute idle limit, a 10
+    /// hour absolute limit and a Secure cookie, and read from the file.
+    #[test]
+    fn session_keys_parse_with_defaults() {
+        use crate::config::AuthSection;
+        let d: AuthSection = toml::from_str("enabled = true").unwrap();
+        assert_eq!(
+            (d.session_idle_min, d.session_max_hours, d.cookie_secure),
+            (30, 10, true)
+        );
+        let set: AuthSection =
+            toml::from_str("session_idle_min = 0\nsession_max_hours = 12\ncookie_secure = false\n")
+                .unwrap();
+        assert_eq!(
+            (
+                set.session_idle_min,
+                set.session_max_hours,
+                set.cookie_secure
+            ),
+            (0, 12, false)
+        );
+    }
+
+    /// @test Credential precedence: a bearer header wins over a query
+    /// ticket and a cookie, a ticket wins over a cookie, a cookie is
+    /// used alone, and a non-bearer Authorization header or a valueless
+    /// ticket parameter counts as absent.
+    #[test]
+    fn credential_precedence_is_bearer_then_ticket_then_cookie() {
+        use axum::http::HeaderValue;
+        let mut all = HeaderMap::new();
+        all.insert("authorization", HeaderValue::from_static("Bearer tok"));
+        all.insert("cookie", HeaderValue::from_static("zenith_session=sid"));
+        let q = Some("a=1&ticket=tik");
+        assert_eq!(credential(&all, q), Credential::Bearer("tok"));
+
+        let mut ticket_and_cookie = HeaderMap::new();
+        ticket_and_cookie.insert("cookie", HeaderValue::from_static("zenith_session=sid"));
+        assert_eq!(credential(&ticket_and_cookie, q), Credential::Ticket("tik"));
+        assert_eq!(
+            credential(&ticket_and_cookie, None),
+            Credential::Cookie("sid")
+        );
+
+        let mut basic = HeaderMap::new();
+        basic.insert("authorization", HeaderValue::from_static("Basic Zm9v"));
+        assert_eq!(credential(&basic, Some("ticket")), Credential::None);
+        assert_eq!(credential(&HeaderMap::new(), None), Credential::None);
+    }
+
+    /// @test A refused sign-in is attributed to the submitted name only
+    /// when it is the configured user; anything else (a typo, or a
+    /// password typed into the user field) becomes a fixed marker.
+    #[test]
+    fn refused_sign_in_never_records_arbitrary_text() {
+        assert_eq!(refused_sign_in_actor("admin", "admin"), "admin");
+        assert_eq!(refused_sign_in_actor("hunter2!", "admin"), "(unknown user)");
+        assert_eq!(refused_sign_in_actor("", "admin"), "(unknown user)");
     }
 }

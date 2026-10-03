@@ -5,6 +5,7 @@ pub mod auth;
 pub mod config_manager;
 pub mod metrics;
 pub mod sequence;
+pub mod session;
 pub mod stream_link;
 pub mod telemetry;
 pub mod tprm;

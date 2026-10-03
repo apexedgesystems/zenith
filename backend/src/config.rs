@@ -41,8 +41,9 @@ fn default_upload_max_mb() -> u32 {
 }
 
 /// Authentication and rate-limiting configuration. Disabled by default
-/// for development; set `enabled = true` to require JWT bearer tokens
-/// on all `/api/*` routes (except `/api/auth/login` and `/api/health`).
+/// for development; set `enabled = true` to require a bearer token or
+/// a browser session on all `/api/*` routes (except `/api/auth/login`,
+/// signing in at `/api/auth/session`, and `/api/health`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct AuthSection {
     #[serde(default)]
@@ -58,10 +59,32 @@ pub struct AuthSection {
     /// `zenith --hash-password`. Required when auth is enabled.
     #[serde(default)]
     pub password_hash: String,
+    /// Browser sessions end after this many minutes without an
+    /// explicit keep-alive (sent by the UI only after operator input).
+    /// 0 disables the idle limit, leaving the absolute one.
+    #[serde(default = "default_session_idle_min")]
+    pub session_idle_min: u32,
+    /// Browser sessions end this many hours after sign-in, whatever
+    /// their activity. Must be at least 1.
+    #[serde(default = "default_session_max_hours")]
+    pub session_max_hours: u32,
+    /// Mark the session cookie Secure, so browsers send it over HTTPS
+    /// only. false allows plain HTTP on a trusted network.
+    #[serde(default = "default_cookie_secure")]
+    pub cookie_secure: bool,
 }
 
 fn default_username() -> String {
     "admin".to_string()
+}
+fn default_session_idle_min() -> u32 {
+    30
+}
+fn default_session_max_hours() -> u32 {
+    10
+}
+fn default_cookie_secure() -> bool {
+    true
 }
 
 /// Storage layer configuration: SQLite path, retention, FIFO trigger.
@@ -419,6 +442,9 @@ impl Default for AuthSection {
             secret: default_secret(),
             username: default_username(),
             password_hash: String::new(),
+            session_idle_min: default_session_idle_min(),
+            session_max_hours: default_session_max_hours(),
+            cookie_secure: default_cookie_secure(),
         }
     }
 }
