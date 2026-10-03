@@ -11,6 +11,47 @@ architecture review; work before that is the v0.0.1 tag.
 
 ## Unreleased
 
+### Added
+
+- With auth on, the console signs in: a login page, a server-side
+  session, and Sign out. A session ends after `[auth]
+  session_idle_min` without operator input (default 30 minutes; 0
+  turns the idle limit off) and `[auth] session_max_hours` after
+  sign-in (default 10 hours). Only operator input renews a session;
+  polling, reloads and the telemetry stream do not. The console offers
+  to stay signed in two minutes before the idle limit and gives the
+  end time ten minutes before the absolute one. After an expiry it
+  asks for the password over the current page, keeps what was typed
+  there, and resends nothing.
+- `GET`, `POST` and `DELETE /api/auth/session` (session status, sign
+  in, sign out) and `POST /api/auth/session/refresh` (keep-alive).
+
+### Changed
+
+- The session cookie is Secure by default: serve the console over
+  HTTPS through a reverse proxy (the README's remote-deployment
+  steps), or set `[auth] cookie_secure = false` for plain HTTP on a
+  trusted network.
+- A request that carries the session cookie and changes something, or
+  opens the telemetry socket, must come from the console's own origin;
+  anything else is refused with 403. Bearer-token requests are not
+  affected. `POST /api/auth/ws-ticket` is for bearer-token clients and
+  refuses a signed-in console.
+- When a session ends, the server closes its telemetry streams with
+  WebSocket close code 1008. Target links and recording are not
+  affected.
+- With auth on, a request without credentials is refused with "missing
+  token or session" instead of "missing token".
+
+### Security
+
+- Session ids are random 256-bit values in an HttpOnly, SameSite=Strict
+  cookie. The database stores only their SHA-256, so sessions survive a
+  restart without the ids being kept anywhere.
+- Sign-in, refused sign-in, sign-out and streams closed by a session
+  end are audited. A refused sign-in is recorded under the configured
+  user name or "(unknown user)", never under the text that was typed.
+
 ### Fixed
 
 - A config file that fails to parse, or a missing config path, refuses
@@ -22,13 +63,6 @@ architecture review; work before that is the v0.0.1 tag.
 - The image build context excludes local dependencies, build outputs,
   runtime data and the git history, so a host's node_modules or target
   directory cannot enter the image.
-
-### Changed
-
-- Authentication is documented as covering API clients. The browser
-  console does not log in when auth is on; the remote-deployment
-  section describes an authenticating reverse proxy for operators and
-  names the telemetry socket path it must upgrade.
 
 ## v0.2.0 - 2026-09-27
 

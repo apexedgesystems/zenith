@@ -12,6 +12,11 @@ import {
   groupChannels,
 } from "../types/telemetry";
 import { apiFetch } from "../api/apiFetch";
+import {
+  SESSION_END_CLOSE,
+  session,
+  useSessionGeneration,
+} from "../api/session";
 
 const MAX_LIVE_POINTS = 6000; // WS buffer cap for sidebar live values
 const WS_BATCH_MS = 100; // Flush WS batch every 100ms
@@ -105,9 +110,17 @@ export default function TelemetryPage({
 
   const batchRef = useRef<Sample[]>([]);
   const liveDataRef = useRef<ChannelData>({});
+  // The socket runs only under a live session (or with auth off), and a
+  // new sign-in opens a fresh one. Without a session the page keeps the
+  // data it has and opens nothing.
+  const sessionGeneration = useSessionGeneration();
 
   // WebSocket: accumulate live data + detect connection
   useEffect(() => {
+    if (sessionGeneration === null) {
+      setConnected(false);
+      return;
+    }
     setAllChannels({});
     setSampleCount(0);
     setConnected(false);
@@ -149,9 +162,16 @@ export default function TelemetryPage({
           /* ignore */
         }
       };
-      ws.onclose = () => {
+      ws.onclose = (event) => {
         if (stopped) return;
         setConnected(false);
+        if (event.code === SESSION_END_CLOSE) {
+          // The server closed this stream because its session ended:
+          // not a link drop, so no reconnect loop. The session owner
+          // re-reads the session; signing in again opens a new stream.
+          void session.check();
+          return;
+        }
         reconnectTimer = window.setTimeout(() => {
           reconnectDelay = Math.min(30000, reconnectDelay * 2);
           connect();
@@ -211,7 +231,7 @@ export default function TelemetryPage({
       if (reconnectTimer) window.clearTimeout(reconnectTimer);
       window.clearInterval(flushTimer);
     };
-  }, [selectedTarget]);
+  }, [selectedTarget, sessionGeneration]);
 
   // Stable key for plotted channels (order-independent, memoized)
   const plottedChannelKey = useMemo(

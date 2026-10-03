@@ -8,12 +8,19 @@ import AuditPage from "./pages/Audit";
 import TunablesPage from "./pages/Tunables";
 import FileTransferPage from "./pages/Files";
 import StoragePage from "./pages/Storage";
+import LoginPage from "./pages/Login";
 import Clock from "./components/Clock";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { useDialogs } from "./components/dialogs";
 import { type Target, formatBytes, formatCount } from "./utils/targets";
 import { useAllTargetStorage, useTargets } from "./api/queries";
 import { apiFetch } from "./api/apiFetch";
+import {
+  session,
+  sessionNotice,
+  signsInInPlace,
+  useSession,
+} from "./api/session";
 
 /* ----------------------------- Nav ----------------------------- */
 
@@ -98,9 +105,141 @@ function AddTargetForm({
   );
 }
 
+/* ----------------------------- Session ----------------------------- */
+
+/** "HH:MM:SS UTC" for a local instant, matching the header clock. */
+function utcTime(ms: number): string {
+  return new Date(ms).toISOString().slice(11, 19) + " UTC";
+}
+
+/** "m:ss" for a duration. */
+function minutesSeconds(ms: number): string {
+  const s = Math.ceil(ms / 1000);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+}
+
+/** Who is signed in, and the way out. Nothing when auth is off. */
+function SessionIndicator() {
+  const s = useSession();
+  const [problem, setProblem] = useState<string | null>(null);
+  if (s.kind !== "signedIn") return null;
+  return (
+    <div className="flex items-center gap-2 text-xs">
+      {problem && <span style={{ color: "var(--color-crit)" }}>{problem}</span>}
+      <span style={{ color: "var(--color-text-secondary)" }}>{s.user}</span>
+      <button
+        onClick={async () => setProblem(await session.signOut())}
+        className="text-xs px-2 py-0.5 rounded"
+        style={{
+          color: "var(--color-text-muted)",
+          backgroundColor: "transparent",
+          border: "1px solid var(--color-border)",
+        }}
+      >
+        Sign out
+      </button>
+    </div>
+  );
+}
+
+/** The stay-signed-in prompt before an idle deadline and the notice
+ *  before the absolute one. Ticks on its own so the shell does not
+ *  re-render every second. */
+function SessionBanner() {
+  const s = useSession();
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const notice = sessionNotice(s, now);
+  if (!notice) return null;
+  return (
+    <div
+      role="status"
+      className="flex items-center gap-3 px-4 py-1.5 text-xs shrink-0"
+      style={{
+        backgroundColor: "var(--color-elevated)",
+        color: "var(--color-warn)",
+        borderBottom: "1px solid var(--color-border-muted)",
+      }}
+    >
+      {notice.kind === "idle" ? (
+        <>
+          <span>
+            No input for a while: this session ends at{" "}
+            {utcTime(notice.endsAtLocal)} (in{" "}
+            {minutesSeconds(notice.remainingMs)}).
+          </span>
+          <button
+            onClick={() => void session.stayActive()}
+            className="text-xs px-2 py-0.5 rounded font-bold"
+            style={{
+              backgroundColor: "var(--color-accent)",
+              color: "var(--color-bg, #0d1117)",
+            }}
+          >
+            Stay signed in
+          </button>
+        </>
+      ) : (
+        <span>
+          This session ends at {utcTime(notice.endsAtLocal)} (in{" "}
+          {minutesSeconds(notice.remainingMs)}), its time limit. Sign in again
+          then to continue.
+        </span>
+      )}
+    </div>
+  );
+}
+
 /* ----------------------------- App ----------------------------- */
 
+/** The session gate. The shell renders with auth off or a live
+ *  session; at boot without a session, and after signing out, the
+ *  login page stands in for it. When a session ends while the shell is
+ *  up, the shell stays mounted under a sign-in form, so whatever the
+ *  operator was doing survives and nothing is resent. */
 function App() {
+  const s = useSession();
+  useEffect(() => session.start(), []);
+
+  if (s.kind === "unknown") {
+    return (
+      <div
+        className="h-screen"
+        style={{ backgroundColor: "var(--color-body)" }}
+      />
+    );
+  }
+  if (s.kind === "signedOut" && !signsInInPlace(s.reason)) {
+    return (
+      <LoginPage
+        reason={s.reason}
+        defaultUser={s.user ?? ""}
+        overlay={false}
+        onSignIn={session.signIn}
+      />
+    );
+  }
+  return (
+    <>
+      <Shell />
+      {s.kind === "signedOut" && (
+        <LoginPage
+          reason={s.reason}
+          defaultUser={s.user ?? ""}
+          overlay
+          onSignIn={session.signIn}
+        />
+      )}
+    </>
+  );
+}
+
+/* ----------------------------- Shell ----------------------------- */
+
+function Shell() {
   const [page, setPage] = useState(window.location.pathname);
   const [selectedTarget, setSelectedTarget] = useState("target-0");
   // Server state via the shared query cache: one poller regardless of
@@ -707,8 +846,12 @@ function App() {
             {targets.find((t) => t.id === selectedTarget)?.name ||
               "No target selected"}
           </div>
-          <Clock />
+          <div className="flex items-center gap-4">
+            <SessionIndicator />
+            <Clock />
+          </div>
         </header>
+        <SessionBanner />
 
         {/* Page content */}
         <main className="flex-1 overflow-auto p-5">
