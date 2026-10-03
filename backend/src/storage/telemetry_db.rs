@@ -224,6 +224,20 @@ impl TelemetryDb {
             CREATE INDEX IF NOT EXISTS idx_audit_target ON audit_log (target_id, ts_ms DESC);",
         )?;
 
+        // Browser sessions: one row per live session, keyed by a SHA-256
+        // of the cookie value (the value itself is never stored). Rows
+        // hold facts -- who, signed in when, last kept alive when -- and
+        // the deadlines are derived from the configured limits, so a
+        // changed limit applies at the next boot without touching rows.
+        writer.execute_batch(
+            "CREATE TABLE IF NOT EXISTS sessions (
+                key TEXT PRIMARY KEY,
+                user TEXT NOT NULL,
+                created_ms INTEGER NOT NULL,
+                refreshed_ms INTEGER NOT NULL
+            );",
+        )?;
+
         tracing::info!(
             "Telemetry database opened: {} (read pool max {})",
             path.display(),
@@ -1149,6 +1163,59 @@ impl TelemetryDb {
             Ok(count as u64)
         })
     }
+
+    /// Store a new browser session row.
+    pub fn insert_session(&self, row: &SessionRow) -> Result<(), DbError> {
+        let conn = self.writer.lock().map_err(|_| DbError::Lock)?;
+        conn.execute(
+            "INSERT INTO sessions (key, user, created_ms, refreshed_ms) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                row.key,
+                row.user,
+                row.created_ms as i64,
+                row.refreshed_ms as i64
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Every stored browser session row (loaded once, at boot).
+    pub fn load_sessions(&self) -> Result<Vec<SessionRow>, DbError> {
+        self.with_reader(|conn| {
+            let mut stmt =
+                conn.prepare_cached("SELECT key, user, created_ms, refreshed_ms FROM sessions")?;
+            let rows = stmt.query_map([], |row| {
+                Ok(SessionRow {
+                    key: row.get(0)?,
+                    user: row.get(1)?,
+                    created_ms: row.get::<_, i64>(2)? as u64,
+                    refreshed_ms: row.get::<_, i64>(3)? as u64,
+                })
+            })?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            Ok(out)
+        })
+    }
+
+    /// Record a session keep-alive; true when the row exists.
+    pub fn touch_session(&self, key: &str, refreshed_ms: u64) -> Result<bool, DbError> {
+        let conn = self.writer.lock().map_err(|_| DbError::Lock)?;
+        let n = conn.execute(
+            "UPDATE sessions SET refreshed_ms = MAX(refreshed_ms, ?2) WHERE key = ?1",
+            params![key, refreshed_ms as i64],
+        )?;
+        Ok(n > 0)
+    }
+
+    /// Delete a session row; true when it existed.
+    pub fn delete_session(&self, key: &str) -> Result<bool, DbError> {
+        let conn = self.writer.lock().map_err(|_| DbError::Lock)?;
+        let n = conn.execute("DELETE FROM sessions WHERE key = ?1", params![key])?;
+        Ok(n > 0)
+    }
 }
 
 /// Build an Envelope from a row's nullable tier columns: present only
@@ -1303,6 +1370,18 @@ pub struct AuditEntry {
     pub detail: Option<String>,
     pub status: String,
     pub source_ip: Option<String>,
+}
+
+/// One stored browser session: the hash that keys it and the facts its
+/// deadlines are derived from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRow {
+    /// SHA-256 of the cookie value, hex.
+    pub key: String,
+    pub user: String,
+    pub created_ms: u64,
+    /// The last explicit keep-alive (the sign-in instant before any).
+    pub refreshed_ms: u64,
 }
 
 /* ----------------------------- Layout Persistence ----------------------------- */
@@ -2771,5 +2850,44 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].timestamp_ms, 200);
         assert_eq!(db.query_latest("t1").unwrap().len(), 1);
+    }
+
+    /// @test Session rows round-trip through insert and load; a
+    /// keep-alive only moves refreshed_ms forward; delete removes the
+    /// row once and reports a missing one; all of it survives reopening
+    /// the file.
+    #[test]
+    fn session_rows_round_trip_and_persist() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.db");
+        let db = TelemetryDb::open(&path).unwrap();
+        let row = SessionRow {
+            key: "ab".repeat(32),
+            user: "ops".into(),
+            created_ms: 1_000,
+            refreshed_ms: 1_000,
+        };
+        db.insert_session(&row).unwrap();
+        assert!(db.insert_session(&row).is_err(), "keys are unique");
+        assert_eq!(db.load_sessions().unwrap(), vec![row.clone()]);
+
+        assert!(db.touch_session(&row.key, 5_000).unwrap());
+        assert!(db.touch_session(&row.key, 4_000).unwrap());
+        assert!(!db.touch_session("missing", 5_000).unwrap());
+        let other = SessionRow {
+            key: "cd".repeat(32),
+            ..row.clone()
+        };
+        db.insert_session(&other).unwrap();
+        drop(db);
+
+        let db = TelemetryDb::open(&path).unwrap();
+        let mut rows = db.load_sessions().unwrap();
+        rows.sort_by(|a, b| a.key.cmp(&b.key));
+        assert_eq!(rows[0].refreshed_ms, 5_000, "never moves backwards");
+        assert_eq!(rows[1], other);
+        assert!(db.delete_session(&row.key).unwrap());
+        assert!(!db.delete_session(&row.key).unwrap());
+        assert_eq!(db.load_sessions().unwrap(), vec![other]);
     }
 }

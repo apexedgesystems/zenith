@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useTargets } from "../api/queries";
 import { useDialogs } from "../components/dialogs";
 import { fileToBase64 } from "../api/upload";
+import { apiFetch } from "../api/apiFetch";
 
 /**
  * Operations Page (Phase 2 of the MVP roadmap).
@@ -121,7 +122,7 @@ export default function OperationsPage({
       return;
     }
     let cancelled = false;
-    fetch(`/api/targets/${selectedTarget}/registry`)
+    apiFetch(`/api/targets/${selectedTarget}/registry`)
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (cancelled) return;
@@ -140,7 +141,7 @@ export default function OperationsPage({
     if (!selectedTarget) return;
     setExecSurface(null);
     let cancelled = false;
-    fetch(`/api/targets/${selectedTarget}/commands`)
+    apiFetch(`/api/targets/${selectedTarget}/commands`)
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (cancelled || !data?.components) return;
@@ -183,7 +184,7 @@ export default function OperationsPage({
       setAudit((prev) => [pending, ...prev].slice(0, 50));
 
       try {
-        const r = await fetch(`/api/targets/${selectedTarget}/command`, {
+        const r = await apiFetch(`/api/targets/${selectedTarget}/command`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -299,7 +300,7 @@ export default function OperationsPage({
     };
     setAudit((prev) => [pending, ...prev].slice(0, 50));
     try {
-      const r = await fetch(`/api/targets/${selectedTarget}/restart`, {
+      const r = await apiFetch(`/api/targets/${selectedTarget}/restart`, {
         method: "POST",
       });
       if (r.ok) {
@@ -339,7 +340,7 @@ export default function OperationsPage({
     ): Promise<boolean> => {
       await new Promise((res) => setTimeout(res, delayMs));
       try {
-        const r = await fetch(`/api/targets/${selectedTarget}/connect`, {
+        const r = await apiFetch(`/api/targets/${selectedTarget}/connect`, {
           method: "POST",
         });
         if (r.ok) {
@@ -456,7 +457,7 @@ export default function OperationsPage({
       }
       const base64 = encoded.base64;
 
-      const r = await fetch(
+      const r = await apiFetch(
         `/api/targets/${selectedTarget}/components/${swapUid}/library`,
         {
           method: "POST",

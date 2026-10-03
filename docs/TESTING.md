@@ -11,10 +11,10 @@ Rust or Node toolchain required.
 # Run all tests (backend + frontend)
 make test
 
-# Backend only (131 unit tests, Rust)
+# Backend only (151 unit tests, Rust)
 make test-backend
 
-# Frontend only (62 unit tests, Vitest + React Testing Library)
+# Frontend only (102 unit tests, Vitest + React Testing Library)
 make test-frontend
 
 # Lint (clippy with -D warnings)
@@ -60,12 +60,14 @@ bottom of the source file they test. This is the standard Rust idiom:
 the tests have private-field access and there's no separate test
 discovery to manage.
 
-| File                                  | Tests cover                                                                                                                                                                                                                                |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `backend/src/protocol/slip.rs`        | SLIP encode/decode round-trip, partial feed, escape across boundary, max-frame-size enforcement, byte-by-byte vs bulk equivalence                                                                                                          |
-| `backend/src/protocol/aproto.rs`      | Header parse, payload round-trip, ACK parsing, status code mapping, rejection of malformed input                                                                                                                                           |
-| `backend/src/core/telemetry.rs`       | Decoder construction, struct-aware decode, OUTPUT vs STATE priority dedup, generic fallback, padding/reserved filtering, channel-name Arc cache reuse                                                                                      |
-| `backend/src/storage/telemetry_db.rs` | insert_batch + query round-trip, time window filtering, limit clamp, query_latest correctness, delete_oldest ordering, delete_target isolation, target_stats span, global_stats accuracy, layout save/load, config layout deletion refusal |
+| File                                  | Tests cover                                                                                                                                                                                                                                                                 |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `backend/src/protocol/slip.rs`        | SLIP encode/decode round-trip, partial feed, escape across boundary, max-frame-size enforcement, byte-by-byte vs bulk equivalence                                                                                                                                           |
+| `backend/src/protocol/aproto.rs`      | Header parse, payload round-trip, ACK parsing, status code mapping, rejection of malformed input                                                                                                                                                                            |
+| `backend/src/core/telemetry.rs`       | Decoder construction, struct-aware decode, OUTPUT vs STATE priority dedup, generic fallback, padding/reserved filtering, channel-name Arc cache reuse                                                                                                                       |
+| `backend/src/storage/telemetry_db.rs` | insert_batch + query round-trip, time window filtering, limit clamp, query_latest correctness, delete_oldest ordering, delete_target isolation, target_stats span, global_stats accuracy, layout save/load, config layout deletion refusal, session rows                    |
+| `backend/src/core/session.rs`         | Session store: deadlines from sign-in and keep-alive, the clamp at the absolute deadline, lookups that never extend, end and sweep waking sockets, reload after a restart, only the id's hash at rest; cookie set/clear/parse; the same-origin rule; the session body shape |
+| `backend/src/core/auth.rs`            | Credentials, token mint/validate, tickets only on the query string, boot checks (session limits included), credential precedence, the refused sign-in actor                                                                                                                 |
 
 Integration tests (DB + storage + actual SQLite file) use `tempfile::TempDir`
 and don't need any external setup. Each test creates its own DB.
@@ -75,12 +77,17 @@ and don't need any external setup. Each test creates its own DB.
 Frontend tests live in `*.test.ts` / `*.test.tsx` files **co-located**
 with the source they test. Vitest auto-discovers them.
 
-| Test file                       | What it covers                                                                        |
-| ------------------------------- | ------------------------------------------------------------------------------------- |
-| `src/utils/targets.test.ts`     | `targetsEqual` (used by App.tsx to dedupe poll responses)                             |
-| `src/types/telemetry.test.ts`   | `fieldName`, `groupChannels`                                                          |
-| `src/pages/Commanding.test.ts`  | `encodeField` (uint8/16/32 encoding, hex input, clamping, masking, NaN safe fallback) |
-| `src/components/Clock.test.tsx` | Component-test pattern: render, fake timers, advance, unmount                         |
+| Test file                       | What it covers                                                                                                    |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `src/utils/targets.test.ts`     | `targetsEqual` (used by App.tsx to dedupe poll responses)                                                         |
+| `src/types/telemetry.test.ts`   | `fieldName`, `groupChannels`                                                                                      |
+| `src/pages/Commanding.test.ts`  | `encodeField` (uint8/16/32 encoding, hex input, clamping, masking, NaN safe fallback)                             |
+| `src/components/Clock.test.tsx` | Component-test pattern: render, fake timers, advance, unmount                                                     |
+| `src/api/apiFetch.test.ts`      | One fetch per call, never retried; a 401 reported with the send-time generation; `request()` routes through it    |
+| `src/api/session.test.ts`       | Session state machine against a fake server: server-clock deadlines, input-only keep-alive, notices (fake timers) |
+| `src/App.test.tsx`              | The session gate in the DOM: login page, auth off, in-place sign-in with the page hidden and kept                 |
+| `src/pages/Login.test.tsx`      | Login form: masked password, refusal message, sign-in on Enter, overlay text                                      |
+| `src/pages/Telemetry.test.tsx`  | Live stream: no reconnect after a session-end close (1008), reconnect after other closes                          |
 
 ## Adding a backend test
 

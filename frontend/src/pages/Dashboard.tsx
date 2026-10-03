@@ -20,6 +20,7 @@ import {
   useTargetMetrics,
   type PipelineMetrics,
 } from "../api/queries";
+import { apiFetch } from "../api/apiFetch";
 
 /* ----------------------------- Types ----------------------------- */
 
@@ -82,7 +83,7 @@ async function loadTelemetryStructs(
   const map = new Map<string, TelemetryStruct>();
   if (!targetId) return map;
   try {
-    const r = await fetch(`/api/targets/${targetId}/structs`);
+    const r = await apiFetch(`/api/targets/${targetId}/structs`);
     if (!r.ok) return map;
     const data = await r.json();
     for (const comp of data.components || []) {
@@ -94,7 +95,7 @@ async function loadTelemetryStructs(
         if (opcode < 0x0100) continue;
 
         // Fetch full struct def for field details from the per-target dict
-        const dr = await fetch(
+        const dr = await apiFetch(
           `/api/targets/${targetId}/structs/${encodeURIComponent(
             comp.component,
           )}`,
@@ -198,7 +199,7 @@ async function buildHealthCards(
 
   // Executive summary (always first, always present -- UID 0x000000)
   try {
-    const r = await fetch(`/api/targets/${selectedTarget}/health`);
+    const r = await apiFetch(`/api/targets/${selectedTarget}/health`);
     if (r.ok) {
       const data = await r.json();
       if (data.status === 0 && data.extra_hex) {
@@ -273,7 +274,7 @@ async function buildHealthCards(
 
   const results = await Promise.allSettled(
     componentTasks.map(async ({ comp, uid, tlmStruct }) => {
-      const r = await fetch(`/api/targets/${selectedTarget}/command`, {
+      const r = await apiFetch(`/api/targets/${selectedTarget}/command`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ full_uid: uid, opcode: tlmStruct.opcode }),
@@ -305,7 +306,7 @@ async function buildHealthCards(
 
   // Push-telemetry components (e.g. SystemMonitor pushes its own health)
   try {
-    const r = await fetch(`/api/targets/${selectedTarget}/telemetry/latest`);
+    const r = await apiFetch(`/api/targets/${selectedTarget}/telemetry/latest`);
     if (r.ok) {
       const data = await r.json();
       const channels = (data.channels || []) as {
@@ -690,7 +691,7 @@ export default function DashboardPage({
   // Connect / disconnect
   const connect = async () => {
     try {
-      const r = await fetch(`/api/targets/${selectedTarget}/connect`, {
+      const r = await apiFetch(`/api/targets/${selectedTarget}/connect`, {
         method: "POST",
       });
       if (!r.ok) setError(await r.text());
@@ -700,7 +701,7 @@ export default function DashboardPage({
   };
 
   const disconnect = async () => {
-    await fetch(`/api/targets/${selectedTarget}/disconnect`, {
+    await apiFetch(`/api/targets/${selectedTarget}/disconnect`, {
       method: "POST",
     });
     // Drop cached health/registry immediately rather than waiting for

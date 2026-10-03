@@ -103,6 +103,7 @@ ELF ident) decode correctly with zero configuration.
 
 | Page              | Purpose                                                                                                                                                                                                                                                                                                                                                 |
 | ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Login**         | Shown when auth is on and nobody is signed in: user name and password, a refusal shown in place. After an idle or absolute expiry the same form covers the page the session ended on, which stays mounted but hidden, so unsent input survives and nothing is resent.                                                                                   |
 | **Dashboard**     | Per-target health cards auto-discovered from struct dicts, flagged by the target's health rules, enum-typed values shown by name. Executive summary banner. Component registry with status dots (probed by command on apex targets; "telemetry heard in the last 30 s" on telemetry-only links). Connect / disconnect / add target.                     |
 | **Telemetry**     | Multi-signal strip charts with hover crosshair, per-plot time windows, threshold lines, drag-to-reorder, layout presets from `telemetry.json`, user-saved layouts in DB, pause/resume, 2-column grid, PNG/CSV export, historical data backfill. Tiered (downsampled) history renders as min/max envelope bands with mean [min..max] crosshair readouts. |
 | **Operations**    | System controls: Sleep/Wake, Pause/Resume, Set Verbosity, Restart Executive (with auto-reconnect). Per-component Lock/Unlock with visual lock state. Library hot-swap (lock + upload .so + reload + auto-unlock). In-page audit feed of issued commands.                                                                                                |
@@ -111,7 +112,7 @@ ELF ident) decode correctly with zero configuration.
 | **INSPECT**       | Browse any registered data block on any component for any category (STATIC_PARAM / TUNABLE_PARAM / STATE / INPUT / OUTPUT). Decoded field table with type info. Auto-refresh toggle (1 Hz) for live state debugging.                                                                                                                                    |
 | **File Transfer** | Drag-and-drop file upload to any path on the target via APROTO. Single-file with size cap. Per-target export of telemetry as CSV.                                                                                                                                                                                                                       |
 | **Storage**       | Live capacity gauge against the configured cap with fill rate and time-to-cap projection, per-target usage bars with trim/delete controls, the pipeline accounting table (decoded = written + counted drops), FIFO/retention counters, retention-ladder card (per-band populations), manual downsample.                                                 |
-| **Audit Log**     | Append-only log of operator actions: every command, file upload, target connect/disconnect/add/remove, library swap, storage trim. Filterable by actor / target / IP / status. Auto-refresh option.                                                                                                                                                     |
+| **Audit Log**     | Append-only log of operator actions: every command, file upload, target connect/disconnect/add/remove, library swap, storage trim; with auth on also sign-in, refused sign-in, sign-out, and telemetry streams closed because their session ended. Filterable by actor / target / IP / status. Auto-refresh option.                                     |
 
 ## Sidebar Features
 
@@ -132,9 +133,9 @@ ELF ident) decode correctly with zero configuration.
 | Frontend      | React 19, TypeScript strict, Canvas API                                                    |
 | Storage       | SQLite (WAL mode) with read connection pool (1 writer + N readers)                         |
 | Protocol      | APROTO over TCP + SLIP framing                                                             |
-| Tests         | `cargo test --lib` (131 unit tests) + Vitest with React Testing Library (62 unit tests)    |
+| Tests         | `cargo test --lib` (151 unit tests) + Vitest with React Testing Library (102 unit tests)   |
 | Benches       | criterion + pprof flamegraphs                                                              |
-| Auth          | JWT bearer middleware for API clients (off by default; the browser UI does not log in yet) |
+| Auth          | Console sign-in with server-side sessions; JWT bearer tokens for API clients (default off) |
 | Rate limiting | Per-IP token bucket on POST endpoints (when auth is on)                                    |
 | Deploy        | Docker (multi-stage Rust + Node -> Debian slim)                                            |
 
@@ -284,8 +285,8 @@ make run
 | `make stop`          | Stop the running container                                                                     |
 | `make dev`           | Build + run in foreground (logs to stdout)                                                     |
 | `make test`          | Run **both** backend and frontend test suites                                                  |
-| `make test-backend`  | Backend only: `cargo test --lib` (currently 131 unit tests)                                    |
-| `make test-frontend` | Frontend only: `vitest run` (currently 62 unit tests)                                          |
+| `make test-backend`  | Backend only: `cargo test --lib` (currently 151 unit tests)                                    |
+| `make test-frontend` | Frontend only: `vitest run` (currently 102 unit tests)                                         |
 | `make bench`         | Run criterion benches (`protocol`, `storage`, `decoder`)                                       |
 | `make format`        | Run rustfmt across the backend                                                                 |
 | `make lint`          | Run clippy with `-D warnings`                                                                  |
@@ -307,8 +308,13 @@ host = "0.0.0.0"
 port = 8080
 
 [auth]
-enabled = false                # JWT auth + rate limiting (default off)
+enabled = false                # Sign-in, tokens + rate limiting (default off)
 secret = "change-me-in-production"
+# session_idle_min = 30        # Console session ends after this long
+                               # without input (0: no idle limit)
+# session_max_hours = 10       # ...and this long after sign-in
+# cookie_secure = true         # Session cookie over HTTPS only; false
+                               # for plain HTTP on a trusted network
 
 [storage]
 path = "./data/zenith.db"
@@ -427,8 +433,12 @@ GET    /api/health                               # DB writability + per-target s
 GET    /api/metrics                              # Per-target pipeline counters (drops, failures, latency)
 GET    /api/version
 GET    /api/audit?limit=N&offset=N
-POST   /api/auth/login
+POST   /api/auth/login                           # Bearer token for API clients
 POST   /api/auth/ws-ticket                       # Trade a bearer token for a 30s WebSocket ticket
+GET    /api/auth/session                         # Console session: user, deadlines, server clock (401 without one)
+POST   /api/auth/session                         # Sign in; sets the session cookie
+POST   /api/auth/session/refresh                 # Keep-alive after operator input (restarts the idle limit)
+DELETE /api/auth/session                         # Sign out; ends the session, clears the cookie
 
 # Targets
 GET    /api/targets
@@ -494,36 +504,67 @@ GET    /api/structs/{component}                  # Same
 Setup: generate a password hash with `zenith --hash-password` (reads
 the password from stdin, prints an argon2 PHC string), then set
 `[auth] enabled = true`, `username`, `password_hash`, and a `secret`
-of at least 16 characters. The secret signs tokens and is never a
-login credential. Startup refuses to boot with the default secret,
-a missing hash, or a malformed hash while auth is enabled.
+of at least 16 characters. The secret signs API tokens and is never a
+login credential. With auth enabled, startup refuses to boot with the
+default secret, a missing or malformed hash, `session_max_hours = 0`,
+or a `session_idle_min` longer than `session_max_hours`.
 
-What auth covers today: the HTTP API and the WebSocket, for clients
-that hold a token (scripts, a second tool, a proxy). The browser UI
-has no login page and sends no token, so with auth on the console
-cannot load its pages. Enable auth for API-client deployments; for
-operators on an untrusted network, put an authenticating reverse
-proxy in front of the console (see Deploying Beyond a Trusted LAN).
+With auth on, the console opens on its own login page. Signing in
+creates a session on the server; the browser holds only an opaque id
+in a cookie its scripts cannot read (HttpOnly, SameSite=Strict,
+Path=/, and Secure unless `[auth] cookie_secure = false`). The server
+enforces two limits on every session:
 
-When auth is enabled:
+- **Idle** (`session_idle_min`, default 30; 0 turns it off): the
+  session ends this long after its last keep-alive. The console sends
+  a keep-alive only after operator input (pointer, keyboard, touch),
+  at most once a minute. Polling, reloads and the telemetry stream
+  never extend a session, so an unattended console signs itself out.
+  Two minutes before the idle deadline the console offers to stay
+  signed in.
+- **Absolute** (`session_max_hours`, default 10): the session ends
+  this long after sign-in, whatever its activity. The console states
+  the end time during the last ten minutes.
 
-- All `/api/*` routes except `/api/auth/login` and `/api/health`
-  require `Authorization: Bearer <jwt>`. Tokens carry `sub` and
-  `exp` (24 h) and the subject is recorded as the actor on every
-  audited action.
-- WebSocket upgrades (which browsers cannot attach headers to) use
-  `POST /api/auth/ws-ticket` to trade the bearer token for a 30 s
-  single-purpose ticket passed as `?ticket=`. Long-lived tokens on
-  a query string are rejected so they can never reach request logs
-  (which record method and path only, never query strings).
+When a session ends (either limit, or Sign out), the server refuses
+its requests and closes its telemetry streams (WebSocket close code
+1008); target links stay connected and recording continues. After an
+expiry the console asks for the password over the page it was on, so
+anything typed there is kept; nothing that was refused is resent, and
+the next action is the operator's. A reload keeps the session, and so
+does a server restart: the database stores a SHA-256 of each session
+id, never the id itself.
+
+A request that carries the session cookie with any method but GET,
+HEAD and OPTIONS, and a telemetry socket upgrade, must come from the
+console's own origin: the browser's `Sec-Fetch-Site:
+same-origin` or, from a browser that sends no such header, an `Origin`
+equal to `Host`. Anything else is refused with 403. Requests with a
+bearer token are not subject to this rule.
+
+API clients use bearer tokens, as before:
+
+- All `/api/*` routes except `/api/auth/login`, signing in and out at
+  `/api/auth/session`, and `/api/health` require
+  `Authorization: Bearer <jwt>` or a console session. Tokens carry
+  `sub` and `exp` (24 h); the token's subject, or the session's user,
+  is recorded as the actor on every audited action.
+- API clients open the telemetry socket by trading the bearer token at
+  `POST /api/auth/ws-ticket` for a 30 s single-purpose ticket passed as
+  `?ticket=`. Long-lived tokens on a query string are rejected so they
+  can never reach request logs (which record method and path only,
+  never query strings). A signed-in console opens the socket with its
+  session and is refused tickets, so no token ever reaches the browser.
 - Per-IP token bucket rate limit of 10 req/sec (burst 30) on POST
-  endpoints. Returns 429 when exceeded. Idle buckets are evicted.
+  endpoints, sign-in included. Returns 429 when exceeded. Idle buckets
+  are evicted.
 
 When auth is disabled (the default for development), the middleware
-is a pass-through, all endpoints are open, no rate limiting applies,
-and audit entries record the anonymous actor "operator". This is a
-deliberate trusted-LAN development posture; see Deploying Beyond a
-Trusted LAN for any host others can reach.
+is a pass-through, all endpoints are open, there is no login page and
+no cookie, no rate limiting applies, and audit entries record the
+anonymous actor "operator". This is a deliberate trusted-LAN
+development posture; see Deploying Beyond a Trusted LAN for any host
+others can reach.
 
 Independent of auth, every request is bounded: history and CSV row
 limits clamp at 200k, uploads cap at `[server] upload_max_mb`
@@ -534,44 +575,58 @@ after `[storage] audit_retention_days` (default 90; 0 keeps
 forever).
 
 The audit log captures every state-changing action regardless of
-whether auth is on. View it at `GET /api/audit` or via the Audit Log
-page in the UI. Each entry has timestamp, actor, action, target,
-detail, status, and source IP.
+whether auth is on, and with auth on also sign-in, refused sign-in
+(recorded under the configured user name, or "(unknown user)" for any
+other name, so a password typed into the wrong field is never
+logged), sign-out, and telemetry streams closed because their session
+ended. View it at `GET /api/audit` or via the Audit Log page in the
+UI. Each entry has timestamp, actor, action, target, detail, status,
+and source IP.
 
 ## Deploying Beyond a Trusted LAN
 
 The default posture is a trusted LAN: auth off, every endpoint open.
-For any host others can reach, bind the front door to the loopback
-(`[server] host = "127.0.0.1"`) and put a reverse proxy on the same
-host in front of it that terminates TLS and passes WebSocket
-upgrades through for `/api/targets/{id}/telemetry/live` (the UI's
-telemetry stream). Then pick the mode that matches who connects:
+For any host others can reach, turn auth on and serve the console over
+HTTPS:
 
-- **Operators in a browser.** Keep zenith's auth off and let the
-  proxy authenticate users itself (basic auth, OIDC, client
-  certificates). The browser UI has no login of its own, so this is
-  the only way to put it on an untrusted network today. Audit rows
-  record the anonymous actor "operator", not the proxy's user.
-- **API clients only.** Enable zenith's auth: generate a password
-  hash with `docker run --rm -i ghcr.io/apexedgesystems/zenith:latest
---hash-password` (reads the password from stdin, prints an argon2
-  PHC string); in `config.toml` set `[auth] enabled = true`,
-  `username` and `password_hash`; leave `secret` out of the file and
-  pass it as `ZENITH_AUTH_SECRET` (at least 16 characters, generated,
-  never reused; startup refuses the default secret while auth is
-  on). Clients log in at `POST /api/auth/login`, send the token as
-  `Authorization: Bearer`, and trade it at `POST /api/auth/ws-ticket`
-  for a 30 s ticket that opens the telemetry socket. Long-lived
-  tokens never ride the query string; only that ticket does, so
-  request logs stay clean.
-  The browser console does not work in this mode.
+1. Generate a password hash:
+   `docker run --rm -i ghcr.io/apexedgesystems/zenith:latest --hash-password`
+   reads the password from stdin and prints an argon2 PHC string.
+2. In `config.toml` set `[auth] enabled = true`, `username` and
+   `password_hash`. Leave `secret` out of the file and pass it as
+   `ZENITH_AUTH_SECRET` (at least 16 characters, generated, never
+   reused; startup refuses the default secret while auth is on).
+3. Bind the front door to the loopback (`[server] host = "127.0.0.1"`)
+   and put a reverse proxy on the same host in front of it that
+   terminates TLS, passes the original `Host` header through, and
+   passes WebSocket upgrades through for
+   `/api/targets/{id}/telemetry/live` (the console's telemetry stream).
+4. Open the proxy's HTTPS address and sign in on the login page.
+   Operators are then signed out after `session_idle_min` without
+   input and after `session_max_hours` in any case (see
+   Authentication and Audit).
 
-If the UI is served from another origin, list it in `[server]
-cors_allowed_origins`; otherwise leave it empty (same-origin only).
+The session cookie is Secure by default, so browsers send it over
+HTTPS only (and over plain HTTP to `localhost`, for local testing). To
+serve plain HTTP on a trusted network instead, set
+`[auth] cookie_secure = false`; if the cookie is refused, the login
+page says so.
 
-With auth on, every `/api/*` route except login and health requires a
-bearer token, the per-IP rate limit applies to POSTs, and every
-audited action carries the token's subject. The audit log is on
+API clients log in at `POST /api/auth/login`, send the token as
+`Authorization: Bearer`, and trade it at `POST /api/auth/ws-ticket`
+for a 30 s ticket that opens the telemetry socket. Long-lived tokens
+never ride the query string; only that ticket does, so request logs
+stay clean.
+
+Console sessions are same-origin only. A UI served from another
+origin uses bearer tokens: list its origin in `[server]
+cors_allowed_origins`. Otherwise leave the list empty (same-origin
+only).
+
+With auth on, every `/api/*` route except login, signing in and out,
+and health requires a bearer token or a live console session, the
+per-IP rate limit applies to POSTs, and every audited action carries
+the token's subject or the session's user. The audit log is on
 regardless.
 
 ## Releases

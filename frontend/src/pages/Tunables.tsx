@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useRegistry, useTunableFields } from "../api/queries";
+import { apiFetch } from "../api/apiFetch";
 
 /* ----------------------------- Types ----------------------------- */
 
@@ -91,7 +92,7 @@ export default function TunablesPage({
         setLoading(false);
         return;
       }
-      const r = await fetch(`/api/targets/${selectedTarget}/params/${uid}`);
+      const r = await apiFetch(`/api/targets/${selectedTarget}/params/${uid}`);
       if (r.ok) {
         const data = await r.json();
         if (data.fields) {
@@ -150,7 +151,7 @@ export default function TunablesPage({
             raw_hex: params.raw_hex,
           }
         : { fields: params.fields, raw_hex: params.raw_hex };
-      const r = await fetch(
+      const r = await apiFetch(
         `/api/targets/${selectedTarget}/params/${uid}/update`,
         {
           method: "POST",

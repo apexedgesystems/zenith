@@ -14,30 +14,32 @@ use std::sync::Arc;
 
 use axum::{
     extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade},
         ConnectInfo, Path, Request, State,
     },
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Json, Response},
     routing::{delete, get, post},
-    Router,
+    Extension, Router,
 };
 use clap::Parser;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{broadcast, Mutex, RwLock};
+use tokio::sync::{broadcast, watch, Mutex, RwLock};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::EnvFilter;
 
 use crate::config::{FifoStrategy, ServerConfig};
 use crate::core::aproto_client::AprotoClient;
+use crate::core::auth::Credential;
 use crate::core::config_manager::StructDictionary;
 use crate::core::metrics::TargetMetrics;
+use crate::core::session::{EndReason, Session, SessionPolicy, SessionStatus, SessionStore};
 use crate::core::telemetry::{self, TelemetrySample};
 use crate::core::tprm;
 use crate::core::transport::{unsupported_op, Protocol, ProtocolLink, PushTelemetryPacket};
-use crate::storage::telemetry_db::TelemetryDb;
+use crate::storage::telemetry_db::{DbError, TelemetryDb};
 
 /* ----------------------------- CLI ----------------------------- */
 
@@ -55,8 +57,9 @@ struct Cli {
 }
 
 /// Authenticated principal for audit attribution, inserted by the auth
-/// middleware on every request: the token's sub when auth is on, the
-/// anonymous "operator" when it is off.
+/// middleware on every request: the token's sub or the browser
+/// session's user when auth is on, the anonymous "operator" when it is
+/// off.
 #[derive(Clone)]
 struct Actor(Arc<str>);
 
@@ -107,6 +110,9 @@ struct SharedState {
     rate_limiter: Arc<RateLimiter>,
     /// Live storage-pressure numbers shared with /api/telemetry/stats.
     storage_vitals: Arc<StorageVitals>,
+    /// Browser sessions. The store has its own lock: callers clone the
+    /// Arc under a short guard and use it after dropping the guard.
+    sessions: Arc<SessionStore>,
 }
 
 /// Storage pressure measured by the maintenance loop: the configured
@@ -3148,13 +3154,16 @@ async fn login(
 }
 
 /// Mint a short-lived single-purpose WebSocket ticket for the caller.
-/// Browsers cannot set Authorization on WebSocket upgrades, so the
-/// authenticated page trades its bearer token for a 30 s ticket and
-/// puts THAT on the query string -- a leaked ticket is stale before a
-/// log file is ever read.
+/// Browsers cannot set Authorization on WebSocket upgrades, so a client
+/// holding a bearer token trades it for a 30 s ticket and puts THAT on
+/// the query string -- a leaked ticket is stale before a log file is
+/// ever read. A signed-in browser opens the socket with its session
+/// cookie instead and is refused a ticket: a ticket socket is tied to
+/// no session, so it would outlive the session that minted it.
 async fn ws_ticket(
     State(state): State<AppState>,
     axum::Extension(actor): axum::Extension<Actor>,
+    session: Option<Extension<Session>>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let (enabled, secret) = {
         let st = state.read().await;
@@ -3162,6 +3171,14 @@ async fn ws_ticket(
     };
     if !enabled {
         return Ok(Json(serde_json::json!({ "ticket": "auth-disabled" })));
+    }
+    if session.is_some() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            "tickets are for bearer-token clients; a signed-in browser opens the \
+             telemetry socket with its session"
+                .to_string(),
+        ));
     }
     let ticket =
         crate::core::auth::mint_ws_ticket(&actor.0, &secret, chrono::Utc::now().timestamp())
@@ -3177,24 +3194,280 @@ async fn ws_ticket(
     })))
 }
 
+/* ----------------------------- Browser Sessions ----------------------------- */
+
+#[derive(Deserialize)]
+struct SignInRequest {
+    username: String,
+    password: String,
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+/// The caller's browser session: user, both deadlines and the server
+/// clock. 401 without a live session (bearer and ticket callers have
+/// none); `{"auth_enabled": false}` when auth is off.
+async fn session_status(
+    State(state): State<AppState>,
+    session: Option<Extension<Session>>,
+) -> Result<Json<SessionStatus>, (StatusCode, String)> {
+    if !state.read().await.config.auth.enabled {
+        return Ok(Json(SessionStatus::disabled()));
+    }
+    let Some(Extension(s)) = session else {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "no browser session (bearer and ticket credentials carry none)".to_string(),
+        ));
+    };
+    Ok(Json(SessionStatus::live(&s, now_ms())))
+}
+
+/// Sign in: the configured credential check, then a new session whose
+/// id goes into the cookie and nowhere else. Both outcomes are
+/// audited; the password never is.
+async fn session_sign_in(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(body): Json<SignInRequest>,
+) -> Result<Response, (StatusCode, String)> {
+    let (auth, sessions, db) = {
+        let st = state.read().await;
+        (st.config.auth.clone(), st.sessions.clone(), st.db.clone())
+    };
+    if !auth.enabled {
+        return Ok(Json(SessionStatus::disabled()).into_response());
+    }
+    let ip = addr.ip().to_string();
+    let cookie_secure = auth.cookie_secure;
+    // argon2 verification and the row insert both block; neither runs
+    // on a runtime worker.
+    let created = tokio::task::spawn_blocking(move || {
+        let ok = crate::core::auth::verify_credentials(
+            &body.username,
+            &body.password,
+            &auth.username,
+            &auth.password_hash,
+        );
+        if !ok {
+            let actor = crate::core::auth::refused_sign_in_actor(&body.username, &auth.username);
+            record_audit(
+                &db,
+                actor,
+                "sign_in",
+                None,
+                None,
+                "err: invalid credentials",
+                Some(&ip),
+            );
+            return Ok(None);
+        }
+        let now = now_ms();
+        let status = match sessions.create(&body.username, now) {
+            Ok((id, session)) => Ok(Some((id, SessionStatus::live(&session, now)))),
+            Err(e) => Err(e),
+        };
+        let outcome = match &status {
+            Ok(_) => "ok".to_string(),
+            Err(e) => format!("err: {}", e),
+        };
+        record_audit(
+            &db,
+            &body.username,
+            "sign_in",
+            None,
+            None,
+            &outcome,
+            Some(&ip),
+        );
+        status
+    })
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("sign-in failed: {}", e),
+        )
+    })?
+    .map_err(|e: DbError| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("session not stored: {}", e),
+        )
+    })?;
+    let Some((id, status)) = created else {
+        return Err((StatusCode::UNAUTHORIZED, "invalid credentials".to_string()));
+    };
+    Ok((
+        [(
+            header::SET_COOKIE,
+            crate::core::session::set_cookie(&id, cookie_secure),
+        )],
+        Json(status),
+    )
+        .into_response())
+}
+
+/// The keep-alive: restarts the idle limit, never past the absolute
+/// one. Only this endpoint extends a session; the UI calls it after
+/// operator input, never on a timer.
+async fn session_refresh(
+    State(state): State<AppState>,
+    session: Option<Extension<Session>>,
+) -> Result<Json<SessionStatus>, (StatusCode, String)> {
+    let (enabled, sessions) = {
+        let st = state.read().await;
+        (st.config.auth.enabled, st.sessions.clone())
+    };
+    if !enabled {
+        return Ok(Json(SessionStatus::disabled()));
+    }
+    let Some(Extension(s)) = session else {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "no browser session to keep alive".to_string(),
+        ));
+    };
+    let now = now_ms();
+    let refreshed = tokio::task::spawn_blocking(move || sessions.refresh(&s.key, now))
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("keep-alive failed: {}", e),
+            )
+        })?
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("keep-alive not stored: {}", e),
+            )
+        })?;
+    match refreshed {
+        Some(s) => Ok(Json(SessionStatus::live(&s, now))),
+        None => Err((StatusCode::UNAUTHORIZED, "session ended".to_string())),
+    }
+}
+
+/// Sign out: end the caller's session (its sockets close) and clear
+/// the cookie. 204 whether or not the session was still alive, so a
+/// browser holding a dead cookie can still clear it; an end that
+/// cannot be recorded is a 500 and leaves the session live.
+async fn session_sign_out(
+    State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    session: Option<Extension<Session>>,
+) -> Result<Response, (StatusCode, String)> {
+    let (enabled, cookie_secure, sessions, db) = {
+        let st = state.read().await;
+        (
+            st.config.auth.enabled,
+            st.config.auth.cookie_secure,
+            st.sessions.clone(),
+            st.db.clone(),
+        )
+    };
+    if !enabled {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+    if let Some(Extension(s)) = session {
+        let ip = addr.ip().to_string();
+        tokio::task::spawn_blocking(move || {
+            if let Some(user) = sessions.end(&s.key, EndReason::SignedOut)? {
+                record_audit(&db, &user, "sign_out", None, None, "ok", Some(&ip));
+            }
+            Ok::<(), DbError>(())
+        })
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("sign-out failed: {}", e),
+            )
+        })?
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("sign-out not recorded, the session is still live: {}", e),
+            )
+        })?;
+    }
+    Ok((
+        StatusCode::NO_CONTENT,
+        [(
+            header::SET_COOKIE,
+            crate::core::session::clear_cookie(cookie_secure),
+        )],
+    )
+        .into_response())
+}
+
 /* ----------------------------- WebSocket ----------------------------- */
+
+/// A telemetry socket opened with a browser session closes when that
+/// session ends. This is everything the socket task needs for that.
+struct SessionTie {
+    ended: watch::Receiver<Option<EndReason>>,
+    user: Arc<str>,
+    db: Arc<TelemetryDb>,
+    source_ip: String,
+}
 
 async fn telemetry_ws(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    session: Option<Extension<Session>>,
     ws: WebSocketUpgrade,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
-    let st = state.read().await;
-    let target = st
-        .targets
-        .get(&id)
-        .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
+    let (rx, metrics, sessions, db) = {
+        let st = state.read().await;
+        let target = st
+            .targets
+            .get(&id)
+            .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
+        (
+            target.sample_tx.subscribe(),
+            target.metrics.clone(),
+            st.sessions.clone(),
+            st.db.clone(),
+        )
+    };
+    // Token and ticket sockets have no session; a session socket waits
+    // on its session's end. A session that ended since the middleware
+    // looked it up is refused here.
+    let tie = match session {
+        Some(Extension(s)) => Some(SessionTie {
+            ended: sessions
+                .subscribe(&s.key)
+                .ok_or((StatusCode::UNAUTHORIZED, "session ended".to_string()))?,
+            user: s.user.clone(),
+            db,
+            source_ip: addr.ip().to_string(),
+        }),
+        None => None,
+    };
 
-    let rx = target.sample_tx.subscribe();
-    let metrics = target.metrics.clone();
-    let target_id = id.clone();
+    Ok(ws.on_upgrade(move |socket| handle_telemetry_ws(socket, rx, id, metrics, tie)))
+}
 
-    Ok(ws.on_upgrade(move |socket| handle_telemetry_ws(socket, rx, target_id, metrics)))
+/// Resolves with the end reason when the socket's session ends; never
+/// resolves for a socket without a session.
+async fn session_ended(tie: &mut Option<SessionTie>) -> Option<EndReason> {
+    match tie {
+        Some(t) => {
+            // An error means the store dropped the session without a
+            // reason; either way the session is over.
+            let _ = t.ended.wait_for(Option::is_some).await;
+            *t.ended.borrow()
+        }
+        None => std::future::pending().await,
+    }
 }
 
 async fn handle_telemetry_ws(
@@ -3202,6 +3475,7 @@ async fn handle_telemetry_ws(
     mut rx: broadcast::Receiver<TelemetrySample>,
     target_id: String,
     metrics: Arc<TargetMetrics>,
+    mut tie: Option<SessionTie>,
 ) {
     use std::sync::atomic::Ordering;
     const LAG_WARN_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
@@ -3211,26 +3485,57 @@ async fn handle_telemetry_ws(
     let mut last_lag_warn: Option<std::time::Instant> = None;
 
     loop {
-        match rx.recv().await {
-            Ok(sample) => {
-                let json = serde_json::to_string(&sample).unwrap_or_default();
-                if socket.send(Message::Text(json.into())).await.is_err() {
-                    break; // Client disconnected
+        tokio::select! {
+            received = rx.recv() => match received {
+                Ok(sample) => {
+                    let json = serde_json::to_string(&sample).unwrap_or_default();
+                    if socket.send(Message::Text(json.into())).await.is_err() {
+                        break; // Client disconnected
+                    }
                 }
-            }
-            Err(broadcast::error::RecvError::Lagged(n)) => {
-                metrics.ws_lag_drops.fetch_add(n, Ordering::Relaxed);
-                if last_lag_warn.is_none_or(|t| t.elapsed() >= LAG_WARN_EVERY) {
-                    tracing::warn!(
-                        "[{}] WebSocket client lagged, {} samples dropped ({} total across clients)",
-                        target_id,
-                        n,
-                        metrics.ws_lag_drops.load(Ordering::Relaxed)
-                    );
-                    last_lag_warn = Some(std::time::Instant::now());
+                Err(broadcast::error::RecvError::Lagged(n)) => {
+                    metrics.ws_lag_drops.fetch_add(n, Ordering::Relaxed);
+                    if last_lag_warn.is_none_or(|t| t.elapsed() >= LAG_WARN_EVERY) {
+                        tracing::warn!(
+                            "[{}] WebSocket client lagged, {} samples dropped ({} total across clients)",
+                            target_id,
+                            n,
+                            metrics.ws_lag_drops.load(Ordering::Relaxed)
+                        );
+                        last_lag_warn = Some(std::time::Instant::now());
+                    }
                 }
-            }
-            Err(broadcast::error::RecvError::Closed) => {
+                Err(broadcast::error::RecvError::Closed) => {
+                    break;
+                }
+            },
+            reason = session_ended(&mut tie) => {
+                // The session ended: close from the server side with
+                // the policy code, so the page knows this is not a
+                // dropped link. Only this socket is affected -- the
+                // target's link, router and recorder never see it.
+                let text = reason.map_or("session ended", EndReason::describe);
+                let _ = socket
+                    .send(Message::Close(Some(CloseFrame {
+                        code: close_code::POLICY,
+                        reason: text.into(),
+                    })))
+                    .await;
+                if let Some(t) = tie.take() {
+                    let target = target_id.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        record_audit(
+                            &t.db,
+                            &t.user,
+                            "close_telemetry_socket",
+                            Some(&target),
+                            Some(text),
+                            "ok",
+                            Some(&t.source_ip),
+                        )
+                    })
+                    .await;
+                }
                 break;
             }
         }
@@ -3310,11 +3615,12 @@ fn record_audit(
 
 /* ----------------------------- Auth Middleware ----------------------------- */
 
-/// Validate the JWT in the Authorization header. Skips validation when
-/// auth is disabled in config (the default for development).
+/// Authenticate the request and record who it is for. Skips everything
+/// when auth is disabled in config (the default for development).
 ///
 /// Whitelisted paths bypass auth: `/api/auth/login` (otherwise nobody could
 /// log in) and `/api/health` (used by load balancers and `make health`).
+/// Signing in and out at `/api/auth/session` need no live credential.
 async fn auth_middleware(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -3331,14 +3637,20 @@ async fn auth_middleware(
             .insert(Actor(Arc::from("operator")));
         return Ok(next.run(request).await);
     }
+    let session_door =
+        path == "/auth/session" && matches!(*request.method(), Method::POST | Method::DELETE);
 
     // CRITICAL: read the config under a SHORT-lived guard and then drop
     // it before calling next.run(). Holding the guard across the await
     // would deadlock with any handler that takes a write lock (e.g.
     // connect_target), because tokio's RwLock is writer-preferring.
-    let (auth_enabled, secret) = {
+    let (auth_enabled, secret, sessions) = {
         let st = state.read().await;
-        (st.config.auth.enabled, st.config.auth.secret.clone())
+        (
+            st.config.auth.enabled,
+            st.config.auth.secret.clone(),
+            st.sessions.clone(),
+        )
     };
 
     if !auth_enabled {
@@ -3348,41 +3660,67 @@ async fn auth_middleware(
         return Ok(next.run(request).await);
     }
 
-    // Bearer token from the Authorization header, or -- for WebSocket
-    // upgrades, which cannot set headers from a browser -- a
-    // short-lived ticket on the query string. A query credential MUST
-    // be a ticket (ws claim, 30 s expiry, minted via
-    // POST /api/auth/ws-ticket): long-lived tokens are rejected there
-    // so they can never land in request logs.
-    let header_token = headers
-        .get("authorization")
-        .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "))
-        .map(|s| s.to_string());
-    let query_ticket = request.uri().query().and_then(|q| {
-        q.split('&').find_map(|kv| {
-            let mut parts = kv.splitn(2, '=');
-            if parts.next()? == "ticket" {
-                Some(parts.next()?.to_string())
-            } else {
-                None
+    // The first credential present decides (core::auth::credential):
+    // a bearer token from the Authorization header; else -- for
+    // WebSocket upgrades from API clients -- a short-lived ticket on
+    // the query string, which MUST be a ticket (ws claim, 30 s expiry,
+    // minted via POST /api/auth/ws-ticket) so long-lived tokens never
+    // land in request logs; else the browser's session cookie, which
+    // must come from the console's own origin for anything that is not
+    // a plain read. Validation lives in core (lib-testable); the
+    // subject becomes the audit actor for the request.
+    let query = request.uri().query().map(str::to_owned);
+    let user: Option<Arc<str>> = match crate::core::auth::credential(&headers, query.as_deref()) {
+        Credential::Bearer(token) => Some(Arc::from(
+            crate::core::auth::validate_token(token, &secret, false)
+                .map_err(|e| (StatusCode::UNAUTHORIZED, e))?
+                .as_str(),
+        )),
+        Credential::Ticket(ticket) => Some(Arc::from(
+            crate::core::auth::validate_token(ticket, &secret, true)
+                .map_err(|e| (StatusCode::UNAUTHORIZED, e))?
+                .as_str(),
+        )),
+        Credential::Cookie(id) => {
+            if !crate::core::session::same_origin_allows(request.method(), &headers) {
+                return Err((
+                    StatusCode::FORBIDDEN,
+                    "cross-origin request with a session cookie refused \
+                     (the request was not carried out)"
+                        .to_string(),
+                ));
             }
-        })
-    });
-    let from_query = header_token.is_none();
-    let token = header_token
-        .or(query_ticket)
-        .ok_or((StatusCode::UNAUTHORIZED, "missing token".to_string()))?;
+            match sessions.lookup(id, now_ms()) {
+                Some(session) => {
+                    let user = session.user.clone();
+                    request.extensions_mut().insert(session);
+                    Some(user)
+                }
+                None if session_door => None,
+                None => {
+                    return Err((
+                        StatusCode::UNAUTHORIZED,
+                        "session ended or unknown: sign in again \
+                         (the request was not carried out)"
+                            .to_string(),
+                    ))
+                }
+            }
+        }
+        Credential::None => None,
+    };
 
-    // Validation lives in core::auth (lib-testable); the subject
-    // becomes the audit actor for the request.
-    let sub = crate::core::auth::validate_token(&token, &secret, from_query)
-        .map_err(|e| (StatusCode::UNAUTHORIZED, e))?;
-
-    request
-        .extensions_mut()
-        .insert(Actor(Arc::from(sub.as_str())));
-    Ok(next.run(request).await)
+    match user {
+        Some(user) => {
+            request.extensions_mut().insert(Actor(user));
+            Ok(next.run(request).await)
+        }
+        None if session_door => Ok(next.run(request).await),
+        None => Err((
+            StatusCode::UNAUTHORIZED,
+            "missing token or session (the request was not carried out)".to_string(),
+        )),
+    }
 }
 
 /* ----------------------------- Rate Limiting ----------------------------- */
@@ -3548,7 +3886,14 @@ fn build_router(state: AppState, cors_origins: &[String], upload_max_mb: u32) ->
         .route("/audit", get(list_audit))
         .route("/metrics", get(get_metrics))
         .route("/auth/login", post(login))
-        .route("/auth/ws-ticket", post(ws_ticket));
+        .route("/auth/ws-ticket", post(ws_ticket))
+        .route(
+            "/auth/session",
+            get(session_status)
+                .post(session_sign_in)
+                .delete(session_sign_out),
+        )
+        .route("/auth/session/refresh", post(session_refresh));
 
     let static_dir = if std::path::Path::new("/usr/local/share/zenith/static/index.html").exists() {
         "/usr/local/share/zenith/static"
@@ -4294,6 +4639,43 @@ async fn main() {
         }
     }
 
+    // Browser sessions live in the database so a restart keeps them;
+    // the store loads the live ones and drops those that ended while
+    // the server was down.
+    let sessions = match SessionStore::open(
+        db.clone(),
+        SessionPolicy::from_config(&config.auth),
+        now_ms(),
+    ) {
+        Ok(store) => Arc::new(store),
+        Err(e) => {
+            tracing::error!("Failed to load browser sessions: {}", e);
+            std::process::exit(1);
+        }
+    };
+    // The sweep ends sessions at their deadlines and closes their
+    // telemetry sockets, whether or not a request arrives.
+    if config.auth.enabled {
+        let sweeper = sessions.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(
+                crate::core::session::SWEEP_EVERY_MS,
+            ));
+            loop {
+                interval.tick().await;
+                let store = sweeper.clone();
+                match tokio::task::spawn_blocking(move || store.sweep(now_ms())).await {
+                    Ok(ended) => {
+                        for (user, reason) in ended {
+                            tracing::info!("browser session of {}: {}", user, reason.describe());
+                        }
+                    }
+                    Err(e) => tracing::warn!("session sweep panicked: {}", e),
+                }
+            }
+        });
+    }
+
     let state: AppState = Arc::new(RwLock::new(SharedState {
         config: config.clone(),
         targets,
@@ -4301,6 +4683,7 @@ async fn main() {
         struct_dicts: global_dicts,
         rate_limiter: Arc::new(RateLimiter::default()),
         storage_vitals,
+        sessions,
     }));
 
     // Honor `auto_connect = true` on each target. We dispatch the

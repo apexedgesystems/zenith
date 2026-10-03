@@ -1,5 +1,6 @@
 import { useCallback, useState, useRef } from "react";
 import { fileToBase64 } from "../api/upload";
+import { apiFetch } from "../api/apiFetch";
 
 /* ----------------------------- Types ----------------------------- */
 
@@ -57,7 +58,7 @@ export default function FileTransferPage({
         }
         const base64 = encoded.base64;
 
-        const r = await fetch(`/api/targets/${selectedTarget}/upload`, {
+        const r = await apiFetch(`/api/targets/${selectedTarget}/upload`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({

@@ -7,6 +7,7 @@ import {
   type FieldDef,
   type EnumTable,
 } from "../api/decode";
+import { apiFetch } from "../api/apiFetch";
 
 /** Whitespace-tolerant hex (the INSPECT browser displays spaced hex
  *  and re-parses it); empty result on malformed input. */
@@ -125,7 +126,7 @@ export default function InspectPage({
       setRegistry([]);
       return;
     }
-    fetch(`/api/targets/${selectedTarget}/registry`)
+    apiFetch(`/api/targets/${selectedTarget}/registry`)
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (data?.components) {
@@ -152,7 +153,7 @@ export default function InspectPage({
       setAllDictNames([]);
       return;
     }
-    fetch(`/api/targets/${selectedTarget}/structs`)
+    apiFetch(`/api/targets/${selectedTarget}/structs`)
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (!data?.components) {
@@ -197,7 +198,7 @@ export default function InspectPage({
       setDict(null);
       return;
     }
-    fetch(
+    apiFetch(
       `/api/targets/${selectedTarget}/structs/${encodeURIComponent(dictName)}`,
     )
       .then((r) => (r.ok ? r.json() : null))
@@ -265,7 +266,7 @@ export default function InspectPage({
     setError(null);
     try {
       const url = `/api/targets/${selectedTarget}/inspect/${selectedUid}?category=${selectedCategory}&offset=0&length=${matchingStruct.size}`;
-      const r = await fetch(url);
+      const r = await apiFetch(url);
       if (!r.ok) {
         const text = await r.text();
         setError(text || `HTTP ${r.status}`);
