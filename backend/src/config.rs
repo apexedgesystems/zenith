@@ -401,35 +401,6 @@ fn default_health_names() -> Vec<String> {
     .to_vec()
 }
 
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            server: ServerSection {
-                host: default_host(),
-                port: default_port(),
-                upload_max_mb: default_upload_max_mb(),
-                cors_allowed_origins: Vec::new(),
-            },
-            auth: AuthSection {
-                enabled: false,
-                secret: default_secret(),
-                username: default_username(),
-                password_hash: String::new(),
-            },
-            storage: StorageSection {
-                path: default_db_path(),
-                retention_hours: default_retention(),
-                audit_retention_days: default_audit_retention_days(),
-                max_db_size_mb: None,
-                fifo_strategy: FifoStrategy::default(),
-                tiers: TiersSection::default(),
-                structs_dir: None,
-            },
-            targets: Vec::new(),
-        }
-    }
-}
-
 impl Default for ServerSection {
     fn default() -> Self {
         Self {
@@ -530,12 +501,15 @@ pub fn invalid_tm_frame_size(t: &TargetSection) -> Option<String> {
 
 /* ----------------------------- Loading ----------------------------- */
 
-/// Parse a TOML config file from disk into a `ServerConfig`. Returns
-/// a human-readable error string on parse or I/O failure.
+/// Parse a TOML config file from disk into a `ServerConfig`. Every
+/// failure (unreadable file, parse error, bad environment override)
+/// is an error naming the file; there is no default configuration to
+/// fall back to, and the boot path exits on the error.
 pub fn load(path: &Path) -> Result<ServerConfig, String> {
     let content =
         std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path.display(), e))?;
-    let cfg: ServerConfig = toml::from_str(&content).map_err(|e| format!("parse error: {}", e))?;
+    let cfg: ServerConfig =
+        toml::from_str(&content).map_err(|e| format!("{}: parse error: {}", path.display(), e))?;
     apply_env_overrides(cfg, |k| std::env::var(k).ok())
 }
 
@@ -742,5 +716,27 @@ mod tests {
             target("d", "udp", None),
         ];
         assert_eq!(duplicate_listen_port(&ok), None);
+    }
+
+    /// @test A config that cannot be read or parsed is an error that
+    /// names the file; there is no default to fall back to. A readable
+    /// file still loads.
+    #[test]
+    fn unreadable_or_malformed_config_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let missing = dir.path().join("absent.toml");
+        let err = load(&missing).unwrap_err();
+        assert!(err.contains("absent.toml"), "{err}");
+
+        let bad = dir.path().join("bad.toml");
+        std::fs::write(&bad, "[server]\nport = 8080\nthis line is not toml\n").unwrap();
+        let err = load(&bad).unwrap_err();
+        assert!(err.contains("bad.toml"), "{err}");
+        assert!(err.contains("line 3"), "{err}");
+
+        let good = dir.path().join("good.toml");
+        std::fs::write(&good, "[server]\nport = 8080\n").unwrap();
+        assert!(load(&good).is_ok());
     }
 }

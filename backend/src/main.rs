@@ -3750,10 +3750,16 @@ async fn main() {
         }
     }
 
-    let config = config::load(&cli.config).unwrap_or_else(|e| {
-        tracing::warn!("Config load failed ({}), using defaults", e);
-        ServerConfig::default()
-    });
+    // A config that cannot be read or parsed refuses boot. The
+    // alternative, a default server with no targets and auth off,
+    // answers health checks and looks fine while serving nothing.
+    let config = match config::load(&cli.config) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            tracing::error!("config refused: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     // Refuse to boot with unusable auth: a default signing secret or a
     // missing password hash while auth is enabled is a misconfiguration

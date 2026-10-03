@@ -16,10 +16,12 @@
 FROM rust:1.98-bookworm AS backend
 
 WORKDIR /build
-COPY Cargo.toml Cargo.toml
+# The committed lockfile is an input of the build: --locked refuses a
+# lock that disagrees with the manifests instead of resolving anew.
+COPY Cargo.toml Cargo.lock ./
 COPY backend/ backend/
 
-RUN cargo build --release
+RUN cargo build --release --locked
 
 # ------------------------------------------------------------------------------
 # Stage 2: React frontend
@@ -27,8 +29,9 @@ RUN cargo build --release
 FROM node:26-bookworm-slim AS frontend
 
 WORKDIR /build
-COPY frontend/package.json frontend/package-lock.json* ./
-RUN npm ci --ignore-scripts 2>/dev/null || npm install
+# npm ci installs exactly what the lockfile says or fails; no fallback.
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --ignore-scripts
 
 COPY frontend/ .
 RUN npm run build
