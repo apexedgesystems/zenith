@@ -400,8 +400,8 @@ pub fn cookie_value(headers: &HeaderMap) -> Option<&str> {
 }
 
 /// Whether a request that authenticates with the session cookie may
-/// proceed. Safe methods pass. An unsafe method or a socket upgrade
-/// must come from the console's own origin: `Sec-Fetch-Site:
+/// proceed. GET, HEAD and OPTIONS pass. Any other method, or a socket
+/// upgrade, must come from the console's own origin: `Sec-Fetch-Site:
 /// same-origin`, or, when the browser sent no such header, an `Origin`
 /// whose host and port equal `Host`. Anything else (another site, a
 /// sibling origin on the same site, no origin at all) is refused.
@@ -410,11 +410,8 @@ pub fn same_origin_allows(method: &Method, headers: &HeaderMap) -> bool {
         .get(header::UPGRADE)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|v| v.trim().eq_ignore_ascii_case("websocket"));
-    let safe = matches!(
-        *method,
-        Method::GET | Method::HEAD | Method::OPTIONS | Method::TRACE
-    );
-    if safe && !upgrade {
+    let exempt = matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS);
+    if exempt && !upgrade {
         return true;
     }
     let text = |name| headers.get(name).and_then(|v| v.to_str().ok());
@@ -713,9 +710,9 @@ mod tests {
         assert_eq!(cookie_value(&HeaderMap::new()), None);
     }
 
-    /// @test Safe methods pass without any origin evidence; an unsafe
-    /// method or a socket upgrade passes on Sec-Fetch-Site:
-    /// same-origin and on nothing else that header says.
+    /// @test GET, HEAD and OPTIONS pass without any origin evidence;
+    /// every other method (TRACE included) and a socket upgrade pass on
+    /// Sec-Fetch-Site: same-origin and on nothing else that header says.
     #[test]
     fn same_origin_rule_trusts_sec_fetch_site_when_present() {
         let none = HeaderMap::new();
@@ -723,7 +720,13 @@ mod tests {
             assert!(same_origin_allows(&m, &none), "{m}");
         }
         let same = headers(&[("sec-fetch-site", "same-origin")]);
-        for m in [Method::POST, Method::PUT, Method::DELETE, Method::PATCH] {
+        for m in [
+            Method::POST,
+            Method::PUT,
+            Method::DELETE,
+            Method::PATCH,
+            Method::TRACE,
+        ] {
             assert!(same_origin_allows(&m, &same), "{m}");
             assert!(!same_origin_allows(&m, &none), "{m} with no evidence");
         }

@@ -534,9 +534,9 @@ the next action is the operator's. A reload keeps the session, and so
 does a server restart: the database stores a SHA-256 of each session
 id, never the id itself.
 
-A request that carries the session cookie and changes something (any
-method but GET, HEAD and OPTIONS), and a telemetry socket upgrade, must
-come from the console's own origin: the browser's `Sec-Fetch-Site:
+A request that carries the session cookie with any method but GET,
+HEAD and OPTIONS, and a telemetry socket upgrade, must come from the
+console's own origin: the browser's `Sec-Fetch-Site:
 same-origin` or, from a browser that sends no such header, an `Origin`
 equal to `Host`. Anything else is refused with 403. Requests with a
 bearer token are not subject to this rule.

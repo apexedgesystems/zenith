@@ -32,9 +32,9 @@ architecture review; work before that is the v0.0.1 tag.
   HTTPS through a reverse proxy (the README's remote-deployment
   steps), or set `[auth] cookie_secure = false` for plain HTTP on a
   trusted network.
-- A request that carries the session cookie and changes something, or
-  opens the telemetry socket, must come from the console's own origin;
-  anything else is refused with 403. Bearer-token requests are not
+- A request that carries the session cookie with any method but GET,
+  HEAD and OPTIONS, or that opens the telemetry socket, must come from
+  the console's own origin; anything else is refused with 403. Bearer-token requests are not
   affected. `POST /api/auth/ws-ticket` is for bearer-token clients and
   refuses a signed-in console.
 - When a session ends, the server closes its telemetry streams with
