@@ -19,6 +19,9 @@ architecture review; work before that is the v0.0.1 tag.
 - The image build uses the committed lockfiles: the backend builds
   with `--locked` and the frontend installs with `npm ci` alone, so a
   lockfile that disagrees with its manifest fails the build.
+- The image build context excludes local dependencies, build outputs,
+  runtime data and the git history, so a host's node_modules or target
+  directory cannot enter the image.
 
 ### Changed
 

@@ -1,0 +1,16 @@
+# The build context is an allowlist: only the workspace manifest, the
+# lockfile and the directories the stages copy are sent to the builder.
+*
+!Cargo.toml
+!Cargo.lock
+!backend
+!frontend
+!deploy
+!targets
+
+# Inside those, nothing a host built or installed: the stages install
+# from the lockfiles and produce their own outputs.
+**/node_modules
+**/dist
+**/target
+**/target-*
