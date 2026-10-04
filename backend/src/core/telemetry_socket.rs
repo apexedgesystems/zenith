@@ -11,14 +11,20 @@
 //! client that closed or vanished, so its task ends at once instead of
 //! at the next failed send.
 //!
-//! The HTTP layer does the upgrade and writes the audit record; this
-//! module owns the loop, so the test suite can drive it over a real
-//! connection.
+//! What a client may send is capped (`MAX_CLIENT_MESSAGE_BYTES`): the
+//! stream needs nothing from it but control frames, so a larger frame
+//! or message ends the stream instead of being held in memory.
+//!
+//! The HTTP layer calls `accept` and writes the audit record; this
+//! module owns the limits and the loop, so the test suite drives both
+//! over a real connection, through the same `accept` the server uses.
 
+use std::future::Future;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
-use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket};
+use axum::extract::ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade};
+use axum::response::Response;
 use tokio::sync::{broadcast, watch};
 
 use crate::core::metrics::TargetMetrics;
@@ -30,6 +36,15 @@ use crate::core::telemetry::TelemetrySample;
 /// At most one lag warning per socket in this interval: a slow client
 /// would otherwise flood the log at ingest rates.
 const LAG_WARN_EVERY: Duration = Duration::from_secs(30);
+
+/// The largest frame, and message, the socket accepts from a client.
+/// Control frames carry at most 125 bytes (RFC 6455); 4 KiB admits them
+/// and the small text or binary frames some clients send (ignored), and
+/// bounds what any client can make the server hold for its socket. A
+/// frame declaring more is refused from its header, before its payload
+/// is read; a message of several frames is refused once it passes the
+/// cap. Either ends the stream as a client that is gone.
+pub const MAX_CLIENT_MESSAGE_BYTES: usize = 4 * 1024;
 
 /* ----------------------------- Types ----------------------------- */
 
@@ -62,6 +77,20 @@ async fn session_ended(end: &mut Option<watch::Receiver<Option<EndReason>>>) -> 
 }
 
 /* ----------------------------- API ----------------------------- */
+
+/// Accept a telemetry socket upgrade with the limits on what the client
+/// may send, and run `serve` on the socket. The server and the tests
+/// open telemetry sockets only through here.
+pub fn accept<F, Fut>(upgrade: WebSocketUpgrade, serve: F) -> Response
+where
+    F: FnOnce(WebSocket) -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    upgrade
+        .max_frame_size(MAX_CLIENT_MESSAGE_BYTES)
+        .max_message_size(MAX_CLIENT_MESSAGE_BYTES)
+        .on_upgrade(serve)
+}
 
 /// The text of a session-end close frame, also used for its audit row.
 pub fn close_text(reason: Option<EndReason>) -> &'static str {
@@ -141,11 +170,14 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    use axum::{extract::ws::WebSocketUpgrade, routing::get, Router};
+    use axum::{routing::get, Router};
     use futures_util::{SinkExt, StreamExt};
+    use tokio::io::AsyncWriteExt;
     use tokio::net::TcpStream;
     use tokio::sync::mpsc;
     use tokio::time::timeout;
+    use tokio_tungstenite::tungstenite::protocol::frame::coding::{Data, OpCode};
+    use tokio_tungstenite::tungstenite::protocol::frame::Frame as RawFrame;
     use tokio_tungstenite::tungstenite::Message as Frame;
     use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 
@@ -182,7 +214,7 @@ mod tests {
                 let metrics = route_metrics.clone();
                 let end_tx = end_tx.clone();
                 async move {
-                    ws.on_upgrade(move |socket| async move {
+                    accept(ws, move |socket| async move {
                         let samples_rx = samples_rx.expect("one socket per harness");
                         let end =
                             stream_samples(socket, samples_rx, "target-0", &metrics, session_rx)
@@ -403,6 +435,64 @@ mod tests {
             .unwrap();
         tokio::time::sleep(Duration::from_millis(100)).await;
         h.samples.send(sample("Pump.flow", 2.0)).unwrap();
+        assert!(matches!(next_frame(&mut client).await, Frame::Text(_)));
+        assert!(h.ends.try_recv().is_err(), "the stream ended");
+        assert_eq!(clients(&h), 1);
+    }
+
+    /// @test A frame whose header declares more than the cap ends the
+    /// stream at once, from the header alone: no payload follows it, so
+    /// a server that waited to read one would never get there.
+    #[tokio::test]
+    async fn a_frame_over_the_cap_is_refused_from_its_header() {
+        let mut h = harness(false).await;
+        let mut client = connect(&h).await;
+        let declared = u16::try_from(MAX_CLIENT_MESSAGE_BYTES + 1).unwrap();
+        // FIN + binary; masked, 16-bit length; the masking key; nothing more.
+        let mut header = vec![0x82, 0x80 | 126];
+        header.extend_from_slice(&declared.to_be_bytes());
+        header.extend_from_slice(&[0x11, 0x22, 0x33, 0x44]);
+        let MaybeTlsStream::Plain(tcp) = client.get_mut() else {
+            panic!("a plain loopback stream");
+        };
+        tcp.write_all(&header).await.unwrap();
+        let end = timeout(SECOND, h.ends.recv())
+            .await
+            .expect("the stream waited for the oversized payload");
+        assert_eq!(end, Some(StreamEnd::ClientGone));
+        assert!(until(|| clients(&h) == 0).await);
+    }
+
+    /// @test A message of frames each under the cap, together over it,
+    /// ends the stream.
+    #[tokio::test]
+    async fn a_message_over_the_cap_ends_the_stream() {
+        let mut h = harness(false).await;
+        let mut client = connect(&h).await;
+        let part = vec![0u8; MAX_CLIENT_MESSAGE_BYTES / 2 + 1];
+        let first = RawFrame::message(part.clone(), OpCode::Data(Data::Binary), false);
+        let last = RawFrame::message(part, OpCode::Data(Data::Continue), true);
+        client.send(Frame::Frame(first)).await.unwrap();
+        client.send(Frame::Frame(last)).await.unwrap();
+        let end = timeout(SECOND, h.ends.recv())
+            .await
+            .expect("the oversized message was accepted");
+        assert_eq!(end, Some(StreamEnd::ClientGone));
+        assert!(until(|| clients(&h) == 0).await);
+    }
+
+    /// @test A message of exactly the cap is accepted and ignored: the
+    /// stream stays open and samples keep coming.
+    #[tokio::test]
+    async fn a_message_at_the_cap_is_ignored() {
+        let mut h = harness(false).await;
+        let mut client = connect(&h).await;
+        client
+            .send(Frame::Binary(vec![0u8; MAX_CLIENT_MESSAGE_BYTES].into()))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        h.samples.send(sample("Pump.flow", 3.0)).unwrap();
         assert!(matches!(next_frame(&mut client).await, Frame::Text(_)));
         assert!(h.ends.try_recv().is_err(), "the stream ended");
         assert_eq!(clients(&h), 1);

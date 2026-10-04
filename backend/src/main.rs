@@ -3454,7 +3454,9 @@ async fn telemetry_ws(
         None => None,
     };
 
-    Ok(ws.on_upgrade(move |socket| handle_telemetry_ws(socket, rx, id, metrics, tie)))
+    Ok(telemetry_socket::accept(ws, move |socket| {
+        handle_telemetry_ws(socket, rx, id, metrics, tie)
+    }))
 }
 
 /// Run the socket (core::telemetry_socket owns the loop) and audit a

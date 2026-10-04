@@ -40,6 +40,9 @@ architecture review; work before that is the v0.0.1 tag.
 - When a session ends, the server closes its telemetry streams with
   WebSocket close code 1008. Target links and recording are not
   affected.
+- The telemetry socket accepts frames and messages of at most 4 KiB
+  from a client, which needs to send only control frames such as
+  pings. A larger frame or message ends the connection.
 - With auth on, a request without credentials is refused with "missing
   token or session" instead of "missing token".
 
