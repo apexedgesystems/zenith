@@ -54,6 +54,10 @@ architecture review; work before that is the v0.0.1 tag.
 
 ### Fixed
 
+- A client that sends WebSocket keep-alive pings on the telemetry socket
+  no longer stops receiving at its ping timeout (40 s with common
+  client settings): the server answers pings, also while a target
+  sends nothing, and ends a socket as soon as its client closes it.
 - A config file that fails to parse, or a missing config path, refuses
   to boot with the error instead of starting a default server with no
   targets.

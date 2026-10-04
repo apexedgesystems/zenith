@@ -4,6 +4,13 @@
 //! with a browser session -- the session ends, which closes the socket
 //! from the server side with the policy code.
 //!
+//! The task reads as well as writes. Reading is what answers a client's
+//! pings (the WebSocket layer queues the pong and sends it as the next
+//! read starts), so a client that keeps its connection alive with pings
+//! stays connected while a target is silent; and it is what notices a
+//! client that closed or vanished, so its task ends at once instead of
+//! at the next failed send.
+//!
 //! The HTTP layer does the upgrade and writes the audit record; this
 //! module owns the loop, so the test suite can drive it over a real
 //! connection.
@@ -29,7 +36,8 @@ const LAG_WARN_EVERY: Duration = Duration::from_secs(30);
 /// Why a telemetry socket ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamEnd {
-    /// The client is gone (a send to it failed).
+    /// The client closed the socket, the connection broke, or a send to
+    /// it failed.
     ClientGone,
     /// The target's sample channel closed (the target was removed).
     SourceClosed,
@@ -98,6 +106,13 @@ pub async fn stream_samples(
                 }
                 Err(broadcast::error::RecvError::Closed) => break StreamEnd::SourceClosed,
             },
+            incoming = socket.recv() => match incoming {
+                // A close is answered like a ping (see the module
+                // documentation) and ends the stream at the next read.
+                // Text and binary frames carry nothing the stream uses.
+                Some(Ok(_)) => {}
+                None | Some(Err(_)) => break StreamEnd::ClientGone,
+            },
             reason = session_ended(&mut session_end) => {
                 // Close from the server side with the policy code, so the
                 // page knows this is not a dropped link. Only this socket
@@ -127,7 +142,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use axum::{extract::ws::WebSocketUpgrade, routing::get, Router};
-    use futures_util::StreamExt;
+    use futures_util::{SinkExt, StreamExt};
     use tokio::net::TcpStream;
     use tokio::sync::mpsc;
     use tokio::time::timeout;
@@ -276,5 +291,120 @@ mod tests {
         let end = timeout(SECOND, h.ends.recv()).await.unwrap();
         assert_eq!(end, Some(StreamEnd::SourceClosed));
         assert!(until(|| clients(&h) == 0).await);
+    }
+
+    /// @test A ping is answered within a second on a target that sends
+    /// nothing at all: the reply does not wait for a sample.
+    #[tokio::test]
+    async fn a_ping_on_a_silent_stream_is_answered_within_a_second() {
+        let h = harness(false).await;
+        let mut client = connect(&h).await;
+        client.send(Frame::Ping("probe".into())).await.unwrap();
+        assert_eq!(next_frame(&mut client).await, Frame::Pong("probe".into()));
+    }
+
+    /// @test A client that keeps the connection alive with pings, and
+    /// gives up when a pong is late, keeps receiving samples well past
+    /// its ping timeout: every ping is answered in time and samples
+    /// still arrive at the end of the run.
+    #[tokio::test]
+    async fn a_pinging_client_keeps_receiving_past_its_ping_timeout() {
+        const PING_EVERY: Duration = Duration::from_millis(100);
+        const PING_TIMEOUT: Duration = Duration::from_millis(500);
+        const RUN: Duration = Duration::from_millis(2000);
+        let h = harness(false).await;
+        let mut client = connect(&h).await;
+        let producer = tokio::spawn({
+            let tx = h.samples.clone();
+            async move {
+                loop {
+                    let _ = tx.send(sample("Pump.flow", 1.0));
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+        });
+        let start = Instant::now();
+        let mut pings = 0;
+        let mut last_sample = start;
+        while start.elapsed() < RUN {
+            pings += 1;
+            let payload = pings.to_string();
+            client
+                .send(Frame::Ping(payload.clone().into()))
+                .await
+                .unwrap();
+            let sent = Instant::now();
+            loop {
+                let left = PING_TIMEOUT.saturating_sub(sent.elapsed());
+                match timeout(left, client.next()).await {
+                    Ok(Some(Ok(Frame::Pong(p)))) if p == payload.as_bytes() => break,
+                    Ok(Some(Ok(Frame::Text(_)))) => last_sample = Instant::now(),
+                    Ok(other) => panic!("unexpected {other:?}"),
+                    Err(_) => panic!(
+                        "ping {pings} unanswered within {PING_TIMEOUT:?}, {:?} into the run",
+                        start.elapsed()
+                    ),
+                }
+            }
+            tokio::time::sleep(PING_EVERY).await;
+        }
+        producer.abort();
+        assert!(pings >= 5, "only {pings} pings in the run");
+        assert!(
+            last_sample.elapsed() < PING_TIMEOUT,
+            "no sample in the last {PING_TIMEOUT:?}"
+        );
+    }
+
+    /// @test A client that closes its socket ends the stream at once: the
+    /// stream reports the client gone (so no session-end close is ever
+    /// audited for it), the client count drops, and the session's end
+    /// signal is released, so a later session end reaches nothing.
+    #[tokio::test]
+    async fn a_client_close_ends_the_stream_and_releases_its_session() {
+        let mut h = harness(true).await;
+        let mut client = connect(&h).await;
+        assert_eq!(h.session.receiver_count(), 1);
+        client.close(None).await.unwrap();
+        let end = timeout(SECOND, h.ends.recv())
+            .await
+            .expect("the stream outlived its client's close");
+        assert_eq!(end, Some(StreamEnd::ClientGone));
+        assert!(until(|| clients(&h) == 0).await);
+        assert_eq!(h.session.receiver_count(), 0);
+        h.session.send_replace(Some(EndReason::Idle));
+        assert!(h.ends.try_recv().is_err());
+    }
+
+    /// @test A connection that drops without a close frame ends the
+    /// stream at once, though the target sends nothing to fail on.
+    #[tokio::test]
+    async fn a_dropped_connection_ends_the_stream() {
+        let mut h = harness(false).await;
+        let client = connect(&h).await;
+        drop(client);
+        let end = timeout(SECOND, h.ends.recv())
+            .await
+            .expect("the stream outlived its dropped connection");
+        assert_eq!(end, Some(StreamEnd::ClientGone));
+        assert!(until(|| clients(&h) == 0).await);
+    }
+
+    /// @test Text and binary frames from the client are ignored: the
+    /// stream stays open and samples keep coming.
+    #[tokio::test]
+    async fn frames_from_the_client_are_ignored() {
+        let mut h = harness(false).await;
+        let mut client = connect(&h).await;
+        client.send(Frame::Text("hello".into())).await.unwrap();
+        client
+            .send(Frame::Binary(vec![1u8, 2, 3].into()))
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        h.samples.send(sample("Pump.flow", 2.0)).unwrap();
+        assert!(matches!(next_frame(&mut client).await, Frame::Text(_)));
+        assert!(h.ends.try_recv().is_err(), "the stream ended");
+        assert_eq!(clients(&h), 1);
     }
 }

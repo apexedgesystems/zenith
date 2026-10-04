@@ -11,7 +11,7 @@ Rust or Node toolchain required.
 # Run all tests (backend + frontend)
 make test
 
-# Backend only (154 unit tests, Rust)
+# Backend only (159 unit tests, Rust)
 make test-backend
 
 # Frontend only (102 unit tests, Vitest + React Testing Library)
@@ -60,15 +60,15 @@ bottom of the source file they test. This is the standard Rust idiom:
 the tests have private-field access and there's no separate test
 discovery to manage.
 
-| File                                   | Tests cover                                                                                                                                                                                                                                                                 |
-| -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `backend/src/protocol/slip.rs`         | SLIP encode/decode round-trip, partial feed, escape across boundary, max-frame-size enforcement, byte-by-byte vs bulk equivalence                                                                                                                                           |
-| `backend/src/protocol/aproto.rs`       | Header parse, payload round-trip, ACK parsing, status code mapping, rejection of malformed input                                                                                                                                                                            |
-| `backend/src/core/telemetry.rs`        | Decoder construction, struct-aware decode, OUTPUT vs STATE priority dedup, generic fallback, padding/reserved filtering, channel-name Arc cache reuse                                                                                                                       |
-| `backend/src/storage/telemetry_db.rs`  | insert_batch + query round-trip, time window filtering, limit clamp, query_latest correctness, delete_oldest ordering, delete_target isolation, target_stats span, global_stats accuracy, layout save/load, config layout deletion refusal, session rows                    |
-| `backend/src/core/session.rs`          | Session store: deadlines from sign-in and keep-alive, the clamp at the absolute deadline, lookups that never extend, end and sweep waking sockets, reload after a restart, only the id's hash at rest; cookie set/clear/parse; the same-origin rule; the session body shape |
-| `backend/src/core/auth.rs`             | Credentials, token mint/validate, tickets only on the query string, boot checks (session limits included), credential precedence, the refused sign-in actor                                                                                                                 |
-| `backend/src/core/telemetry_socket.rs` | The live socket over a real loopback connection: samples as JSON text, the session-end close (1008 and its reason), the end of the sample source                                                                                                                            |
+| File                                   | Tests cover                                                                                                                                                                                                                                                                                                                   |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `backend/src/protocol/slip.rs`         | SLIP encode/decode round-trip, partial feed, escape across boundary, max-frame-size enforcement, byte-by-byte vs bulk equivalence                                                                                                                                                                                             |
+| `backend/src/protocol/aproto.rs`       | Header parse, payload round-trip, ACK parsing, status code mapping, rejection of malformed input                                                                                                                                                                                                                              |
+| `backend/src/core/telemetry.rs`        | Decoder construction, struct-aware decode, OUTPUT vs STATE priority dedup, generic fallback, padding/reserved filtering, channel-name Arc cache reuse                                                                                                                                                                         |
+| `backend/src/storage/telemetry_db.rs`  | insert_batch + query round-trip, time window filtering, limit clamp, query_latest correctness, delete_oldest ordering, delete_target isolation, target_stats span, global_stats accuracy, layout save/load, config layout deletion refusal, session rows                                                                      |
+| `backend/src/core/session.rs`          | Session store: deadlines from sign-in and keep-alive, the clamp at the absolute deadline, lookups that never extend, end and sweep waking sockets, reload after a restart, only the id's hash at rest; cookie set/clear/parse; the same-origin rule; the session body shape                                                   |
+| `backend/src/core/auth.rs`             | Credentials, token mint/validate, tickets only on the query string, boot checks (session limits included), credential precedence, the refused sign-in actor                                                                                                                                                                   |
+| `backend/src/core/telemetry_socket.rs` | The live socket over a real loopback connection: samples as JSON text, the session-end close (1008 and its reason), the end of the sample source, pings answered on a silent stream and past a client's ping timeout, a client close or dropped connection ending the stream and releasing its session, client frames ignored |
 
 Integration tests (DB + storage + actual SQLite file) use `tempfile::TempDir`
 and don't need any external setup. Each test creates its own DB.
