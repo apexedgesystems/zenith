@@ -36,6 +36,11 @@ pub const COOKIE_NAME: &str = "zenith_session";
 /// session's deadline.
 pub const SWEEP_EVERY_MS: u64 = 1_000;
 
+/// The audit action of a session that ended by one of its limits. The
+/// row names the user and carries the reason text of the close frame;
+/// it never carries the session id, raw or hashed.
+pub const EXPIRY_ACTION: &str = "expire_session";
+
 /// Random bytes in a session id (hex-encoded into the cookie).
 const ID_BYTES: usize = 32;
 
@@ -123,6 +128,20 @@ impl Entry {
     }
 }
 
+/// Delete an expired session's row and audit its expiry, dated at the
+/// deadline it reached, in one transaction.
+fn record_expiry(
+    db: &TelemetryDb,
+    policy: &SessionPolicy,
+    key: &str,
+    user: &str,
+    created_ms: u64,
+    refreshed_ms: u64,
+) -> Result<(), DbError> {
+    let (at, reason) = policy.end_of(created_ms, refreshed_ms);
+    db.delete_session_and_audit(key, at, user, EXPIRY_ACTION, reason.describe())
+}
+
 /// A fresh session id: 256 bits from the operating system's generator.
 fn new_id() -> String {
     let mut bytes = [0u8; ID_BYTES];
@@ -170,21 +189,21 @@ impl SessionPolicy {
         })
     }
 
-    /// Why the session has ended by `now_ms`, or None while it lives.
-    /// A session ends at its earlier deadline; an idle deadline clamped
-    /// onto the absolute one counts as the absolute limit.
-    pub fn ended_by(&self, created_ms: u64, refreshed_ms: u64, now_ms: u64) -> Option<EndReason> {
+    /// The instant a session ends unless kept alive, and the limit that
+    /// ends it there: its earlier deadline, an idle deadline clamped onto
+    /// the absolute one counting as the absolute limit.
+    pub fn end_of(&self, created_ms: u64, refreshed_ms: u64) -> (u64, EndReason) {
         let absolute = self.absolute_deadline(created_ms);
-        let effective = self
-            .idle_deadline(created_ms, refreshed_ms)
-            .unwrap_or(absolute);
-        if now_ms < effective {
-            None
-        } else if effective < absolute {
-            Some(EndReason::Idle)
-        } else {
-            Some(EndReason::Absolute)
+        match self.idle_deadline(created_ms, refreshed_ms) {
+            Some(idle) if idle < absolute => (idle, EndReason::Idle),
+            _ => (absolute, EndReason::Absolute),
         }
+    }
+
+    /// Why the session has ended by `now_ms`, or None while it lives.
+    pub fn ended_by(&self, created_ms: u64, refreshed_ms: u64, now_ms: u64) -> Option<EndReason> {
+        let (at, reason) = self.end_of(created_ms, refreshed_ms);
+        (now_ms >= at).then_some(reason)
     }
 }
 
@@ -224,8 +243,8 @@ impl SessionStatus {
 
 impl SessionStore {
     /// Open the store over the database, loading every session still
-    /// alive at `now_ms` and deleting the rows of those that ended
-    /// while the server was down.
+    /// alive at `now_ms`. A session that ended while the server was down
+    /// is expired here: its row goes and its expiry is audited, together.
     pub fn open(db: Arc<TelemetryDb>, policy: SessionPolicy, now_ms: u64) -> Result<Self, DbError> {
         let mut live = HashMap::new();
         for row in db.load_sessions()? {
@@ -233,7 +252,14 @@ impl SessionStore {
                 .ended_by(row.created_ms, row.refreshed_ms, now_ms)
                 .is_some()
             {
-                db.delete_session(&row.key)?;
+                record_expiry(
+                    &db,
+                    &policy,
+                    &row.key,
+                    &row.user,
+                    row.created_ms,
+                    row.refreshed_ms,
+                )?;
                 continue;
             }
             live.insert(
@@ -319,9 +345,12 @@ impl SessionStore {
         }))
     }
 
-    /// End every session whose deadline has passed at `now_ms` and
-    /// notify its sockets. Rows are deleted best-effort: an expired row
-    /// is dead by its times whether or not the delete lands.
+    /// End every session whose deadline has passed at `now_ms`, notify
+    /// its sockets, and expire its row with its audit entry. A session is
+    /// taken from the map once, here or by `end`, so it gets exactly one
+    /// terminal row: an expiry from here, a sign-out from `end`'s caller.
+    /// A row whose expiry could not be written stays behind and is
+    /// expired, and audited, at the next boot.
     pub fn sweep(&self, now_ms: u64) -> Vec<(Arc<str>, EndReason)> {
         let expired: Vec<(String, Entry, EndReason)> = {
             let mut live = self.lock();
@@ -340,8 +369,15 @@ impl SessionStore {
         let mut ended = Vec::with_capacity(expired.len());
         for (key, entry, reason) in expired {
             entry.ended.send_replace(Some(reason));
-            if let Err(e) = self.db.delete_session(&key) {
-                tracing::warn!("expired session row not deleted: {}", e);
+            if let Err(e) = record_expiry(
+                &self.db,
+                &self.policy,
+                &key,
+                &entry.user,
+                entry.created_ms,
+                entry.refreshed_ms,
+            ) {
+                tracing::warn!("expired session not recorded: {}", e);
             }
             ended.push((entry.user, reason));
         }
@@ -832,5 +868,105 @@ mod tests {
         let p = SessionPolicy::from_config(&auth);
         assert_eq!(p.idle_deadline(T0, T0), None);
         assert_eq!(p.absolute_deadline(T0), T0 + 2 * HOUR);
+    }
+
+    /// Expiry rows in the audit log: (user, detail, timestamp), sorted.
+    fn expiries(store: &SessionStore) -> Vec<(String, String, u64)> {
+        let mut rows: Vec<(String, String, u64)> = store
+            .db
+            .query_audit(1000, 0)
+            .unwrap()
+            .into_iter()
+            .filter(|e| e.action == "expire_session")
+            .map(|e| (e.actor, e.detail.unwrap_or_default(), e.ts_ms))
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    /// @test Each expired session leaves exactly one audit row: its user,
+    /// the reason text its sockets' close frame carries, dated at the
+    /// deadline it reached. Sweeping again adds nothing, a signed-out
+    /// session leaves none, and no audit row carries a session id or its
+    /// hash.
+    #[test]
+    fn each_expiry_is_audited_once_with_its_reason() {
+        let dir = TempDir::new().unwrap();
+        let store = open_store(&dir, policy(30, 1), T0);
+        let (idle_id, idle_s) = store.create("idle-user", T0).unwrap();
+        let (busy_id, busy_s) = store.create("busy-user", T0).unwrap();
+        let (gone_id, gone_s) = store.create("leaving-user", T0).unwrap();
+        store.end(&gone_s.key, EndReason::SignedOut).unwrap();
+
+        store.refresh(&busy_s.key, T0 + 20 * MIN).unwrap();
+        for now in [T0 + 29 * MIN, T0 + 30 * MIN, T0 + 31 * MIN] {
+            store.sweep(now);
+        }
+        store.refresh(&busy_s.key, T0 + 40 * MIN).unwrap();
+        for now in [T0 + HOUR, T0 + HOUR + MIN, T0 + 2 * HOUR] {
+            store.sweep(now);
+        }
+
+        assert_eq!(
+            expiries(&store),
+            vec![
+                (
+                    "busy-user".to_string(),
+                    "session ended: absolute limit".to_string(),
+                    T0 + HOUR
+                ),
+                (
+                    "idle-user".to_string(),
+                    "session ended: idle limit".to_string(),
+                    T0 + 30 * MIN
+                ),
+            ]
+        );
+        for e in store.db.query_audit(1000, 0).unwrap() {
+            let row = format!("{} {} {:?} {:?}", e.actor, e.action, e.detail, e.target_id);
+            for id in [
+                &idle_id,
+                &busy_id,
+                &gone_id,
+                &idle_s.key,
+                &busy_s.key,
+                &gone_s.key,
+            ] {
+                assert!(!row.contains(id.as_str()), "{row}");
+            }
+        }
+    }
+
+    /// @test A session that expires while the server is down is audited
+    /// once, by the boot that finds it; booting again adds nothing, and a
+    /// session the sweep already audited is not audited again at boot.
+    #[test]
+    fn an_expiry_is_audited_once_across_restarts() {
+        let dir = TempDir::new().unwrap();
+        let store = open_store(&dir, policy(30, 10), T0);
+        store.create("swept-user", T0).unwrap();
+        let (_, down) = store.create("down-user", T0).unwrap();
+        store.refresh(&down.key, T0 + 20 * MIN).unwrap();
+        store.sweep(T0 + 31 * MIN);
+        drop(store);
+
+        // The server stays down past down-user's idle deadline.
+        drop(open_store(&dir, policy(30, 10), T0 + 2 * HOUR));
+        let again = open_store(&dir, policy(30, 10), T0 + 3 * HOUR);
+        assert_eq!(
+            expiries(&again),
+            vec![
+                (
+                    "down-user".to_string(),
+                    "session ended: idle limit".to_string(),
+                    T0 + 50 * MIN
+                ),
+                (
+                    "swept-user".to_string(),
+                    "session ended: idle limit".to_string(),
+                    T0 + 30 * MIN
+                ),
+            ]
+        );
     }
 }

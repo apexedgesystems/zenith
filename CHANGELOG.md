@@ -48,9 +48,11 @@ architecture review; work before that is the v0.0.1 tag.
 - Session ids are random 256-bit values in an HttpOnly, SameSite=Strict
   cookie. The database stores only their SHA-256, so sessions survive a
   restart without the ids being kept anywhere.
-- Sign-in, refused sign-in, sign-out and streams closed by a session
-  end are audited. A refused sign-in is recorded under the configured
-  user name or "(unknown user)", never under the text that was typed.
+- Sign-in, refused sign-in, sign-out, each session's expiry (once,
+  with its reason: idle or absolute limit) and streams closed by a
+  session end are audited. A refused sign-in is recorded under the
+  configured user name or "(unknown user)", never under the text that
+  was typed; no audit row carries a session id.
 
 ### Fixed
 

@@ -1216,6 +1216,29 @@ impl TelemetryDb {
         let n = conn.execute("DELETE FROM sessions WHERE key = ?1", params![key])?;
         Ok(n > 0)
     }
+
+    /// Delete a session row and append the audit entry that records why,
+    /// in one transaction: both land or neither does, so an entry can
+    /// never be written twice for a row that outlived the first write.
+    pub fn delete_session_and_audit(
+        &self,
+        key: &str,
+        ts_ms: u64,
+        actor: &str,
+        action: &str,
+        detail: &str,
+    ) -> Result<(), DbError> {
+        let mut conn = self.writer.lock().map_err(|_| DbError::Lock)?;
+        let tx = conn.transaction()?;
+        tx.execute("DELETE FROM sessions WHERE key = ?1", params![key])?;
+        tx.execute(
+            "INSERT INTO audit_log (ts_ms, actor, action, target_id, detail, status, source_ip)
+             VALUES (?1, ?2, ?3, NULL, ?4, 'ok', NULL)",
+            params![ts_ms as i64, actor, action, detail],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
 }
 
 /// Build an Envelope from a row's nullable tier columns: present only

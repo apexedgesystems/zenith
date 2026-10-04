@@ -112,7 +112,7 @@ ELF ident) decode correctly with zero configuration.
 | **INSPECT**       | Browse any registered data block on any component for any category (STATIC_PARAM / TUNABLE_PARAM / STATE / INPUT / OUTPUT). Decoded field table with type info. Auto-refresh toggle (1 Hz) for live state debugging.                                                                                                                                    |
 | **File Transfer** | Drag-and-drop file upload to any path on the target via APROTO. Single-file with size cap. Per-target export of telemetry as CSV.                                                                                                                                                                                                                       |
 | **Storage**       | Live capacity gauge against the configured cap with fill rate and time-to-cap projection, per-target usage bars with trim/delete controls, the pipeline accounting table (decoded = written + counted drops), FIFO/retention counters, retention-ladder card (per-band populations), manual downsample.                                                 |
-| **Audit Log**     | Append-only log of operator actions: every command, file upload, target connect/disconnect/add/remove, library swap, storage trim; with auth on also sign-in, refused sign-in, sign-out, and telemetry streams closed because their session ended. Filterable by actor / target / IP / status. Auto-refresh option.                                     |
+| **Audit Log**     | Append-only log of operator actions: every command, file upload, target connect/disconnect/add/remove, library swap, storage trim; with auth on also sign-in, refused sign-in, sign-out, session expiry with its reason, and telemetry streams closed because their session ended. Filterable by actor / target / IP / status. Auto-refresh option.     |
 
 ## Sidebar Features
 
@@ -133,7 +133,7 @@ ELF ident) decode correctly with zero configuration.
 | Frontend      | React 19, TypeScript strict, Canvas API                                                    |
 | Storage       | SQLite (WAL mode) with read connection pool (1 writer + N readers)                         |
 | Protocol      | APROTO over TCP + SLIP framing                                                             |
-| Tests         | `cargo test --lib` (159 unit tests) + Vitest with React Testing Library (102 unit tests)   |
+| Tests         | `cargo test --lib` (161 unit tests) + Vitest with React Testing Library (102 unit tests)   |
 | Benches       | criterion + pprof flamegraphs                                                              |
 | Auth          | Console sign-in with server-side sessions; JWT bearer tokens for API clients (default off) |
 | Rate limiting | Per-IP token bucket on POST endpoints (when auth is on)                                    |
@@ -285,7 +285,7 @@ make run
 | `make stop`          | Stop the running container                                                                     |
 | `make dev`           | Build + run in foreground (logs to stdout)                                                     |
 | `make test`          | Run **both** backend and frontend test suites                                                  |
-| `make test-backend`  | Backend only: `cargo test --lib` (currently 159 unit tests)                                    |
+| `make test-backend`  | Backend only: `cargo test --lib` (currently 161 unit tests)                                    |
 | `make test-frontend` | Frontend only: `vitest run` (currently 102 unit tests)                                         |
 | `make bench`         | Run criterion benches (`protocol`, `storage`, `decoder`)                                       |
 | `make format`        | Run rustfmt across the backend                                                                 |
@@ -578,8 +578,10 @@ The audit log captures every state-changing action regardless of
 whether auth is on, and with auth on also sign-in, refused sign-in
 (recorded under the configured user name, or "(unknown user)" for any
 other name, so a password typed into the wrong field is never
-logged), sign-out, and telemetry streams closed because their session
-ended. View it at `GET /api/audit` or via the Audit Log page in the
+logged), sign-out, each session's expiry (once, under its user, with
+the limit that ended it: idle or absolute, also when it expired while
+the server was down), and telemetry streams closed because their
+session ended. View it at `GET /api/audit` or via the Audit Log page in the
 UI. Each entry has timestamp, actor, action, target, detail, status,
 and source IP.
 
