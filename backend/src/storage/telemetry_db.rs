@@ -1030,13 +1030,19 @@ impl TelemetryDb {
         let ts_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_millis() as i64;
-        conn.execute(
-            "INSERT INTO audit_log (ts_ms, actor, action, target_id, detail, status, source_ip)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![ts_ms, actor, action, target_id, detail, status, source_ip],
-        )?;
-        Ok(())
+            .as_millis() as u64;
+        insert_audit(
+            &conn,
+            &AuditRow {
+                ts_ms,
+                actor,
+                action,
+                target_id,
+                detail,
+                status,
+                source_ip,
+            },
+        )
     }
 
     /// Query the audit log, newest entries first. The tiebreak on `id DESC`
@@ -1231,14 +1237,52 @@ impl TelemetryDb {
         let mut conn = self.writer.lock().map_err(|_| DbError::Lock)?;
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM sessions WHERE key = ?1", params![key])?;
-        tx.execute(
-            "INSERT INTO audit_log (ts_ms, actor, action, target_id, detail, status, source_ip)
-             VALUES (?1, ?2, ?3, NULL, ?4, 'ok', NULL)",
-            params![ts_ms as i64, actor, action, detail],
+        insert_audit(
+            &tx,
+            &AuditRow {
+                ts_ms,
+                actor,
+                action,
+                target_id: None,
+                detail: Some(detail),
+                status: "ok",
+                source_ip: None,
+            },
         )?;
         tx.commit()?;
         Ok(())
     }
+}
+
+/// One audit-log entry to write.
+struct AuditRow<'a> {
+    ts_ms: u64,
+    actor: &'a str,
+    action: &'a str,
+    target_id: Option<&'a str>,
+    detail: Option<&'a str>,
+    status: &'a str,
+    source_ip: Option<&'a str>,
+}
+
+/// The one writer of audit rows: every entry, on the writer connection
+/// or inside a caller's transaction, goes through here, so the column
+/// list exists once.
+fn insert_audit(conn: &Connection, row: &AuditRow) -> Result<(), DbError> {
+    conn.execute(
+        "INSERT INTO audit_log (ts_ms, actor, action, target_id, detail, status, source_ip)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![
+            row.ts_ms as i64,
+            row.actor,
+            row.action,
+            row.target_id,
+            row.detail,
+            row.status,
+            row.source_ip
+        ],
+    )?;
+    Ok(())
 }
 
 /// Build an Envelope from a row's nullable tier columns: present only
@@ -2344,12 +2388,17 @@ mod tests {
         let (_dir, db) = open_temp_db();
         {
             let conn = db.writer.lock().unwrap();
-            for (ts, action) in [(1_000i64, "old"), (2_000, "old2"), (9_000, "new")] {
-                conn.execute(
-                    "INSERT INTO audit_log (ts_ms, actor, action, status) VALUES (?1, 'op', ?2, 'ok')",
-                    params![ts, action],
-                )
-                .unwrap();
+            for (ts_ms, action) in [(1_000, "old"), (2_000, "old2"), (9_000, "new")] {
+                let row = AuditRow {
+                    ts_ms,
+                    actor: "op",
+                    action,
+                    target_id: None,
+                    detail: None,
+                    status: "ok",
+                    source_ip: None,
+                };
+                insert_audit(&conn, &row).unwrap();
             }
         }
         assert_eq!(db.prune_audit(5_000).unwrap(), 2);
