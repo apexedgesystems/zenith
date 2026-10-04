@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use axum::{
     extract::{
-        ws::{close_code, CloseFrame, Message, WebSocket, WebSocketUpgrade},
+        ws::{WebSocket, WebSocketUpgrade},
         ConnectInfo, Path, Request, State,
     },
     http::{header, HeaderMap, Method, StatusCode},
@@ -37,6 +37,7 @@ use crate::core::config_manager::StructDictionary;
 use crate::core::metrics::TargetMetrics;
 use crate::core::session::{EndReason, Session, SessionPolicy, SessionStatus, SessionStore};
 use crate::core::telemetry::{self, TelemetrySample};
+use crate::core::telemetry_socket::{self, StreamEnd};
 use crate::core::tprm;
 use crate::core::transport::{unsupported_op, Protocol, ProtocolLink, PushTelemetryPacket};
 use crate::storage::telemetry_db::{DbError, TelemetryDb};
@@ -3410,7 +3411,7 @@ async fn session_sign_out(
 /* ----------------------------- WebSocket ----------------------------- */
 
 /// A telemetry socket opened with a browser session closes when that
-/// session ends. This is everything the socket task needs for that.
+/// session ends, and the close is audited under the session's user.
 struct SessionTie {
     ended: watch::Receiver<Option<EndReason>>,
     user: Arc<str>,
@@ -3456,93 +3457,34 @@ async fn telemetry_ws(
     Ok(ws.on_upgrade(move |socket| handle_telemetry_ws(socket, rx, id, metrics, tie)))
 }
 
-/// Resolves with the end reason when the socket's session ends; never
-/// resolves for a socket without a session.
-async fn session_ended(tie: &mut Option<SessionTie>) -> Option<EndReason> {
-    match tie {
-        Some(t) => {
-            // An error means the store dropped the session without a
-            // reason; either way the session is over.
-            let _ = t.ended.wait_for(Option::is_some).await;
-            *t.ended.borrow()
-        }
-        None => std::future::pending().await,
-    }
-}
-
+/// Run the socket (core::telemetry_socket owns the loop) and audit a
+/// close that its session's end caused.
 async fn handle_telemetry_ws(
-    mut socket: WebSocket,
-    mut rx: broadcast::Receiver<TelemetrySample>,
+    socket: WebSocket,
+    rx: broadcast::Receiver<TelemetrySample>,
     target_id: String,
     metrics: Arc<TargetMetrics>,
-    mut tie: Option<SessionTie>,
+    tie: Option<SessionTie>,
 ) {
-    use std::sync::atomic::Ordering;
-    const LAG_WARN_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
-
-    tracing::info!("WebSocket client connected for target {}", target_id);
-    metrics.ws_clients.fetch_add(1, Ordering::Relaxed);
-    let mut last_lag_warn: Option<std::time::Instant> = None;
-
-    loop {
-        tokio::select! {
-            received = rx.recv() => match received {
-                Ok(sample) => {
-                    let json = serde_json::to_string(&sample).unwrap_or_default();
-                    if socket.send(Message::Text(json.into())).await.is_err() {
-                        break; // Client disconnected
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(n)) => {
-                    metrics.ws_lag_drops.fetch_add(n, Ordering::Relaxed);
-                    if last_lag_warn.is_none_or(|t| t.elapsed() >= LAG_WARN_EVERY) {
-                        tracing::warn!(
-                            "[{}] WebSocket client lagged, {} samples dropped ({} total across clients)",
-                            target_id,
-                            n,
-                            metrics.ws_lag_drops.load(Ordering::Relaxed)
-                        );
-                        last_lag_warn = Some(std::time::Instant::now());
-                    }
-                }
-                Err(broadcast::error::RecvError::Closed) => {
-                    break;
-                }
-            },
-            reason = session_ended(&mut tie) => {
-                // The session ended: close from the server side with
-                // the policy code, so the page knows this is not a
-                // dropped link. Only this socket is affected -- the
-                // target's link, router and recorder never see it.
-                let text = reason.map_or("session ended", EndReason::describe);
-                let _ = socket
-                    .send(Message::Close(Some(CloseFrame {
-                        code: close_code::POLICY,
-                        reason: text.into(),
-                    })))
-                    .await;
-                if let Some(t) = tie.take() {
-                    let target = target_id.clone();
-                    let _ = tokio::task::spawn_blocking(move || {
-                        record_audit(
-                            &t.db,
-                            &t.user,
-                            "close_telemetry_socket",
-                            Some(&target),
-                            Some(text),
-                            "ok",
-                            Some(&t.source_ip),
-                        )
-                    })
-                    .await;
-                }
-                break;
-            }
-        }
+    let (end_signal, auditor) = match tie {
+        Some(t) => (Some(t.ended), Some((t.user, t.db, t.source_ip))),
+        None => (None, None),
+    };
+    let end = telemetry_socket::stream_samples(socket, rx, &target_id, &metrics, end_signal).await;
+    if let (StreamEnd::SessionEnded(reason), Some((user, db, source_ip))) = (end, auditor) {
+        let _ = tokio::task::spawn_blocking(move || {
+            record_audit(
+                &db,
+                &user,
+                "close_telemetry_socket",
+                Some(&target_id),
+                Some(telemetry_socket::close_text(reason)),
+                "ok",
+                Some(&source_ip),
+            )
+        })
+        .await;
     }
-
-    metrics.ws_clients.fetch_sub(1, Ordering::Relaxed);
-    tracing::info!("WebSocket client disconnected for target {}", target_id);
 }
 
 /* ----------------------------- Metrics ----------------------------- */
