@@ -11,24 +11,50 @@ architecture review; work before that is the v0.0.1 tag.
 
 ## Unreleased
 
-### Fixed
+### Added
 
-- A config file that fails to parse, or a missing config path, refuses
-  to boot with the error instead of starting a default server with no
-  targets.
-- The image build uses the committed lockfiles: the backend builds
-  with `--locked` and the frontend installs with `npm ci` alone, so a
-  lockfile that disagrees with its manifest fails the build.
-- The image build context excludes local dependencies, build outputs,
-  runtime data and the git history, so a host's node_modules or target
-  directory cannot enter the image.
+- With auth on, the console signs in: a login page, a server-side
+  session and Sign out. A session ends after `[auth] session_idle_min`
+  without operator input (default 30; 0 disables) and `[auth]
+  session_max_hours` after sign-in (default 10). Only operator input
+  renews it. The console warns before each limit; after an expiry it
+  asks for the password over the page it was on and resends nothing.
+- `GET`, `POST` and `DELETE /api/auth/session`, and
+  `POST /api/auth/session/refresh`. Bearer-token clients are unchanged.
 
 ### Changed
 
-- Authentication is documented as covering API clients. The browser
-  console does not log in when auth is on; the remote-deployment
-  section describes an authenticating reverse proxy for operators and
-  names the telemetry socket path it must upgrade.
+- The session cookie is Secure by default: serve the console over
+  HTTPS (see the README's remote-deployment steps) or set
+  `[auth] cookie_secure = false` on a trusted network.
+- A request with the session cookie that is not GET, HEAD or OPTIONS,
+  and any telemetry socket upgrade, must come from the console's own
+  origin (403 otherwise). A reverse proxy must pass `Host` through.
+- A session end closes its telemetry sockets with code 1008; target
+  links and recording are unaffected. A connection whose send cannot
+  complete within 10 s is dropped. Clients may send at most 4 KiB per
+  frame.
+- A console opened while the server is restarting retries its first
+  session read (after 1 s, doubling to 10 s) instead of staying blank.
+- Without credentials the API answers "missing token or session".
+
+### Security
+
+- Session ids are random 256-bit values in an HttpOnly, SameSite=Strict
+  cookie; the database stores only their SHA-256.
+- Sign-in, refused sign-in (never under the typed text), sign-out,
+  session expiry and session-ended socket closes are audited.
+
+### Fixed
+
+- Telemetry socket clients that send keep-alive pings no longer lose
+  the stream at their ping timeout; the server answers pings and ends
+  a socket when its client closes.
+- A config file that fails to parse, or a missing config path, refuses
+  to boot instead of starting a default server with no targets.
+- The image builds from the committed lockfiles (`--locked`, `npm ci`)
+  and an allowlisted build context, so nothing from the host can enter
+  it.
 
 ## v0.2.0 - 2026-09-27
 

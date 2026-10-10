@@ -7,6 +7,7 @@ import {
   hexToBytes,
   type FieldDef,
 } from "../api/decode";
+import { apiFetch } from "../api/apiFetch";
 
 /* ----------------------------- Types ----------------------------- */
 
@@ -178,7 +179,7 @@ export default function CommandingPage({
     // Cancellation flag: without it, switching targets mid-flight let
     // the OLD target's struct dicts land in the NEW target's state.
     let cancelled = false;
-    fetch(`/api/targets/${selectedTarget}/structs`)
+    apiFetch(`/api/targets/${selectedTarget}/structs`)
       .then((r) => (r.ok ? r.json() : { components: [] }))
       .then((data) => {
         if (cancelled) return;
@@ -189,7 +190,7 @@ export default function CommandingPage({
               s.fieldCount > 0 && s.size > 0,
           );
           if (useful.length === 0) continue;
-          fetch(
+          apiFetch(
             `/api/targets/${selectedTarget}/structs/${encodeURIComponent(
               comp.component,
             )}`,
@@ -233,7 +234,7 @@ export default function CommandingPage({
 
   // Load command config from backend
   useEffect(() => {
-    fetch(`/api/targets/${selectedTarget}/commands`)
+    apiFetch(`/api/targets/${selectedTarget}/commands`)
       .then((r) => (r.ok ? r.json() : { quickCommands: [], components: {} }))
       .then((data) => {
         setQuickCommands(data.quickCommands || []);
@@ -303,7 +304,7 @@ export default function CommandingPage({
       };
 
       try {
-        const r = await fetch(`/api/targets/${selectedTarget}/command`, {
+        const r = await apiFetch(`/api/targets/${selectedTarget}/command`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({

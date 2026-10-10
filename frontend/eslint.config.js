@@ -5,6 +5,9 @@
 import tseslint from "typescript-eslint";
 import reactHooks from "eslint-plugin-react-hooks";
 
+const USE_API_FETCH =
+  "Use apiFetch (src/api/apiFetch.ts): every request goes through the one choke point.";
+
 export default tseslint.config(
   { ignores: ["dist/", "node_modules/", "*.config.*"] },
   ...tseslint.configs.recommended,
@@ -26,6 +29,25 @@ export default tseslint.config(
       // linter focused on what the compiler cannot see.
       "@typescript-eslint/no-unused-vars": "off",
       "@typescript-eslint/no-explicit-any": "error",
+    },
+  },
+  {
+    // fetch is called in apiFetch.ts and nowhere else, so every
+    // answer -- a 401 above all -- is seen in one place. Tests stub
+    // fetch to drive that choke point.
+    files: ["src/**/*.{ts,tsx}"],
+    ignores: ["src/api/apiFetch.ts", "src/**/*.test.{ts,tsx}"],
+    rules: {
+      "no-restricted-globals": [
+        "error",
+        { name: "fetch", message: USE_API_FETCH },
+      ],
+      "no-restricted-properties": [
+        "error",
+        { object: "window", property: "fetch", message: USE_API_FETCH },
+        { object: "globalThis", property: "fetch", message: USE_API_FETCH },
+        { object: "self", property: "fetch", message: USE_API_FETCH },
+      ],
     },
   },
 );

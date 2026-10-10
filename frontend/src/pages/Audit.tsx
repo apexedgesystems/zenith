@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { useTargets } from "../api/queries";
+import { apiFetch } from "../api/apiFetch";
 
 /**
  * Audit Log viewer.
@@ -40,7 +41,9 @@ export default function AuditPage() {
     setLoading(true);
     setError(null);
     try {
-      const r = await fetch(`/api/audit?limit=${PAGE_SIZE}&offset=${offset}`);
+      const r = await apiFetch(
+        `/api/audit?limit=${PAGE_SIZE}&offset=${offset}`,
+      );
       if (!r.ok) {
         setError(await r.text());
         return;

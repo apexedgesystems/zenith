@@ -27,6 +27,8 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 # Auth
 jsonwebtoken = "9"
 argon2 = { version = "0.5", features = ["std"] }
+# Browser session ids are stored as SHA-256 digests, never in the clear
+sha2 = "0.11"
 
 # Logging
 tracing = "0.1"
@@ -53,6 +55,10 @@ path = "src/lib.rs"
 criterion = { version = "0.5", features = ["html_reports"] }
 pprof = { version = "0.14", features = ["criterion", "flamegraph"] }
 tempfile = "3"
+# A WebSocket client for the telemetry socket tests (both crates are
+# already in the tree through axum's WebSocket support)
+tokio-tungstenite = "0.29"
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 
 [[bench]]
 name = "protocol"
