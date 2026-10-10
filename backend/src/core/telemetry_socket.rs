@@ -15,6 +15,13 @@
 //! stream needs nothing from it but control frames, so a larger frame
 //! or message ends the stream instead of being held in memory.
 //!
+//! A client that stops reading cannot hold the task. A send waits while
+//! the connection's buffers are full; it waits at most `SEND_TIMEOUT`,
+//! after which the client is gone. A session end does not wait for it:
+//! it abandons the send in progress and gives the policy close at most
+//! `CLOSE_TIMEOUT`, so the stream ends within that bound of the
+//! session's end whether or not the client reads.
+//!
 //! The HTTP layer calls `accept` and writes the audit record; this
 //! module owns the limits and the loop, so the test suite drives both
 //! over a real connection, through the same `accept` the server uses.
@@ -46,17 +53,29 @@ const LAG_WARN_EVERY: Duration = Duration::from_secs(30);
 /// cap. Either ends the stream as a client that is gone.
 pub const MAX_CLIENT_MESSAGE_BYTES: usize = 4 * 1024;
 
+/// The longest a send may wait for the client to take a frame. A
+/// sample's frame is small and the connection buffers many of them, so a
+/// client that takes nothing for this long has stopped reading or lost
+/// its link; a slow one only falls behind (lag). Ten seconds rides out
+/// a stall on a congested link.
+const SEND_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The longest the policy close at a session end may wait for the
+/// client: a client that is reading takes it at once, and one that is
+/// not would never take it.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(1);
+
 /* ----------------------------- Types ----------------------------- */
 
 /// Why a telemetry socket ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamEnd {
-    /// The client closed the socket, the connection broke, or a send to
-    /// it failed.
+    /// The client closed the socket, the connection broke, a send to it
+    /// failed, or it took nothing for `SEND_TIMEOUT`.
     ClientGone,
     /// The target's sample channel closed (the target was removed).
     SourceClosed,
-    /// The socket's session ended; the client was sent a policy close.
+    /// The socket's session ended; the policy close was attempted.
     SessionEnded(Option<EndReason>),
 }
 
@@ -74,6 +93,19 @@ async fn session_ended(end: &mut Option<watch::Receiver<Option<EndReason>>>) -> 
         }
         None => std::future::pending().await,
     }
+}
+
+/// End a socket whose session ended. The policy close tells the page
+/// this is not a dropped link; it gets at most `CLOSE_TIMEOUT`, and the
+/// stream ends either way. Only this socket is affected -- the target's
+/// link, router and recorder never see it.
+async fn session_close(socket: &mut WebSocket, reason: Option<EndReason>) -> StreamEnd {
+    let close = Message::Close(Some(CloseFrame {
+        code: close_code::POLICY,
+        reason: close_text(reason).into(),
+    }));
+    let _ = tokio::time::timeout(CLOSE_TIMEOUT, socket.send(close)).await;
+    StreamEnd::SessionEnded(reason)
 }
 
 /* ----------------------------- API ----------------------------- */
@@ -117,8 +149,18 @@ pub async fn stream_samples(
             received = samples.recv() => match received {
                 Ok(sample) => {
                     let json = serde_json::to_string(&sample).unwrap_or_default();
-                    if socket.send(Message::Text(json.into())).await.is_err() {
-                        break StreamEnd::ClientGone;
+                    let send = socket.send(Message::Text(json.into()));
+                    // The send waits while the client is not reading; the
+                    // session end must not wait with it.
+                    tokio::select! {
+                        sent = tokio::time::timeout(SEND_TIMEOUT, send) => {
+                            if !matches!(sent, Ok(Ok(()))) {
+                                break StreamEnd::ClientGone;
+                            }
+                        }
+                        reason = session_ended(&mut session_end) => {
+                            break session_close(&mut socket, reason).await;
+                        }
                     }
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => {
@@ -143,17 +185,7 @@ pub async fn stream_samples(
                 None | Some(Err(_)) => break StreamEnd::ClientGone,
             },
             reason = session_ended(&mut session_end) => {
-                // Close from the server side with the policy code, so the
-                // page knows this is not a dropped link. Only this socket
-                // is affected -- the target's link, router and recorder
-                // never see it.
-                let _ = socket
-                    .send(Message::Close(Some(CloseFrame {
-                        code: close_code::POLICY,
-                        reason: close_text(reason).into(),
-                    })))
-                    .await;
-                break StreamEnd::SessionEnded(reason);
+                break session_close(&mut socket, reason).await;
             }
         }
     };
@@ -496,5 +528,62 @@ mod tests {
         assert!(matches!(next_frame(&mut client).await, Frame::Text(_)));
         assert!(h.ends.try_recv().is_err(), "the stream ended");
         assert_eq!(clients(&h), 1);
+    }
+
+    /// Fill the connection while the client reads nothing, until the
+    /// stream is stuck in a send: its backlog in the sample channel stops
+    /// draining. Large samples only make the buffers fill sooner.
+    async fn stall(h: &Harness) {
+        let large = sample(&"x".repeat(128 * 1024), 1.0);
+        for _ in 0..200 {
+            h.samples.send(large.clone()).unwrap();
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let backlog = h.samples.len();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            backlog > 0 && h.samples.len() == backlog,
+            "the stream kept up, so no send blocked: backlog {backlog}, then {}",
+            h.samples.len()
+        );
+    }
+
+    /// @test A session end ends a stream stuck in a send to a client that
+    /// has stopped reading: within two seconds, with the session's reason
+    /// for the audit row, and the client count drops.
+    #[tokio::test]
+    async fn a_session_end_interrupts_a_blocked_send() {
+        let mut h = harness(true).await;
+        let client = connect(&h).await;
+        stall(&h).await;
+        h.session.send(Some(EndReason::SignedOut)).unwrap();
+        let end = timeout(2 * SECOND, h.ends.recv())
+            .await
+            .expect("the session end waited for the blocked send");
+        assert_eq!(
+            end,
+            Some(StreamEnd::SessionEnded(Some(EndReason::SignedOut)))
+        );
+        assert!(until(|| clients(&h) == 0).await);
+        drop(client);
+    }
+
+    /// @test A client that takes nothing for the send timeout is gone: a
+    /// stream stuck in a send to it ends as the client gone, no sooner
+    /// than the timeout and without any session end, and the client
+    /// count drops.
+    #[tokio::test]
+    async fn a_client_that_stops_reading_is_dropped() {
+        let mut h = harness(false).await;
+        let client = connect(&h).await;
+        let started = Instant::now();
+        stall(&h).await;
+        let end = timeout(SEND_TIMEOUT + 2 * SECOND, h.ends.recv())
+            .await
+            .expect("the stream waited on a client that takes nothing");
+        assert_eq!(end, Some(StreamEnd::ClientGone));
+        assert!(started.elapsed() >= SEND_TIMEOUT);
+        assert!(until(|| clients(&h) == 0).await);
+        drop(client);
     }
 }
