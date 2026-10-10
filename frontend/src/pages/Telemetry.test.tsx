@@ -31,15 +31,25 @@ async function renderPage() {
   vi.resetModules();
   const { session } = await import("../api/session");
   const { DialogProvider } = await import("../components/dialogs");
+  const { QueryClient, QueryClientProvider } = await import(
+    "@tanstack/react-query"
+  );
   const { default: TelemetryPage } = await import("./Telemetry");
+  // The page reads the target list through a query hook; the fake
+  // server answers that read with 404, so the link reads as down.
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
   stop = session.start(new EventTarget());
   await act(async () => {
     await vi.advanceTimersByTimeAsync(0); // the session answers: auth off
   });
   render(
-    <DialogProvider>
-      <TelemetryPage selectedTarget="target-0" />
-    </DialogProvider>,
+    <QueryClientProvider client={queryClient}>
+      <DialogProvider>
+        <TelemetryPage selectedTarget="target-0" />
+      </DialogProvider>
+    </QueryClientProvider>,
   );
   await act(async () => {
     await vi.advanceTimersByTimeAsync(0);
