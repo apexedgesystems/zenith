@@ -14,73 +14,47 @@ architecture review; work before that is the v0.0.1 tag.
 ### Added
 
 - With auth on, the console signs in: a login page, a server-side
-  session, and Sign out. A session ends after `[auth]
-  session_idle_min` without operator input (default 30 minutes; 0
-  turns the idle limit off) and `[auth] session_max_hours` after
-  sign-in (default 10 hours). Only operator input renews a session;
-  polling, reloads and the telemetry stream do not. The console offers
-  to stay signed in two minutes before the idle limit and gives the
-  end time ten minutes before the absolute one. After an expiry it
-  asks for the password over the current page, keeps what was typed
-  there, and resends nothing.
-- `GET`, `POST` and `DELETE /api/auth/session` (session status, sign
-  in, sign out) and `POST /api/auth/session/refresh` (keep-alive).
+  session and Sign out. A session ends after `[auth] session_idle_min`
+  without operator input (default 30; 0 disables) and `[auth]
+  session_max_hours` after sign-in (default 10). Only operator input
+  renews it. The console warns before each limit; after an expiry it
+  asks for the password over the page it was on and resends nothing.
+- `GET`, `POST` and `DELETE /api/auth/session`, and
+  `POST /api/auth/session/refresh`. Bearer-token clients are unchanged.
 
 ### Changed
 
 - The session cookie is Secure by default: serve the console over
-  HTTPS through a reverse proxy (the README's remote-deployment
-  steps), or set `[auth] cookie_secure = false` for plain HTTP on a
-  trusted network.
-- A request that carries the session cookie with any method but GET,
-  HEAD and OPTIONS, or that opens the telemetry socket, must come from
-  the console's own origin; anything else is refused with 403. Bearer-token requests are not
-  affected. `POST /api/auth/ws-ticket` is for bearer-token clients and
-  refuses a signed-in console.
-- When a session ends, the server closes its telemetry streams with
-  WebSocket close code 1008, within a second even when a client has
-  stopped reading (such a client may not receive the close frame).
-  Target links and recording are not affected.
-- A telemetry connection is dropped if an outgoing send cannot complete
-  within 10 s. Clients that fall behind may skip samples; a quiet target
-  does not end a connection.
-- The telemetry socket accepts frames and messages of at most 4 KiB
-  from a client, which needs to send only control frames such as
-  pings. A larger frame or message ends the connection.
-- With auth on, a request without credentials is refused with "missing
-  token or session" instead of "missing token".
-- The console shows its pages once the server has answered, with auth
-  on or off. Until then the page is empty; if the server cannot be
-  reached it says it is connecting and asks again after 1 s, doubling
-  to every 10 s, so a console opened while the server restarts
-  recovers by itself.
+  HTTPS (see the README's remote-deployment steps) or set
+  `[auth] cookie_secure = false` on a trusted network.
+- A request with the session cookie that is not GET, HEAD or OPTIONS,
+  and any telemetry socket upgrade, must come from the console's own
+  origin (403 otherwise). A reverse proxy must pass `Host` through.
+- A session end closes its telemetry sockets with code 1008; target
+  links and recording are unaffected. A connection whose send cannot
+  complete within 10 s is dropped. Clients may send at most 4 KiB per
+  frame.
+- A console opened while the server is restarting retries its first
+  session read (after 1 s, doubling to 10 s) instead of staying blank.
+- Without credentials the API answers "missing token or session".
 
 ### Security
 
 - Session ids are random 256-bit values in an HttpOnly, SameSite=Strict
-  cookie. The database stores only their SHA-256, so sessions survive a
-  restart without the ids being kept anywhere.
-- Sign-in, refused sign-in, sign-out, each session's expiry (once,
-  with its reason: idle or absolute limit) and streams closed by a
-  session end are audited. A refused sign-in is recorded under the
-  configured user name or "(unknown user)", never under the text that
-  was typed; no audit row carries a session id.
+  cookie; the database stores only their SHA-256.
+- Sign-in, refused sign-in (never under the typed text), sign-out,
+  session expiry and session-ended socket closes are audited.
 
 ### Fixed
 
-- A client that sends WebSocket keep-alive pings on the telemetry socket
-  no longer stops receiving at its ping timeout (40 s with common
-  client settings): the server answers pings, also while a target
-  sends nothing, and ends a socket as soon as its client closes it.
+- Telemetry socket clients that send keep-alive pings no longer lose
+  the stream at their ping timeout; the server answers pings and ends
+  a socket when its client closes.
 - A config file that fails to parse, or a missing config path, refuses
-  to boot with the error instead of starting a default server with no
-  targets.
-- The image build uses the committed lockfiles: the backend builds
-  with `--locked` and the frontend installs with `npm ci` alone, so a
-  lockfile that disagrees with its manifest fails the build.
-- The image build context excludes local dependencies, build outputs,
-  runtime data and the git history, so a host's node_modules or target
-  directory cannot enter the image.
+  to boot instead of starting a default server with no targets.
+- The image builds from the committed lockfiles (`--locked`, `npm ci`)
+  and an allowlisted build context, so nothing from the host can enter
+  it.
 
 ## v0.2.0 - 2026-09-27
 
