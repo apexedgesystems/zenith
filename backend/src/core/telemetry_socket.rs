@@ -53,11 +53,12 @@ const LAG_WARN_EVERY: Duration = Duration::from_secs(30);
 /// cap. Either ends the stream as a client that is gone.
 pub const MAX_CLIENT_MESSAGE_BYTES: usize = 4 * 1024;
 
-/// The longest a send may wait for the client to take a frame. A
-/// sample's frame is small and the connection buffers many of them, so a
-/// client that takes nothing for this long has stopped reading or lost
-/// its link; a slow one only falls behind (lag). Ten seconds rides out
-/// a stall on a congested link.
+/// The longest one send may wait to complete. A sample's frame is small
+/// and the connection buffers many of them, so a send that cannot finish
+/// in this long means the client has stopped reading or lost its link;
+/// this is a bound on a blocked send, not an inactivity limit, and a
+/// quiet target never trips it. Ten seconds rides out a stall on a
+/// congested link.
 const SEND_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The longest the policy close at a session end may wait for the

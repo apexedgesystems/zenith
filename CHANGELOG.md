@@ -41,9 +41,9 @@ architecture review; work before that is the v0.0.1 tag.
   WebSocket close code 1008, within a second even when a client has
   stopped reading (such a client may not receive the close frame).
   Target links and recording are not affected.
-- A telemetry client that stops reading while samples wait for it is
-  disconnected after 10 s. A slow client stays connected and skips the
-  samples it cannot take in time.
+- A telemetry connection is dropped if an outgoing send cannot complete
+  within 10 s. Clients that fall behind may skip samples; a quiet target
+  does not end a connection.
 - The telemetry socket accepts frames and messages of at most 4 KiB
   from a client, which needs to send only control frames such as
   pings. A larger frame or message ends the connection.
