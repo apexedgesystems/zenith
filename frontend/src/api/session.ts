@@ -7,6 +7,11 @@
  *  read the state through the hooks below and never see a cookie (the
  *  browser holds it, HttpOnly) or a deadline.
  *
+ *  Nothing renders until the first answer, so at boot a session read
+ *  that fails (no answer, or not a session status) is read again with
+ *  backoff until the server answers. That read is the only request
+ *  ever repeated; apiFetch repeats nothing.
+ *
  *  Deadlines are server instants. Each answer carries the server's
  *  clock, and every comparison here runs on the server's clock (local
  *  clock plus the measured skew), so a browser clock that is off by
@@ -51,7 +56,8 @@ export type SignedOutReason =
   | "ended";
 
 export type SessionState =
-  | { kind: "unknown" }
+  /** Before the server's first answer; retrying once a read failed. */
+  | { kind: "unknown"; retrying: boolean }
   | { kind: "anonymous"; generation: number }
   | {
       kind: "signedIn";
@@ -107,6 +113,12 @@ export const INPUT_EVENTS = [
   "wheel",
   "touchstart",
 ] as const;
+
+/** A failed read at boot is retried after this long, then after twice
+ *  as long each time, up to BOOT_RETRY_MAX_MS: prompt when the server
+ *  is a moment away, light on one that stays down. */
+export const BOOT_RETRY_FIRST_MS = 1_000;
+export const BOOT_RETRY_MAX_MS = 10_000;
 
 /** The server clock is known to within a round trip; a refusal within
  *  this margin of a deadline is attributed to that deadline. */
@@ -195,10 +207,11 @@ async function readStatus(resp: Response): Promise<SessionStatus | null> {
 /* ----------------------------- API ----------------------------- */
 
 export function createSession(): Session {
-  let state: SessionState = { kind: "unknown" };
+  let state: SessionState = { kind: "unknown", retrying: false };
   // Names who the UI is signed in as (or that nobody is): bumps on
   // every change of identity, never on a keep-alive.
   let generation = 0;
+  let bootRetries = 0;
   let lastKeepAlive = 0;
   let keepAliveInFlight = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -292,13 +305,32 @@ export function createSession(): Session {
     timer = setTimeout(() => void check(), delay);
   }
 
+  /** A session read failed: no answer, or one that is not a session
+   *  status. At boot nothing can render without an answer, so read
+   *  again after the next backoff step and let the gate say it is still
+   *  connecting. In any other state wait for the next checkpoint. */
+  function readFailed() {
+    if (state.kind !== "unknown") {
+      schedule();
+      return;
+    }
+    const delay = Math.min(
+      BOOT_RETRY_MAX_MS,
+      BOOT_RETRY_FIRST_MS * 2 ** bootRetries,
+    );
+    bootRetries += 1;
+    if (!state.retrying) set({ kind: "unknown", retrying: true });
+    clearTimeout(timer);
+    timer = setTimeout(() => void check(), delay);
+  }
+
   async function check() {
     const sentUnder = generation;
     let resp: Response;
     try {
       resp = await apiFetch(SESSION_PATH);
     } catch {
-      schedule(); // unreachable server: try again at the next checkpoint
+      readFailed(); // the server cannot be reached
       return;
     }
     const at = Date.now();
@@ -310,12 +342,7 @@ export function createSession(): Session {
     }
     const body = await readStatus(resp);
     if (body === null || sentUnder !== generation) {
-      if (state.kind === "unknown") {
-        clearTimeout(timer);
-        timer = setTimeout(() => void check(), CHECK_MIN_MS * 5);
-      } else {
-        schedule();
-      }
+      readFailed();
       return;
     }
     applyLive(body, at);

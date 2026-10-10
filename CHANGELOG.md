@@ -45,6 +45,11 @@ architecture review; work before that is the v0.0.1 tag.
   pings. A larger frame or message ends the connection.
 - With auth on, a request without credentials is refused with "missing
   token or session" instead of "missing token".
+- The console shows its pages once the server has answered, with auth
+  on or off. Until then the page is empty; if the server cannot be
+  reached it says it is connecting and asks again after 1 s, doubling
+  to every 10 s, so a console opened while the server restarts
+  recovers by itself.
 
 ### Security
 

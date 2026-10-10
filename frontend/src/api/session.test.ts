@@ -27,6 +27,8 @@ interface Fake {
   /** false: the browser drops the cookie (Secure over plain HTTP). */
   keepCookie: boolean;
   deleteStatus: number;
+  /** The next this-many requests fail to reach the server. */
+  down: number;
   /** Requests held until released (path -> resolver). */
   held: Map<string, (r: Response) => void>;
   calls: string[];
@@ -41,6 +43,7 @@ function fake(over: Partial<Fake> = {}): Fake {
     live: null,
     keepCookie: true,
     deleteStatus: 204,
+    down: 0,
     held: new Map(),
     calls: [],
     ...over,
@@ -81,6 +84,10 @@ function install(f: Fake) {
       const method = init?.method ?? "GET";
       const path = String(input);
       f.calls.push(`${method} ${path}`);
+      if (f.down > 0) {
+        f.down -= 1;
+        throw new TypeError("Failed to fetch");
+      }
       if (f.held.has(path)) {
         return new Promise<Response>((res) => f.held.set(path, res));
       }
@@ -310,6 +317,81 @@ describe("session state", () => {
       user: "ops",
     });
     expect(signsInInPlace("signed-out")).toBe(false);
+  });
+});
+
+/* ----------------------------- boot retry ----------------------------- */
+
+describe("boot while the server cannot answer", () => {
+  it("recovers when the first status request fails and the server returns", async () => {
+    const fetch = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockImplementation(async () => json({ auth_enabled: false }));
+    vi.stubGlobal("fetch", fetch);
+    const s = createSession();
+    stops.push(s.start(new EventTarget()));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(s.getState()).toEqual({ kind: "anonymous", generation: 1 });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("reads again after 1, 2, 4, 8 and then every 10 s, one request per attempt, until it answers", async () => {
+    const f = fake({ down: 6 });
+    f.live = { created: serverNow(f), refreshed: serverNow(f) };
+    const { s } = boot(f);
+    expect(s.getState()).toEqual({ kind: "unknown", retrying: false });
+    await settle();
+    expect(s.getState()).toEqual({ kind: "unknown", retrying: true });
+    for (const wait of [1_000, 2_000, 4_000, 8_000, 10_000, 10_000]) {
+      const before = f.calls.length;
+      await vi.advanceTimersByTimeAsync(wait - 1);
+      expect(f.calls).toHaveLength(before);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(f.calls).toHaveLength(before + 1);
+    }
+    expect(s.getState()).toMatchObject({ kind: "signedIn", user: "ops" });
+    expect(f.calls).toEqual(Array(7).fill("GET /api/auth/session"));
+  });
+
+  it("treats an answer that is not a session status like no answer", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(new Response("bad gateway", { status: 502 }))
+      .mockResolvedValueOnce(new Response("<html>", { status: 200 }))
+      .mockImplementation(async () => json({ auth_enabled: false }));
+    vi.stubGlobal("fetch", fetch);
+    const s = createSession();
+    stops.push(s.start(new EventTarget()));
+    await settle();
+    expect(s.getState()).toEqual({ kind: "unknown", retrying: true });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(s.getState().kind).toBe("unknown");
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(s.getState()).toEqual({ kind: "anonymous", generation: 1 });
+  });
+
+  it("leaves signed-in checkpoints and the signed-out state as they were", async () => {
+    const f = fake();
+    const { s } = boot(f);
+    await settle();
+    expect(s.getState()).toMatchObject({ kind: "signedOut", reason: "none" });
+    expect(vi.getTimerCount()).toBe(0);
+    await s.signIn("ops", "pw");
+    const signedInCalls = f.calls.length;
+    f.down = 1;
+    // The first checkpoint is ten minutes out; its read fails, and the
+    // next read waits for the next checkpoint, not a boot retry.
+    await vi.advanceTimersByTimeAsync(10 * MIN);
+    expect(f.calls).toHaveLength(signedInCalls + 1);
+    await vi.advanceTimersByTimeAsync(5 * MIN);
+    expect(f.calls).toHaveLength(signedInCalls + 1);
+    expect(s.getState().kind).toBe("signedIn");
+    await vi.advanceTimersByTimeAsync(5 * MIN);
+    expect(f.calls).toHaveLength(signedInCalls + 2);
   });
 });
 

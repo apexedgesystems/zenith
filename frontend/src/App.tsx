@@ -197,11 +197,12 @@ function SessionBanner() {
 
 /** The session gate. The shell renders with auth off or a live
  *  session; at boot without a session, and after signing out, the
- *  login page stands in for it. When a session ends while the shell is
- *  up, the shell stays mounted, so whatever the operator was doing
- *  survives and nothing is resent, but it is hidden from view and from
- *  input until the session is back: an unattended console shows
- *  nothing it holds. */
+ *  login page stands in for it. Before the server's first answer the
+ *  page is empty, and says it is connecting once a read has failed.
+ *  When a session ends while the shell is up, the shell stays mounted,
+ *  so whatever the operator was doing survives and nothing is resent,
+ *  but it is hidden from view and from input until the session is
+ *  back: an unattended console shows nothing it holds. */
 function App() {
   const s = useSession();
   useEffect(() => session.start(), []);
@@ -209,9 +210,19 @@ function App() {
   if (s.kind === "unknown") {
     return (
       <div
-        className="h-screen"
+        className="h-screen flex items-center justify-center"
         style={{ backgroundColor: "var(--color-body)" }}
-      />
+      >
+        {s.retrying && (
+          <p
+            role="status"
+            className="text-sm"
+            style={{ color: "var(--color-text-muted)" }}
+          >
+            Connecting to the server
+          </p>
+        )}
+      </div>
     );
   }
   if (s.kind === "signedOut" && !signsInInPlace(s.reason)) {

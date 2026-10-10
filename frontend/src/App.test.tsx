@@ -86,6 +86,34 @@ describe("App session gate", () => {
     ]);
   });
 
+  it("says it is connecting while the server cannot be reached, then shows the shell once it answers", async () => {
+    let down = true;
+    const { calls } = await renderApp((_method, path) => {
+      if (down) throw new TypeError("Failed to fetch");
+      return path.startsWith("/api/auth/")
+        ? json({ auth_enabled: false })
+        : data(path);
+    });
+    expect(
+      await screen.findByText("Connecting to the server"),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText("Password")).toBeNull();
+    expect(screen.queryByText("Dashboard", { selector: "a" })).toBeNull();
+    down = false;
+    expect(
+      await screen.findByRole(
+        "link",
+        { name: "Dashboard" },
+        { timeout: 3_000 },
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Connecting to the server")).toBeNull();
+    expect(calls.filter((c) => c.includes("/api/auth/"))).toEqual([
+      "GET /api/auth/session",
+      "GET /api/auth/session",
+    ]);
+  });
+
   it("signed in, shows who and a way to sign out", async () => {
     await renderApp((_method, path) =>
       path === "/api/auth/session" ? json(live) : data(path),
