@@ -121,6 +121,12 @@ where
     upgrade
         .max_frame_size(MAX_CLIENT_MESSAGE_BYTES)
         .max_message_size(MAX_CLIENT_MESSAGE_BYTES)
+        // The loop polls the read side as often as once per delivered
+        // sample, and the WebSocket layer zero-fills its read buffer before
+        // every read, one that finds nothing included. A client sends only
+        // small frames, so the buffer is the size of the largest one it may
+        // send.
+        .read_buffer_size(MAX_CLIENT_MESSAGE_BYTES)
         .on_upgrade(serve)
 }
 
