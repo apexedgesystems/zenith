@@ -221,7 +221,7 @@ pub fn parse_v4(data: &[u8]) -> Result<(PreludeFields, &[u8]), TprmError> {
 
 /* ----------------------------- READBACK / VERIFY ----------------------------- */
 
-/// Executive opcodes for the staged-verify surface (apex #137).
+/// Executive opcodes for the staged-verify surface.
 pub const OP_READBACK_TPRM: u16 = 0x0131;
 pub const OP_VERIFY_TPRM: u16 = 0x0132;
 
@@ -315,6 +315,54 @@ pub fn parse_verify_verdict(extra: &[u8]) -> Result<VerifyVerdict, TprmError> {
         declared_layout_hash: u32::from_le_bytes([extra[4], extra[5], extra[6], extra[7]]),
         declared_payload_crc: u32::from_le_bytes([extra[8], extra[9], extra[10], extra[11]]),
     })
+}
+
+/// Status the vehicle answers a refused RELOAD_TPRM with (the verdict
+/// block follows in the extra).
+pub const LOAD_FAILED: u8 = 5;
+
+/// What the staged bank's digest says about the payload just staged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StagedRow {
+    /// The row for the uid declares the sent layout hash and payload
+    /// CRC, and the vehicle's header verdict is OK.
+    Matches,
+    /// The row for the uid carries a refusing header verdict.
+    Refused(u8),
+    /// The row for the uid declares another layout hash or CRC.
+    Differs,
+    /// No row declares the uid. The vehicle fills a refused row with
+    /// the bytes it read, so a prelude it cannot read (a foreign
+    /// magic) declares no usable uid; only a verify, which addresses
+    /// the staged file by uid, can name that fault.
+    Unattributed,
+}
+
+/// Judge the digest row declaring the staged uid (None when no row
+/// declares it) against the prelude zenith sent. A refusing header
+/// verdict outranks the declared identity: the vehicle did not trust
+/// the bytes it read.
+pub fn judge_staged_row(row: Option<&ReadbackRow>, sent: &PreludeFields) -> StagedRow {
+    match row {
+        None => StagedRow::Unattributed,
+        Some(r) if r.verdict != 0 => StagedRow::Refused(r.verdict),
+        Some(r) if r.layout_hash == sent.layout_hash && r.payload_crc == sent.payload_crc => {
+            StagedRow::Matches
+        }
+        Some(_) => StagedRow::Differs,
+    }
+}
+
+/// The status a staged-pipeline stop reports: the stopping step's own
+/// status when the vehicle refused that command, LOAD_FAILED when it
+/// answered the step with SUCCESS (nothing was loaded). A stop never
+/// reads as a success.
+pub fn stop_status(step_status: u8) -> u8 {
+    if step_status == 0 {
+        LOAD_FAILED
+    } else {
+        step_status
+    }
 }
 
 /* ----------------------------- Tests ----------------------------- */
@@ -737,5 +785,42 @@ mod tests {
             parse_verify_verdict(&block[..11]),
             Err(TprmError::Truncated)
         ));
+    }
+
+    /// @test The digest row for the staged uid is judged against the
+    /// prelude zenith sent: the sent identity with an OK verdict goes
+    /// on; a refusing header verdict is that verdict even when the
+    /// identity matches; another layout hash or CRC differs; and no
+    /// row for the uid is unattributed.
+    #[test]
+    fn staged_row_is_judged_against_the_sent_prelude() {
+        let (sent, _) = parse_v4(&stamp_v4(0x00CA00, 0xE49F_2E62, &[7, 8, 9])).unwrap();
+        let row = |verdict: u8, layout_hash: u32, payload_crc: u32| ReadbackRow {
+            full_uid: 0x00CA00,
+            layout_hash,
+            payload_crc,
+            verdict,
+            verdict_name: payload_check_name(verdict),
+        };
+        let (hash, crc) = (sent.layout_hash, sent.payload_crc);
+        let judge = |r: ReadbackRow| judge_staged_row(Some(&r), &sent);
+        assert_eq!(judge(row(0, hash, crc)), StagedRow::Matches);
+        assert_eq!(judge(row(5, hash, crc)), StagedRow::Refused(5));
+        assert_eq!(judge(row(3, hash ^ 1, crc)), StagedRow::Refused(3));
+        assert_eq!(judge(row(0, hash ^ 1, crc)), StagedRow::Differs);
+        assert_eq!(judge(row(0, hash, crc ^ 1)), StagedRow::Differs);
+        assert_eq!(judge_staged_row(None, &sent), StagedRow::Unattributed);
+    }
+
+    /// @test A staged-pipeline stop never reports SUCCESS: a step the
+    /// vehicle answered with SUCCESS stops as LOAD_FAILED (5, the
+    /// vehicle's refused-RELOAD status), and a step it refused keeps
+    /// its own status.
+    #[test]
+    fn a_staged_stop_never_reports_success() {
+        assert_eq!(LOAD_FAILED, 5);
+        assert_eq!(stop_status(0), LOAD_FAILED);
+        assert_eq!(stop_status(4), 4);
+        assert_eq!(stop_status(LOAD_FAILED), LOAD_FAILED);
     }
 }

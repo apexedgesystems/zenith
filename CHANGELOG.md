@@ -57,6 +57,10 @@ architecture review; work before that is the v0.0.1 tag.
 
 ### Fixed
 
+- A tunable update that a readback-capable vehicle refuses before
+  applying it reads as refused, in the console and in the audit log,
+  under the vehicle's reason (for example BAD_MAGIC or
+  LAYOUT_MISMATCH) instead of as updated.
 - Telemetry socket clients that send keep-alive pings no longer lose
   the stream at their ping timeout; the server answers pings and ends
   a socket when its client closes.
