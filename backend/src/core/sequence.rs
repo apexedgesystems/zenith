@@ -18,8 +18,8 @@ pub fn validate_rts_upload(
     dicts: &crate::core::config_manager::StructDictionary,
     bytes: &[u8],
 ) -> Result<(), String> {
-    // Sequence files may arrive v3-stamped; validate the body either way.
-    let body = match crate::core::tprm::parse_v3(bytes) {
+    // Sequence files may arrive stamped; validate the body either way.
+    let body = match crate::core::tprm::parse_v4(bytes) {
         Ok((_, b)) => b,
         Err(_) => bytes,
     };
@@ -182,9 +182,8 @@ mod tests {
         // ATS exempt by design.
         assert!(validate_rts_upload(&dicts, &sequence_bytes(1, &[(30, 30)])).is_ok());
 
-        // A v3-stamped sequence validates its body.
-        let stamped =
-            crate::core::tprm::stamp_v3(0x000500, 0, &sequence_bytes(0, &[(30, 30)])).unwrap();
+        // A stamped sequence validates its body.
+        let stamped = crate::core::tprm::stamp_v4(0x000500, 0, &sequence_bytes(0, &[(30, 30)]));
         assert!(validate_rts_upload(&dicts, &stamped).is_err());
 
         // No sequence structs in the dictionaries: skip, vehicle decides.

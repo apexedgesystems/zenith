@@ -102,7 +102,7 @@ pub struct StructDef {
     pub opcode: Option<String>,
     #[serde(default)]
     pub fields: Vec<FieldDef>,
-    /// Producer-stated v3 layout hash ("0x" hex), exported by the
+    /// Producer-stated layout hash ("0x" hex), exported by the
     /// producing generator for spec-defined structs. When present it
     /// is THE hash the vehicle verifies -- consumers must not
     /// recompute.

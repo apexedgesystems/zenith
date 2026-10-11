@@ -10,37 +10,48 @@ This is a COPY, refreshed deliberately -- never a reference to
 another repo. The vector set is the cross-repo contract; the repos
 stay independent.
 
+Source: the `compat/tprm/` directory of Apex CSF (apex_csf) at commit
+5bda98c, copied unmodified apart from this README.
+
 ## Contents
 
-| Path                  | What it is                                                                                    |
-| --------------------- | --------------------------------------------------------------------------------------------- |
-| `toml/*.toml`         | Vector sources in the authoring-template format; the intended values are readable here        |
-| `payloads/*.bin`      | Format A v3: 20-byte prelude (magic APV3, version, size, fullUid, layout hash, CRC-32) + body |
-| `payloads/*_raw.bin`  | The unstamped serialization of the same payload                                               |
-| `archives/basic.tprm` | Format B: a packed archive (v3 component entries + a raw RTS-reserved entry)                  |
+| Path                  | What it is                                                                                                       |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `toml/*.toml`         | Vector sources in the authoring-template format; the intended values are readable here                           |
+| `payloads/*.bin`      | Format A v4: 28-byte prelude (magic APV4, version, reserved, 64-bit size, fullUid, layout hash, CRC-32) + body |
+| `payloads/*_raw.bin`  | The unstamped serialization of the same payload                                                                  |
+| `archives/basic.tprm` | Format B: a packed archive (v4 component entries + a raw RTS-reserved entry)                                     |
 
-## The v3 prelude (what zenith stamps)
+## The v4 prelude (what zenith stamps)
 
-20 bytes, little-endian, ahead of every component payload upload:
+28 bytes, little-endian, ahead of every component payload upload:
 
 ```
-magic[4]       = "APV3"
-version[2]     = 3
-payloadSize[2] = byte length of the payload that follows
+magic[4]       = "APV4"
+version[2]     = 4
+reserved[2]    = 0
+payloadSize[8] = byte length of the payload that follows
 fullUid[4]     = component the payload targets
 layoutHash[4]  = CRC-32 of the canonical field spec
 payloadCrc[4]  = CRC-32 (IEEE 802.3) of the payload bytes
 ```
 
-Canonical field spec (offset-aware, flag-day form): every leaf field
-contributes `name:type:size:offset;` in emission order -- nested
-structs flatten to their leaves at absolute offsets, arrays
-contribute `name:array:total:offset;[elemtype:elemsizexN]` -- and the
-string ends with a `|size:total` terminator. layoutHash is the CRC-32
-of that ASCII string. The
-vehicle verifies all six prelude properties on load and rejects each
-failure distinctly -- an unstamped or mis-stamped upload never
-reaches a component.
+Canonical field spec (offset-aware): every leaf field contributes
+`name:type:size:offset;` in emission order -- nested structs flatten
+to their leaves at absolute offsets, arrays contribute
+`name:array:total:offset;[elemtype:elemsizexN]` -- and the string
+ends with a `|size:total` terminator. A key typed `struct`
+contributes no row of its own; its leaves do, at their absolute
+offsets, and a plain nested table is the same grouping (the
+nested_enum vector pins this). layoutHash is the CRC-32 of that ASCII
+string.
+
+The vehicle verifies the prelude on load and rejects each failure
+distinctly (magic, version, size, target uid, body CRC, and the layout
+hash where it knows the layout) -- an unstamped or mis-stamped upload
+never reaches a component. Zenith's parser checks length, magic,
+version, size and CRC in the same order and also refuses non-zero
+reserved bytes.
 
 The payload uids are part of the contract: `scalar_types` targets
 0x000000, `strings_arrays` 0x00D001, `nested_enum` 0x00CA00,
@@ -55,9 +66,10 @@ red conformance suite after a target-config regeneration):
 
 1. Copy the producing repo's `compat/tprm/` over this directory,
    preserving this README.
-2. Run `make test-backend` -- the conformance suite in
+2. Update the Source line above to the commit copied, and name it in
+   the refresh commit body.
+3. Run `make test-backend` -- the conformance suite in
    `backend/src/core/tprm.rs` re-asserts every vector.
-3. Record the source commit of the copy in the refresh commit body.
 
 Proving the gate works: flip any committed vector byte and the suite
 must fail.

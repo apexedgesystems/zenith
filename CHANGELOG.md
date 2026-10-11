@@ -11,6 +11,14 @@ architecture review; work before that is the v0.0.1 tag.
 
 ## Unreleased
 
+### Breaking
+
+- TPRM uploads stamp the v4 payload prelude (28 bytes, magic APV4),
+  which Apex CSF vehicles built from apex_csf 2543279 (2026-09-10) or
+  later require. A vehicle built before that commit refuses these
+  uploads; zenith 0.2.0 stamped the v3 prelude, which vehicles at or
+  after that commit refuse.
+
 ### Added
 
 - With auth on, the console signs in: a login page, a server-side
@@ -24,6 +32,8 @@ architecture review; work before that is the v0.0.1 tag.
 
 ### Changed
 
+- A TPRM upload is no longer limited to a 64 KiB payload: the v4
+  prelude carries a 64-bit size.
 - The session cookie is Secure by default: serve the console over
   HTTPS (see the README's remote-deployment steps) or set
   `[auth] cookie_secure = false` on a trusted network.

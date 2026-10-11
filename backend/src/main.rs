@@ -1615,18 +1615,17 @@ async fn update_params(
         (buf, hash)
     };
 
-    // Stamp the v3 prelude: the vehicle verifies magic, version, size,
-    // target uid, layout hash, and body CRC before the payload reaches
-    // a component, and rejects unstamped uploads. The layout hash came
-    // from the same dict fields that encoded the body (dict
-    // declaration order is template emission order). The dicts are
-    // flattened, so a template using explicitly-typed nested-struct
-    // containers would hash differently on the vehicle -- which
-    // rejects with a distinct layout-hash fault rather than
-    // misloading; the dict generator exporting the hash is accepted
-    // apex-side work (relay thread).
-    let stamped = tprm::stamp_v3(full_uid, payload_layout_hash, &binary)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("TPRM stamp failed: {}", e)))?;
+    // Stamp the payload prelude: the vehicle verifies magic, version,
+    // size, target uid, layout hash and body CRC before the payload
+    // reaches a component, and rejects unstamped uploads. The layout
+    // hash is the dictionary's exported one when it carries one, else
+    // a recompute over the same dict fields that encoded the body
+    // (dict declaration order is template emission order). The
+    // recompute covers flattened leaves only, so a template using
+    // explicitly typed nested-struct containers hashes differently on
+    // the vehicle, which refuses it as a layout mismatch rather than
+    // misloading.
+    let stamped = tprm::stamp_v4(full_uid, payload_layout_hash, &binary);
 
     // Upload and reload
     let detail = format!(
@@ -1731,7 +1730,7 @@ async fn staged_update_flow(
 
     // Our own prelude is the intent the vehicle must echo back. The
     // caller guarded the protocol: only the APROTO family stages TPRM.
-    let (sent_prelude, _) = tprm::parse_v3(stamped).expect("stamp_v3 output always parses");
+    let (sent_prelude, _) = tprm::parse_v4(stamped).expect("stamp_v4 output always parses");
 
     // 1. Stage (no reload).
     let up = cli.stage_tprm(full_uid, stamped).await?;

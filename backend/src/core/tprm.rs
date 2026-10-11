@@ -1,12 +1,13 @@
-//! TPRM format A v3 prelude: stamp and verify.
+//! TPRM format A payload prelude (v4): stamp and verify.
 //!
-//! Every component payload zenith uploads carries a 20-byte
+//! Every component payload zenith uploads carries a 28-byte
 //! little-endian prelude the vehicle verifies before the body touches
 //! a component:
 //!
-//!   magic[4]       = "APV3"
-//!   version[2]     = 3
-//!   payloadSize[2] = byte length of the payload that follows
+//!   magic[4]       = "APV4"
+//!   version[2]     = 4
+//!   reserved[2]    = 0
+//!   payloadSize[8] = byte length of the payload that follows
 //!   fullUid[4]     = component the payload targets
 //!   layoutHash[4]  = CRC-32 of the canonical field spec
 //!   payloadCrc[4]  = CRC-32 (IEEE 802.3) of the payload bytes
@@ -30,32 +31,41 @@
 //! at the handler edge decide (per target) whether payloads get this
 //! stamp, so targets speaking other protocols remain possible.
 
-/// v3 magic bytes.
-pub const MAGIC: &[u8; 4] = b"APV3";
-/// v3 format version.
-pub const VERSION: u16 = 3;
-/// Prelude length in bytes.
-pub const HEADER_SIZE: usize = 20;
+use std::ops::Range;
 
-/// Errors from prelude verification. The verify-side surface
-/// (parse_v3 and the reject variants) is compiled for the full
-/// contract even though the server binary currently only stamps:
-/// readback validation consumes it, and the conformance tests pin it.
-#[allow(dead_code)]
+/// Prelude magic bytes.
+pub const MAGIC: &[u8; 4] = b"APV4";
+/// Prelude format version.
+pub const VERSION: u16 = 4;
+/// Prelude length in bytes.
+pub const HEADER_SIZE: usize = 28;
+
+// Byte ranges of the prelude fields: the one layout stamp_v4 writes
+// and parse_v4 reads.
+const MAGIC_BYTES: Range<usize> = 0..4;
+const VERSION_BYTES: Range<usize> = 4..6;
+const RESERVED_BYTES: Range<usize> = 6..8;
+const SIZE_BYTES: Range<usize> = 8..16;
+const UID_BYTES: Range<usize> = 16..20;
+const HASH_BYTES: Range<usize> = 20..24;
+const CRC_BYTES: Range<usize> = 24..HEADER_SIZE;
+
+/// Errors from the prelude and staged-verify parsers. Each prelude
+/// defect is its own variant, so a refusal says which field was wrong.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum TprmError {
-    #[error("payload too short for v3 prelude")]
+    #[error("truncated: too short for its layout")]
     Truncated,
-    #[error("bad magic")]
-    BadMagic,
-    #[error("unsupported version {0}")]
+    #[error("bad magic \"{}\" (want \"{}\")", .found.escape_ascii(), MAGIC.escape_ascii())]
+    BadMagic { found: [u8; 4] },
+    #[error("unsupported version {0} (want {want})", want = VERSION)]
     BadVersion(u16),
+    #[error("reserved bytes are 0x{0:04X}, not zero")]
+    ReservedNonZero(u16),
     #[error("payload size mismatch (header {header}, actual {actual})")]
-    SizeMismatch { header: u16, actual: usize },
+    SizeMismatch { header: u64, actual: usize },
     #[error("payload CRC mismatch")]
     BadCrc,
-    #[error("payload exceeds the u16 size field")]
-    TooLarge,
 }
 
 /// CRC-32 (IEEE 802.3): reflected polynomial 0xEDB88320, init and
@@ -131,50 +141,66 @@ where
     crc32(canonical_field_spec(fields, total_size).as_bytes())
 }
 
-/// Stamp the v3 prelude onto a payload body.
-pub fn stamp_v3(full_uid: u32, layout_hash: u32, payload: &[u8]) -> Result<Vec<u8>, TprmError> {
-    let size = u16::try_from(payload.len()).map_err(|_| TprmError::TooLarge)?;
+/// Stamp the prelude onto a payload body. The reserved bytes are
+/// written zero, and the 64-bit size field holds any body length.
+pub fn stamp_v4(full_uid: u32, layout_hash: u32, payload: &[u8]) -> Vec<u8> {
+    let mut prelude = [0u8; HEADER_SIZE];
+    prelude[MAGIC_BYTES].copy_from_slice(MAGIC);
+    prelude[VERSION_BYTES].copy_from_slice(&VERSION.to_le_bytes());
+    prelude[RESERVED_BYTES].copy_from_slice(&0u16.to_le_bytes());
+    prelude[SIZE_BYTES].copy_from_slice(&(payload.len() as u64).to_le_bytes());
+    prelude[UID_BYTES].copy_from_slice(&full_uid.to_le_bytes());
+    prelude[HASH_BYTES].copy_from_slice(&layout_hash.to_le_bytes());
+    prelude[CRC_BYTES].copy_from_slice(&crc32(payload).to_le_bytes());
     let mut out = Vec::with_capacity(HEADER_SIZE + payload.len());
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&VERSION.to_le_bytes());
-    out.extend_from_slice(&size.to_le_bytes());
-    out.extend_from_slice(&full_uid.to_le_bytes());
-    out.extend_from_slice(&layout_hash.to_le_bytes());
-    out.extend_from_slice(&crc32(payload).to_le_bytes());
+    out.extend_from_slice(&prelude);
     out.extend_from_slice(payload);
-    Ok(out)
+    out
 }
 
-/// Parsed v3 prelude fields.
-#[allow(dead_code)]
+/// Parsed prelude fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PreludeFields {
     pub version: u16,
-    pub payload_size: u16,
+    pub payload_size: u64,
     pub full_uid: u32,
     pub layout_hash: u32,
     pub payload_crc: u32,
 }
 
+/// One prelude field's bytes, sized by the integer they decode to.
+fn field<const N: usize>(data: &[u8], bytes: Range<usize>) -> [u8; N] {
+    let mut out = [0u8; N];
+    out.copy_from_slice(&data[bytes]);
+    out
+}
+
 /// Verify a stamped payload and return its prelude fields and body.
-/// Checks magic, version, declared-vs-actual size, and body CRC; the
-/// caller compares full_uid and layout_hash against its expectations
-/// (they are policy, not format).
-#[allow(dead_code)]
-pub fn parse_v3(data: &[u8]) -> Result<(PreludeFields, &[u8]), TprmError> {
+/// Checks, in order: length, magic, version, reserved bytes, declared
+/// size against the body, and body CRC, each failure its own error.
+/// Reserved bytes must be zero: every stamp this reads (zenith's own
+/// and the producer's tools) writes zero there. The caller compares
+/// full_uid and layout_hash against its expectations (they are
+/// policy, not format).
+pub fn parse_v4(data: &[u8]) -> Result<(PreludeFields, &[u8]), TprmError> {
     if data.len() < HEADER_SIZE {
         return Err(TprmError::Truncated);
     }
-    if &data[0..4] != MAGIC {
-        return Err(TprmError::BadMagic);
+    let found: [u8; 4] = field(data, MAGIC_BYTES);
+    if &found != MAGIC {
+        return Err(TprmError::BadMagic { found });
     }
-    let version = u16::from_le_bytes([data[4], data[5]]);
+    let version = u16::from_le_bytes(field(data, VERSION_BYTES));
     if version != VERSION {
         return Err(TprmError::BadVersion(version));
     }
-    let payload_size = u16::from_le_bytes([data[6], data[7]]);
+    let reserved = u16::from_le_bytes(field(data, RESERVED_BYTES));
+    if reserved != 0 {
+        return Err(TprmError::ReservedNonZero(reserved));
+    }
+    let payload_size = u64::from_le_bytes(field(data, SIZE_BYTES));
     let body = &data[HEADER_SIZE..];
-    if body.len() != payload_size as usize {
+    if body.len() as u64 != payload_size {
         return Err(TprmError::SizeMismatch {
             header: payload_size,
             actual: body.len(),
@@ -183,9 +209,9 @@ pub fn parse_v3(data: &[u8]) -> Result<(PreludeFields, &[u8]), TprmError> {
     let fields = PreludeFields {
         version,
         payload_size,
-        full_uid: u32::from_le_bytes([data[8], data[9], data[10], data[11]]),
-        layout_hash: u32::from_le_bytes([data[12], data[13], data[14], data[15]]),
-        payload_crc: u32::from_le_bytes([data[16], data[17], data[18], data[19]]),
+        full_uid: u32::from_le_bytes(field(data, UID_BYTES)),
+        layout_hash: u32::from_le_bytes(field(data, HASH_BYTES)),
+        payload_crc: u32::from_le_bytes(field(data, CRC_BYTES)),
     };
     if crc32(body) != fields.payload_crc {
         return Err(TprmError::BadCrc);
@@ -302,6 +328,13 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../compat/tprm")
     }
 
+    /// Whether a container declared `type = "struct"` contributes its
+    /// own `name:struct:0:offset;` row ahead of its leaves. By the
+    /// contract it does not: a key typed struct is a grouping whose
+    /// leaves carry the rows, as for a plain nested table, and the
+    /// nested_enum vector hashes its four leaves only.
+    const STRUCT_CONTAINER_ROWS: bool = false;
+
     /// One parsed vector-toml leaf (owned strings; tests build
     /// LeafSpec views over these).
     #[derive(Debug, Default)]
@@ -317,8 +350,9 @@ mod tests {
     /// Parse a vector toml in the authoring-template format, returning
     /// leaves in declaration order. Line-scan on purpose: declaration
     /// order is part of the contract, and a map-based toml parse would
-    /// lose it. Skips the [__enums__] section and struct containers
-    /// (their nested leaves carry the layout).
+    /// lose it. Skips the [__enums__] section; a struct container is
+    /// returned as its own zero-size leaf ahead of its nested leaves,
+    /// and leaf_specs decides whether it hashes (STRUCT_CONTAINER_ROWS).
     ///
     /// Two section styles appear in the contract: fixed-shape vectors
     /// declare one `[Section.leaf]` per leaf with key = value lines,
@@ -391,11 +425,10 @@ mod tests {
             }
         }
         // Offset assignment by declaration-order accumulation (the
-        // toml carries sizes only). Struct containers stay as rows --
-        // the vector contract gives them `name:struct:0:offset;` at
-        // the container's starting position, zero bytes consumed --
-        // followed by their leaves at absolute offsets. Section
-        // headers that only held inline tables have no type and drop.
+        // toml carries sizes only). A struct container takes the
+        // offset where its leaves start and consumes no bytes; its
+        // leaves follow at absolute offsets. Section headers that
+        // only held inline tables have no type and drop.
         leaves.retain(|l| !l.field_type.is_empty());
         let mut off = 0usize;
         for l in &mut leaves {
@@ -410,9 +443,11 @@ mod tests {
         leaves.last().map(|l| l.offset + l.size).unwrap_or(0)
     }
 
+    /// The leaf list the layout hash covers, in declaration order.
     fn leaf_specs(leaves: &[TomlLeaf]) -> Vec<LeafSpec<'_>> {
         leaves
             .iter()
+            .filter(|l| STRUCT_CONTAINER_ROWS || l.field_type != "struct")
             .map(|l| LeafSpec {
                 name: &l.name,
                 field_type: &l.field_type,
@@ -429,6 +464,11 @@ mod tests {
     fn read_vector(name: &str) -> Vec<u8> {
         std::fs::read(contract_dir().join("payloads").join(name)).unwrap()
     }
+
+    /// nested_enum stamped with the 20-byte APV3 prelude: the bytes a
+    /// parser of this format must refuse by their magic.
+    const APV3_NESTED_ENUM: &[u8] = b"APV3\x03\x00\x0d\x00\x00\xca\x00\x00b.\x9f\xe4\x93X\xf4\xb9\
+        \x07\xee\xff\xc0\x00\x02\x01\x00\x00`@\xfe\xff";
 
     /// @test CRC-32 (IEEE 802.3) matches the standard check vector.
     #[test]
@@ -459,7 +499,7 @@ mod tests {
             let hash = layout_hash(leaf_specs(&leaves), total);
 
             let (prelude, body) =
-                parse_v3(&vector).unwrap_or_else(|e| panic!("{bin_name}: vector fails parse: {e}"));
+                parse_v4(&vector).unwrap_or_else(|e| panic!("{bin_name}: vector fails parse: {e}"));
             assert_eq!(
                 total,
                 body.len(),
@@ -471,7 +511,7 @@ mod tests {
             );
             assert_eq!(prelude.full_uid, full_uid, "{bin_name}: contract uid");
 
-            let restamped = stamp_v3(full_uid, hash, body).unwrap();
+            let restamped = stamp_v4(full_uid, hash, body);
             assert_eq!(
                 restamped, vector,
                 "{bin_name}: stamped bytes diverge from contract"
@@ -485,52 +525,107 @@ mod tests {
     fn raw_vector_stamps_to_committed_bytes() {
         let raw = read_vector("nested_enum_raw.bin");
         let stamped = read_vector("nested_enum.bin");
-        let (prelude, body) = parse_v3(&stamped).unwrap();
+        let (prelude, body) = parse_v4(&stamped).unwrap();
         assert_eq!(raw, body);
-        let restamped = stamp_v3(prelude.full_uid, prelude.layout_hash, &raw).unwrap();
+        let restamped = stamp_v4(prelude.full_uid, prelude.layout_hash, &raw);
         assert_eq!(restamped, stamped);
     }
 
-    /// @test Each prelude defect is rejected distinctly: truncation,
-    /// bad magic, wrong version, lying size, corrupted body.
+    /// @test Every prelude field reads back from its own bytes, and
+    /// each defect is rejected distinctly at the field that carries
+    /// it: truncation one byte short of the prelude, bad magic (with
+    /// the bytes found), wrong version, non-zero reserved bytes, a
+    /// size that lies in the low or the high byte of the 64-bit
+    /// field, a corrupted CRC field, a corrupted body.
     #[test]
     fn parse_rejects_each_defect_distinctly() {
-        let good = stamp_v3(0x00D000, 0xABCD_1234, &[1, 2, 3, 4]).unwrap();
-        assert!(parse_v3(&good).is_ok());
+        let body = [1u8, 2, 3, 4];
+        let good = stamp_v4(0x00D000, 0xABCD_1234, &body);
+        assert_eq!(good.len(), 28 + body.len());
+        let (prelude, parsed_body) = parse_v4(&good).unwrap();
+        assert_eq!(
+            prelude,
+            PreludeFields {
+                version: 4,
+                payload_size: 4,
+                full_uid: 0x00D000,
+                layout_hash: 0xABCD_1234,
+                payload_crc: crc32(&body),
+            }
+        );
+        assert_eq!(parsed_body, body);
 
-        assert_eq!(parse_v3(&good[..10]), Err(TprmError::Truncated));
+        assert_eq!(parse_v4(&good[..27]), Err(TprmError::Truncated));
 
         let mut bad = good.clone();
         bad[0] = b'X';
-        assert_eq!(parse_v3(&bad), Err(TprmError::BadMagic));
+        assert_eq!(parse_v4(&bad), Err(TprmError::BadMagic { found: *b"XPV4" }));
 
         let mut bad = good.clone();
         bad[4] = 9;
-        assert_eq!(parse_v3(&bad), Err(TprmError::BadVersion(9)));
+        assert_eq!(parse_v4(&bad), Err(TprmError::BadVersion(9)));
 
         let mut bad = good.clone();
-        bad[6] = 99;
-        assert!(matches!(
-            parse_v3(&bad),
+        bad[7] = 0x80;
+        assert_eq!(parse_v4(&bad), Err(TprmError::ReservedNonZero(0x8000)));
+
+        let mut bad = good.clone();
+        bad[8] = 99;
+        assert_eq!(
+            parse_v4(&bad),
             Err(TprmError::SizeMismatch {
                 header: 99,
                 actual: 4
             })
-        ));
+        );
+
+        let mut bad = good.clone();
+        bad[15] = 1;
+        assert_eq!(
+            parse_v4(&bad),
+            Err(TprmError::SizeMismatch {
+                header: (1 << 56) | 4,
+                actual: 4
+            })
+        );
+
+        let mut bad = good.clone();
+        bad[24] ^= 0xFF;
+        assert_eq!(parse_v4(&bad), Err(TprmError::BadCrc));
 
         let mut bad = good.clone();
         *bad.last_mut().unwrap() ^= 0xFF;
-        assert_eq!(parse_v3(&bad), Err(TprmError::BadCrc));
+        assert_eq!(parse_v4(&bad), Err(TprmError::BadCrc));
+    }
+
+    /// @test A payload stamped with the 20-byte APV3 prelude is refused
+    /// by its magic, and the refusal names both the magic it found and
+    /// the magic this format wants.
+    #[test]
+    fn apv3_stamp_is_refused_by_its_magic() {
+        let err = parse_v4(APV3_NESTED_ENUM).unwrap_err();
+        assert_eq!(err, TprmError::BadMagic { found: *b"APV3" });
+        assert_eq!(err.to_string(), "bad magic \"APV3\" (want \"APV4\")");
+    }
+
+    /// @test A body longer than 16 bits can count is stamped with its
+    /// full length in the 64-bit size field and parses back intact.
+    #[test]
+    fn stamp_carries_a_body_beyond_u16() {
+        let big: Vec<u8> = (0..70_000u32).map(|i| i as u8).collect();
+        let stamped = stamp_v4(0x00D000, 0, &big);
+        assert_eq!(stamped[8..16], 70_000u64.to_le_bytes());
+        let (prelude, body) = parse_v4(&stamped).unwrap();
+        assert_eq!(prelude.payload_size, 70_000);
+        assert_eq!(body, &big[..]);
     }
 
     /// @test Variable-length (header + entries) layout hashing is
     /// entry-count dependent: header leaves then each entry's leaves
     /// in order, no container markers. The 2-task hash is anchored to
-    /// the contract vector's own prelude (not a transcribed constant),
-    /// and the 3-task hash pins the producer's worked evidence from
-    /// the 2026-08-16 relay answer -- together they prove the count
-    /// changes the hash, which is what makes a stale task list
-    /// un-uploadable.
+    /// the contract vector's own prelude (not a transcribed constant)
+    /// and differs from the 3-task hash: the count changes the hash,
+    /// which is what makes a stale task list un-uploadable.
     #[test]
     fn variable_length_hash_is_entry_count_dependent() {
         let hdr = [
@@ -551,9 +646,7 @@ mod tests {
         ];
         // Offset-aware form: absolute offsets accumulate across the
         // header and every entry; the total terminator makes the hash
-        // entry-count-dependent twice over. The 2-task value anchors
-        // to the contract vector's own prelude; the pre-flag-day
-        // 3-task evidence constant is retired with the old form.
+        // entry-count-dependent twice over.
         let hash_for = |entry_count: usize| {
             let mut off = 0usize;
             let leaves: Vec<(&str, &str, usize, usize)> = hdr
@@ -579,17 +672,9 @@ mod tests {
                 total,
             )
         };
-        let (vector_prelude, _) = parse_v3(&read_vector("scheduler_shape.bin")).unwrap();
+        let (vector_prelude, _) = parse_v4(&read_vector("scheduler_shape.bin")).unwrap();
         assert_eq!(hash_for(2), vector_prelude.layout_hash);
         assert_ne!(hash_for(2), hash_for(3));
-    }
-
-    /// @test stamp_v3 refuses a body larger than the u16 size field
-    /// can describe instead of silently truncating the length.
-    #[test]
-    fn stamp_rejects_oversized_body() {
-        let big = vec![0u8; 70_000];
-        assert_eq!(stamp_v3(0, 0, &big), Err(TprmError::TooLarge));
     }
 
     /// @test A READBACK page parses per the vehicle's emit layout
