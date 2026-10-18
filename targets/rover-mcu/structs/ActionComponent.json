@@ -471,6 +471,134 @@
           "doc": "Command payload bytes."
         },
         {
+          "name": "commandPayload[0]",
+          "type": "uint",
+          "offset": 15,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 0 of commandPayload."
+        },
+        {
+          "name": "commandPayload[1]",
+          "type": "uint",
+          "offset": 16,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 1 of commandPayload."
+        },
+        {
+          "name": "commandPayload[2]",
+          "type": "uint",
+          "offset": 17,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 2 of commandPayload."
+        },
+        {
+          "name": "commandPayload[3]",
+          "type": "uint",
+          "offset": 18,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 3 of commandPayload."
+        },
+        {
+          "name": "commandPayload[4]",
+          "type": "uint",
+          "offset": 19,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 4 of commandPayload."
+        },
+        {
+          "name": "commandPayload[5]",
+          "type": "uint",
+          "offset": 20,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 5 of commandPayload."
+        },
+        {
+          "name": "commandPayload[6]",
+          "type": "uint",
+          "offset": 21,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 6 of commandPayload."
+        },
+        {
+          "name": "commandPayload[7]",
+          "type": "uint",
+          "offset": 22,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 7 of commandPayload."
+        },
+        {
+          "name": "commandPayload[8]",
+          "type": "uint",
+          "offset": 23,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 8 of commandPayload."
+        },
+        {
+          "name": "commandPayload[9]",
+          "type": "uint",
+          "offset": 24,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 9 of commandPayload."
+        },
+        {
+          "name": "commandPayload[10]",
+          "type": "uint",
+          "offset": 25,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 10 of commandPayload."
+        },
+        {
+          "name": "commandPayload[11]",
+          "type": "uint",
+          "offset": 26,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 11 of commandPayload."
+        },
+        {
+          "name": "commandPayload[12]",
+          "type": "uint",
+          "offset": 27,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 12 of commandPayload."
+        },
+        {
+          "name": "commandPayload[13]",
+          "type": "uint",
+          "offset": 28,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 13 of commandPayload."
+        },
+        {
+          "name": "commandPayload[14]",
+          "type": "uint",
+          "offset": 29,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 14 of commandPayload."
+        },
+        {
+          "name": "commandPayload[15]",
+          "type": "uint",
+          "offset": 30,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 15 of commandPayload."
+        },
+        {
           "name": "delayCycles",
           "type": "uint",
           "offset": 31,
@@ -602,6 +730,70 @@
           "doc": "Raw threshold bytes."
         },
         {
+          "name": "threshold[0]",
+          "type": "uint",
+          "offset": 10,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 0 of threshold."
+        },
+        {
+          "name": "threshold[1]",
+          "type": "uint",
+          "offset": 11,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 1 of threshold."
+        },
+        {
+          "name": "threshold[2]",
+          "type": "uint",
+          "offset": 12,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 2 of threshold."
+        },
+        {
+          "name": "threshold[3]",
+          "type": "uint",
+          "offset": 13,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 3 of threshold."
+        },
+        {
+          "name": "threshold[4]",
+          "type": "uint",
+          "offset": 14,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 4 of threshold."
+        },
+        {
+          "name": "threshold[5]",
+          "type": "uint",
+          "offset": 15,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 5 of threshold."
+        },
+        {
+          "name": "threshold[6]",
+          "type": "uint",
+          "offset": 16,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 6 of threshold."
+        },
+        {
+          "name": "threshold[7]",
+          "type": "uint",
+          "offset": 17,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 7 of threshold."
+        },
+        {
           "name": "enabled",
           "type": "uint",
           "offset": 18,
@@ -676,6 +868,70 @@
           "value": [],
           "element_type": "uint",
           "dims": [8]
+        },
+        {
+          "name": "threshold[0]",
+          "type": "uint",
+          "offset": 10,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 0 of threshold."
+        },
+        {
+          "name": "threshold[1]",
+          "type": "uint",
+          "offset": 11,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 1 of threshold."
+        },
+        {
+          "name": "threshold[2]",
+          "type": "uint",
+          "offset": 12,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 2 of threshold."
+        },
+        {
+          "name": "threshold[3]",
+          "type": "uint",
+          "offset": 13,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 3 of threshold."
+        },
+        {
+          "name": "threshold[4]",
+          "type": "uint",
+          "offset": 14,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 4 of threshold."
+        },
+        {
+          "name": "threshold[5]",
+          "type": "uint",
+          "offset": 15,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 5 of threshold."
+        },
+        {
+          "name": "threshold[6]",
+          "type": "uint",
+          "offset": 16,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 6 of threshold."
+        },
+        {
+          "name": "threshold[7]",
+          "type": "uint",
+          "offset": 17,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 7 of threshold."
         },
         {
           "name": "eventId",

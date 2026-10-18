@@ -365,12 +365,6 @@
           "opcode": "0x0000",
           "desc": "Connectivity check",
           "fields": []
-        },
-        {
-          "name": "GET_HEALTH",
-          "opcode": "0x0100",
-          "desc": "Component health telemetry",
-          "fields": []
         }
       ]
     },
@@ -381,12 +375,6 @@
           "name": "NOOP",
           "opcode": "0x0000",
           "desc": "Connectivity check",
-          "fields": []
-        },
-        {
-          "name": "GET_HEALTH",
-          "opcode": "0x0100",
-          "desc": "Component health telemetry",
           "fields": []
         }
       ]
@@ -399,12 +387,6 @@
           "opcode": "0x0000",
           "desc": "Connectivity check",
           "fields": []
-        },
-        {
-          "name": "GET_HEALTH",
-          "opcode": "0x0100",
-          "desc": "Component health telemetry",
-          "fields": []
         }
       ]
     },
@@ -415,12 +397,6 @@
           "name": "NOOP",
           "opcode": "0x0000",
           "desc": "Connectivity check",
-          "fields": []
-        },
-        {
-          "name": "GET_HEALTH",
-          "opcode": "0x0100",
-          "desc": "Component health telemetry",
           "fields": []
         }
       ]
@@ -517,7 +493,7 @@
         {
           "name": "SET_SEQ_STATE",
           "opcode": "0x0107",
-          "desc": "Sequences bracket themselves with this; 0 idle, 1..31 running id, 0x10|reason halt.",
+          "desc": "Sequences bracket themselves with this; 0 idle, a running id with bit 0x10 clear (1..15, 32..47, 64..79, ...), 0x10|reason halt.",
           "fields": [
             {
               "name": "state",
@@ -541,24 +517,6 @@
           "opcode": "0x0000",
           "desc": "Connectivity check",
           "fields": []
-        },
-        {
-          "name": "HOLD",
-          "opcode": "0x0000",
-          "desc": "Hold",
-          "fields": []
-        },
-        {
-          "name": "TRAJECTORY",
-          "opcode": "0x0001",
-          "desc": "Trajectory",
-          "fields": []
-        },
-        {
-          "name": "WAYPOINT",
-          "opcode": "0x0002",
-          "desc": "Waypoint",
-          "fields": []
         }
       ]
     },
@@ -569,12 +527,6 @@
           "name": "NOOP",
           "opcode": "0x0000",
           "desc": "Connectivity check",
-          "fields": []
-        },
-        {
-          "name": "GET_HEALTH",
-          "opcode": "0x0100",
-          "desc": "Component health telemetry",
           "fields": []
         }
       ]
@@ -587,12 +539,6 @@
           "opcode": "0x0000",
           "desc": "Connectivity check",
           "fields": []
-        },
-        {
-          "name": "GET_HEALTH",
-          "opcode": "0x0100",
-          "desc": "Component health telemetry",
-          "fields": []
         }
       ]
     },
@@ -603,12 +549,6 @@
           "name": "NOOP",
           "opcode": "0x0000",
           "desc": "Connectivity check",
-          "fields": []
-        },
-        {
-          "name": "GET_HEALTH",
-          "opcode": "0x0100",
-          "desc": "Component health telemetry",
           "fields": []
         }
       ]
@@ -621,11 +561,46 @@
           "opcode": "0x0000",
           "desc": "Connectivity check",
           "fields": []
+        }
+      ]
+    },
+    "TelemetryManager": {
+      "fullUid": "0x00C900",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
         },
         {
-          "name": "GET_HEALTH",
+          "name": "GET_STATS",
           "opcode": "0x0100",
-          "desc": "Component health telemetry",
+          "desc": "Get Stats",
+          "fields": []
+        },
+        {
+          "name": "ADD_SUBSCRIPTION",
+          "opcode": "0x0200",
+          "desc": "Add Subscription",
+          "fields": []
+        },
+        {
+          "name": "REMOVE_SUBSCRIPTION",
+          "opcode": "0x0201",
+          "desc": "Remove Subscription",
+          "fields": []
+        },
+        {
+          "name": "LIST_SUBSCRIPTIONS",
+          "opcode": "0x0202",
+          "desc": "List Subscriptions",
+          "fields": []
+        },
+        {
+          "name": "CLEAR_ALL",
+          "opcode": "0x0203",
+          "desc": "Clear All",
           "fields": []
         }
       ]

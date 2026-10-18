@@ -181,7 +181,7 @@
     },
     "RoverControllerState": {
       "category": "STATE",
-      "size": 48,
+      "size": 49,
       "fields": [
         {
           "name": "tick_count",
@@ -247,16 +247,23 @@
           "value": 0
         },
         {
+          "name": "leg_reverse_dir",
+          "type": "int",
+          "offset": 32,
+          "size": 1,
+          "value": 0
+        },
+        {
           "name": "leg_start_north_m",
           "type": "float",
-          "offset": 32,
+          "offset": 33,
           "size": 8,
           "value": 0.0
         },
         {
           "name": "leg_start_east_m",
           "type": "float",
-          "offset": 40,
+          "offset": 41,
           "size": 8,
           "value": 0.0
         }
@@ -264,7 +271,7 @@
     },
     "RoverControllerTunables": {
       "category": "TUNABLE_PARAM",
-      "size": 120,
+      "size": 144,
       "fields": [
         {
           "name": "boot_mode",
@@ -379,6 +386,36 @@
           "offset": 112,
           "size": 8,
           "value": 15.0
+        },
+        {
+          "name": "accel_m_s2",
+          "type": "float",
+          "offset": 120,
+          "size": 8,
+          "value": 1.5
+        },
+        {
+          "name": "command_lead_s",
+          "type": "float",
+          "offset": 128,
+          "size": 8,
+          "value": 0.0
+        },
+        {
+          "name": "step_hz",
+          "type": "uint",
+          "offset": 136,
+          "size": 2,
+          "value": 20
+        },
+        {
+          "name": "reserved1",
+          "type": "array",
+          "offset": 138,
+          "size": 6,
+          "value": [],
+          "element_type": "uint",
+          "dims": [6]
         }
       ]
     }

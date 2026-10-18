@@ -168,26 +168,20 @@ tm_frame_size = 1024
 auto_connect = true
 dir = "/data/targets/fprime-demo"
 
-# Target: Rover MCU demo (apex horizon rover; bundle from
-# `make zenith-target APP=ApexRoverMcuDemo`). This instance runs no
-# telemetry manager, so zenith reads the two OUTPUT blocks the
-# layouts chart on a timer instead of waiting for pushes. The host is
-# the rover container's bridge IP through its in-namespace forwarder;
-# it can change when the container restarts.
+# Target: Rover MCU demo (dev only; published on host loopback port
+# 9010). Bundle generated from the apex rover branch with
+# `make zenith-target APP=ApexRoverMcuDemo`. The producer pushes its
+# telemetry blocks over the link on its own, so the target declares no
+# poll rows.
 [[targets]]
 name = "Rover MCU"
-host = "172.26.0.2"
-port = 9001
+host = "127.0.0.1"
+port = 9010
 auto_connect = true
 dir = "/data/targets/rover-mcu"
-health = ["isslipping", "isoffterrain"]
-
-[[targets.poll]]
-uid = "0x00DE00"   # GroundVehicle OUTPUT (256 B)
-category = 4
-rate_hz = 5.0
-
-[[targets.poll]]
-uid = "0x00E200"   # RoverController OUTPUT (112 B)
-category = 4
-rate_hz = 5.0
+health = [
+  "is_slipping",                          # bad when nonzero
+  "is_off_terrain",                       # bad when nonzero
+  { field = "last_cmd_result", ge = 2 },  # 1 is an ACK; 2 and up are NACKs
+  { field = "board_link", eq = 2 },       # 0 never used, 1 up, 2 lost
+]

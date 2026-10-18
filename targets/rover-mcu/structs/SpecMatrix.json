@@ -109,6 +109,38 @@
           "doc": "uint16 array lane."
         },
         {
+          "name": "gains[0]",
+          "type": "uint",
+          "offset": 36,
+          "size": 2,
+          "value": 0,
+          "doc": "Element 0 of gains."
+        },
+        {
+          "name": "gains[1]",
+          "type": "uint",
+          "offset": 38,
+          "size": 2,
+          "value": 0,
+          "doc": "Element 1 of gains."
+        },
+        {
+          "name": "gains[2]",
+          "type": "uint",
+          "offset": 40,
+          "size": 2,
+          "value": 0,
+          "doc": "Element 2 of gains."
+        },
+        {
+          "name": "gains[3]",
+          "type": "uint",
+          "offset": 42,
+          "size": 2,
+          "value": 0,
+          "doc": "Element 3 of gains."
+        },
+        {
           "name": "iShort",
           "type": "int",
           "offset": 44,
@@ -174,6 +206,46 @@
           "size": 5,
           "value": [0, 0, 0, 0, 0],
           "doc": "Byte buffer lane."
+        },
+        {
+          "name": "blob[0]",
+          "type": "uint",
+          "offset": 75,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 0 of blob."
+        },
+        {
+          "name": "blob[1]",
+          "type": "uint",
+          "offset": 76,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 1 of blob."
+        },
+        {
+          "name": "blob[2]",
+          "type": "uint",
+          "offset": 77,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 2 of blob."
+        },
+        {
+          "name": "blob[3]",
+          "type": "uint",
+          "offset": 78,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 3 of blob."
+        },
+        {
+          "name": "blob[4]",
+          "type": "uint",
+          "offset": 79,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 4 of blob."
         }
       ],
       "spec_defined": true,

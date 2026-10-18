@@ -66,6 +66,134 @@
           "size": 16,
           "value": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
           "doc": "Frame payload (fixed 16-byte buffer, length bytes used)."
+        },
+        {
+          "name": "data[0]",
+          "type": "uint",
+          "offset": 4,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 0 of data."
+        },
+        {
+          "name": "data[1]",
+          "type": "uint",
+          "offset": 5,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 1 of data."
+        },
+        {
+          "name": "data[2]",
+          "type": "uint",
+          "offset": 6,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 2 of data."
+        },
+        {
+          "name": "data[3]",
+          "type": "uint",
+          "offset": 7,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 3 of data."
+        },
+        {
+          "name": "data[4]",
+          "type": "uint",
+          "offset": 8,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 4 of data."
+        },
+        {
+          "name": "data[5]",
+          "type": "uint",
+          "offset": 9,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 5 of data."
+        },
+        {
+          "name": "data[6]",
+          "type": "uint",
+          "offset": 10,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 6 of data."
+        },
+        {
+          "name": "data[7]",
+          "type": "uint",
+          "offset": 11,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 7 of data."
+        },
+        {
+          "name": "data[8]",
+          "type": "uint",
+          "offset": 12,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 8 of data."
+        },
+        {
+          "name": "data[9]",
+          "type": "uint",
+          "offset": 13,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 9 of data."
+        },
+        {
+          "name": "data[10]",
+          "type": "uint",
+          "offset": 14,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 10 of data."
+        },
+        {
+          "name": "data[11]",
+          "type": "uint",
+          "offset": 15,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 11 of data."
+        },
+        {
+          "name": "data[12]",
+          "type": "uint",
+          "offset": 16,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 12 of data."
+        },
+        {
+          "name": "data[13]",
+          "type": "uint",
+          "offset": 17,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 13 of data."
+        },
+        {
+          "name": "data[14]",
+          "type": "uint",
+          "offset": 18,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 14 of data."
+        },
+        {
+          "name": "data[15]",
+          "type": "uint",
+          "offset": 19,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 15 of data."
         }
       ],
       "spec_defined": true,

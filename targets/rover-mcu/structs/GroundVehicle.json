@@ -106,6 +106,22 @@
           "dims": [2]
         },
         {
+          "name": "led_colour[0]",
+          "type": "uint",
+          "offset": 34,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 0 of led_colour."
+        },
+        {
+          "name": "led_colour[1]",
+          "type": "uint",
+          "offset": 35,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 1 of led_colour."
+        },
+        {
           "name": "led_rate",
           "type": "array",
           "offset": 36,
@@ -113,6 +129,22 @@
           "value": [],
           "element_type": "uint",
           "dims": [2]
+        },
+        {
+          "name": "led_rate[0]",
+          "type": "uint",
+          "offset": 36,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 0 of led_rate."
+        },
+        {
+          "name": "led_rate[1]",
+          "type": "uint",
+          "offset": 37,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 1 of led_rate."
         },
         {
           "name": "reserved_led",
@@ -152,6 +184,22 @@
           "dims": [2]
         },
         {
+          "name": "led_phase[0]",
+          "type": "uint",
+          "offset": 43,
+          "size": 2,
+          "value": 0,
+          "doc": "Element 0 of led_phase."
+        },
+        {
+          "name": "led_phase[1]",
+          "type": "uint",
+          "offset": 45,
+          "size": 2,
+          "value": 0,
+          "doc": "Element 1 of led_phase."
+        },
+        {
           "name": "led_on",
           "type": "array",
           "offset": 47,
@@ -159,6 +207,22 @@
           "value": [],
           "element_type": "uint",
           "dims": [2]
+        },
+        {
+          "name": "led_on[0]",
+          "type": "uint",
+          "offset": 47,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 0 of led_on."
+        },
+        {
+          "name": "led_on[1]",
+          "type": "uint",
+          "offset": 48,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 1 of led_on."
         },
         {
           "name": "reserved_strobe",
@@ -327,6 +391,134 @@
           "dims": [16]
         },
         {
+          "name": "lidar_range_m[0]",
+          "type": "float",
+          "offset": 88,
+          "size": 8,
+          "value": 0,
+          "doc": "Element 0 of lidar_range_m."
+        },
+        {
+          "name": "lidar_range_m[1]",
+          "type": "float",
+          "offset": 96,
+          "size": 8,
+          "value": 0,
+          "doc": "Element 1 of lidar_range_m."
+        },
+        {
+          "name": "lidar_range_m[2]",
+          "type": "float",
+          "offset": 104,
+          "size": 8,
+          "value": 0,
+          "doc": "Element 2 of lidar_range_m."
+        },
+        {
+          "name": "lidar_range_m[3]",
+          "type": "float",
+          "offset": 112,
+          "size": 8,
+          "value": 0,
+          "doc": "Element 3 of lidar_range_m."
+        },
+        {
+          "name": "lidar_range_m[4]",
+          "type": "float",
+          "offset": 120,
+          "size": 8,
+          "value": 0,
+          "doc": "Element 4 of lidar_range_m."
+        },
+        {
+          "name": "lidar_range_m[5]",
+          "type": "float",
+          "offset": 128,
+          "size": 8,
+          "value": 0,
+          "doc": "Element 5 of lidar_range_m."
+        },
+        {
+          "name": "lidar_range_m[6]",
+          "type": "float",
+          "offset": 136,
+          "size": 8,
+          "value": 0,
+          "doc": "Element 6 of lidar_range_m."
+        },
+        {
+          "name": "lidar_range_m[7]",
+          "type": "float",
+          "offset": 144,
+          "size": 8,
+          "value": 0,
+          "doc": "Element 7 of lidar_range_m."
+        },
+        {
+          "name": "lidar_range_m[8]",
+          "type": "float",
+          "offset": 152,
+          "size": 8,
+          "value": 0,
+          "doc": "Element 8 of lidar_range_m."
+        },
+        {
+          "name": "lidar_range_m[9]",
+          "type": "float",
+          "offset": 160,
+          "size": 8,
+          "value": 0,
+          "doc": "Element 9 of lidar_range_m."
+        },
+        {
+          "name": "lidar_range_m[10]",
+          "type": "float",
+          "offset": 168,
+          "size": 8,
+          "value": 0,
+          "doc": "Element 10 of lidar_range_m."
+        },
+        {
+          "name": "lidar_range_m[11]",
+          "type": "float",
+          "offset": 176,
+          "size": 8,
+          "value": 0,
+          "doc": "Element 11 of lidar_range_m."
+        },
+        {
+          "name": "lidar_range_m[12]",
+          "type": "float",
+          "offset": 184,
+          "size": 8,
+          "value": 0,
+          "doc": "Element 12 of lidar_range_m."
+        },
+        {
+          "name": "lidar_range_m[13]",
+          "type": "float",
+          "offset": 192,
+          "size": 8,
+          "value": 0,
+          "doc": "Element 13 of lidar_range_m."
+        },
+        {
+          "name": "lidar_range_m[14]",
+          "type": "float",
+          "offset": 200,
+          "size": 8,
+          "value": 0,
+          "doc": "Element 14 of lidar_range_m."
+        },
+        {
+          "name": "lidar_range_m[15]",
+          "type": "float",
+          "offset": 208,
+          "size": 8,
+          "value": 0,
+          "doc": "Element 15 of lidar_range_m."
+        },
+        {
           "name": "lidar_hit",
           "type": "array",
           "offset": 216,
@@ -336,13 +528,295 @@
           "dims": [16]
         },
         {
+          "name": "lidar_hit[0]",
+          "type": "uint",
+          "offset": 216,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 0 of lidar_hit."
+        },
+        {
+          "name": "lidar_hit[1]",
+          "type": "uint",
+          "offset": 217,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 1 of lidar_hit."
+        },
+        {
+          "name": "lidar_hit[2]",
+          "type": "uint",
+          "offset": 218,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 2 of lidar_hit."
+        },
+        {
+          "name": "lidar_hit[3]",
+          "type": "uint",
+          "offset": 219,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 3 of lidar_hit."
+        },
+        {
+          "name": "lidar_hit[4]",
+          "type": "uint",
+          "offset": 220,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 4 of lidar_hit."
+        },
+        {
+          "name": "lidar_hit[5]",
+          "type": "uint",
+          "offset": 221,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 5 of lidar_hit."
+        },
+        {
+          "name": "lidar_hit[6]",
+          "type": "uint",
+          "offset": 222,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 6 of lidar_hit."
+        },
+        {
+          "name": "lidar_hit[7]",
+          "type": "uint",
+          "offset": 223,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 7 of lidar_hit."
+        },
+        {
+          "name": "lidar_hit[8]",
+          "type": "uint",
+          "offset": 224,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 8 of lidar_hit."
+        },
+        {
+          "name": "lidar_hit[9]",
+          "type": "uint",
+          "offset": 225,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 9 of lidar_hit."
+        },
+        {
+          "name": "lidar_hit[10]",
+          "type": "uint",
+          "offset": 226,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 10 of lidar_hit."
+        },
+        {
+          "name": "lidar_hit[11]",
+          "type": "uint",
+          "offset": 227,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 11 of lidar_hit."
+        },
+        {
+          "name": "lidar_hit[12]",
+          "type": "uint",
+          "offset": 228,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 12 of lidar_hit."
+        },
+        {
+          "name": "lidar_hit[13]",
+          "type": "uint",
+          "offset": 229,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 13 of lidar_hit."
+        },
+        {
+          "name": "lidar_hit[14]",
+          "type": "uint",
+          "offset": 230,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 14 of lidar_hit."
+        },
+        {
+          "name": "lidar_hit[15]",
+          "type": "uint",
+          "offset": 231,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 15 of lidar_hit."
+        },
+        {
+          "name": "board_link",
+          "type": "uint",
+          "offset": 232,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "controller_mode",
+          "type": "uint",
+          "offset": 233,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "seq_state",
+          "type": "uint",
+          "offset": 234,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "active_waypoint",
+          "type": "uint",
+          "offset": 235,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "waypoint_total",
+          "type": "uint",
+          "offset": 236,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "led_bits",
+          "type": "uint",
+          "offset": 237,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "led1_colour",
+          "type": "uint",
+          "offset": 238,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "led1_rate",
+          "type": "uint",
+          "offset": 239,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "led2_colour",
+          "type": "uint",
+          "offset": 240,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "led2_rate",
+          "type": "uint",
+          "offset": 241,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "last_cmd_result",
+          "type": "uint",
+          "offset": 242,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "last_cmd_opcode_lo",
+          "type": "uint",
+          "offset": 243,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "last_cmd_opcode_hi",
+          "type": "uint",
+          "offset": 244,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "board_load_pct",
+          "type": "uint",
+          "offset": 245,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "board_tick_lo",
+          "type": "uint",
+          "offset": 246,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "board_tick_hi",
+          "type": "uint",
+          "offset": 247,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "mast_pan_deg",
+          "type": "uint",
+          "offset": 248,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "mast_ext_pct",
+          "type": "uint",
+          "offset": 249,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "lidar_state",
+          "type": "uint",
+          "offset": 250,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "lidar_hit_bits",
+          "type": "uint",
+          "offset": 251,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "lidar_nearest_m",
+          "type": "uint",
+          "offset": 252,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "lidar_scan_seq",
+          "type": "uint",
+          "offset": 253,
+          "size": 1,
+          "value": 0
+        },
+        {
           "name": "reserved1",
           "type": "array",
-          "offset": 232,
-          "size": 24,
+          "offset": 254,
+          "size": 2,
           "value": [],
           "element_type": "uint",
-          "dims": [24]
+          "dims": [2]
         }
       ]
     },
@@ -689,7 +1163,7 @@
       "name": "SET_SEQ_STATE",
       "opcode": "0x0107",
       "request": "RoverCmdSeqState",
-      "doc": "Sequences bracket themselves with this; 0 idle, 1..31 running id, 0x10|reason halt."
+      "doc": "Sequences bracket themselves with this; 0 idle, a running id with bit 0x10 clear (1..15, 32..47, 64..79, ...), 0x10|reason halt."
     }
   ]
 }

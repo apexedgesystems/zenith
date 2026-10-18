@@ -209,6 +209,102 @@
           "value": [],
           "element_type": "uint",
           "dims": [12]
+        },
+        {
+          "name": "nonce[0]",
+          "type": "uint",
+          "offset": 1,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 0 of nonce."
+        },
+        {
+          "name": "nonce[1]",
+          "type": "uint",
+          "offset": 2,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 1 of nonce."
+        },
+        {
+          "name": "nonce[2]",
+          "type": "uint",
+          "offset": 3,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 2 of nonce."
+        },
+        {
+          "name": "nonce[3]",
+          "type": "uint",
+          "offset": 4,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 3 of nonce."
+        },
+        {
+          "name": "nonce[4]",
+          "type": "uint",
+          "offset": 5,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 4 of nonce."
+        },
+        {
+          "name": "nonce[5]",
+          "type": "uint",
+          "offset": 6,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 5 of nonce."
+        },
+        {
+          "name": "nonce[6]",
+          "type": "uint",
+          "offset": 7,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 6 of nonce."
+        },
+        {
+          "name": "nonce[7]",
+          "type": "uint",
+          "offset": 8,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 7 of nonce."
+        },
+        {
+          "name": "nonce[8]",
+          "type": "uint",
+          "offset": 9,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 8 of nonce."
+        },
+        {
+          "name": "nonce[9]",
+          "type": "uint",
+          "offset": 10,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 9 of nonce."
+        },
+        {
+          "name": "nonce[10]",
+          "type": "uint",
+          "offset": 11,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 10 of nonce."
+        },
+        {
+          "name": "nonce[11]",
+          "type": "uint",
+          "offset": 12,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 11 of nonce."
         }
       ]
     }

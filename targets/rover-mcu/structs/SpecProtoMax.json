@@ -116,6 +116,30 @@
           "doc": "Bounded float array lane."
         },
         {
+          "name": "taps[0]",
+          "type": "float",
+          "offset": 36,
+          "size": 4,
+          "value": 0,
+          "doc": "Element 0 of taps."
+        },
+        {
+          "name": "taps[1]",
+          "type": "float",
+          "offset": 40,
+          "size": 4,
+          "value": 0,
+          "doc": "Element 1 of taps."
+        },
+        {
+          "name": "taps[2]",
+          "type": "float",
+          "offset": 44,
+          "size": 4,
+          "value": 0,
+          "doc": "Element 2 of taps."
+        },
+        {
           "name": "uShort",
           "type": "uint",
           "offset": 48,
@@ -157,6 +181,38 @@
           "size": 4,
           "value": [0, 0, 0, 0],
           "doc": "Byte buffer lane (fixed 4 bytes)."
+        },
+        {
+          "name": "cookie[0]",
+          "type": "uint",
+          "offset": 68,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 0 of cookie."
+        },
+        {
+          "name": "cookie[1]",
+          "type": "uint",
+          "offset": 69,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 1 of cookie."
+        },
+        {
+          "name": "cookie[2]",
+          "type": "uint",
+          "offset": 70,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 2 of cookie."
+        },
+        {
+          "name": "cookie[3]",
+          "type": "uint",
+          "offset": 71,
+          "size": 1,
+          "value": 0,
+          "doc": "Element 3 of cookie."
         },
         {
           "name": "uTiny",

@@ -87,6 +87,13 @@
       "fullUid": "0x00CB00",
       "type": "SUPPORT",
       "notes": "ROVR/2 frame out to /horizon_rover at 100 Hz, commands in"
+    },
+    {
+      "name": "TelemetryManager",
+      "fullUid": "0x00C900",
+      "type": "SUPPORT",
+      "notes": "Pushes the rover and controller OUTPUT and the link and lidar STATE over the ops interface: 20 / 10 / 5 / 5 Hz",
+      "dataFile": "TelemetryManager.json"
     }
   ],
   "systemOpcodes": {

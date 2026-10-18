@@ -112,6 +112,38 @@
           }
         },
         {
+          "name": "gainTable[0]",
+          "type": "float",
+          "offset": 16,
+          "size": 4,
+          "value": 0,
+          "doc": "Element 0 of gainTable."
+        },
+        {
+          "name": "gainTable[1]",
+          "type": "float",
+          "offset": 20,
+          "size": 4,
+          "value": 0,
+          "doc": "Element 1 of gainTable."
+        },
+        {
+          "name": "gainTable[2]",
+          "type": "float",
+          "offset": 24,
+          "size": 4,
+          "value": 0,
+          "doc": "Element 2 of gainTable."
+        },
+        {
+          "name": "gainTable[3]",
+          "type": "float",
+          "offset": 28,
+          "size": 4,
+          "value": 0,
+          "doc": "Element 3 of gainTable."
+        },
+        {
           "name": "mode",
           "type": "uint",
           "offset": 32,

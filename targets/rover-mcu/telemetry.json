@@ -114,6 +114,34 @@
       ]
     },
     {
+      "name": "Lidar rays",
+      "plots": [
+        {
+          "title": "Range per ray (m)",
+          "channels": [
+            "GroundVehicle.lidar_range_m[0]",
+            "GroundVehicle.lidar_range_m[1]",
+            "GroundVehicle.lidar_range_m[2]",
+            "GroundVehicle.lidar_range_m[3]",
+            "GroundVehicle.lidar_range_m[4]",
+            "GroundVehicle.lidar_range_m[5]",
+            "GroundVehicle.lidar_range_m[6]",
+            "GroundVehicle.lidar_range_m[7]"
+          ],
+          "height": 200
+        },
+        {
+          "title": "The picture the rover acts on",
+          "channels": [
+            "GroundVehicle.lidar_state",
+            "GroundVehicle.lidar_nearest_m",
+            "GroundVehicle.lidar_hit_bits"
+          ],
+          "height": 200
+        }
+      ]
+    },
+    {
       "name": "Default",
       "plots": [
         {
@@ -131,7 +159,29 @@
             "GroundVehicle.slope_azimuth_deg",
             "GroundVehicle.is_slipping",
             "GroundVehicle.is_off_terrain",
-            "GroundVehicle.lidar_n_rays"
+            "GroundVehicle.lidar_n_rays",
+            "GroundVehicle.board_link",
+            "GroundVehicle.controller_mode",
+            "GroundVehicle.seq_state",
+            "GroundVehicle.active_waypoint",
+            "GroundVehicle.waypoint_total",
+            "GroundVehicle.led_bits",
+            "GroundVehicle.led1_colour",
+            "GroundVehicle.led1_rate",
+            "GroundVehicle.led2_colour",
+            "GroundVehicle.led2_rate",
+            "GroundVehicle.last_cmd_result",
+            "GroundVehicle.last_cmd_opcode_lo",
+            "GroundVehicle.last_cmd_opcode_hi",
+            "GroundVehicle.board_load_pct",
+            "GroundVehicle.board_tick_lo",
+            "GroundVehicle.board_tick_hi",
+            "GroundVehicle.mast_pan_deg",
+            "GroundVehicle.mast_ext_pct",
+            "GroundVehicle.lidar_state",
+            "GroundVehicle.lidar_hit_bits",
+            "GroundVehicle.lidar_nearest_m",
+            "GroundVehicle.lidar_scan_seq"
           ],
           "height": 200
         },
@@ -160,6 +210,16 @@
             "RoverController.cross_track_m",
             "RoverController.shadow_steer_deg",
             "RoverController.shadow_throttle_frac"
+          ],
+          "height": 200
+        },
+        {
+          "title": "TelemetryManager Output",
+          "channels": [
+            "TelemetryManager.collectCount",
+            "TelemetryManager.packetsSent",
+            "TelemetryManager.sendFailures",
+            "TelemetryManager.activeCount"
           ],
           "height": 200
         }
