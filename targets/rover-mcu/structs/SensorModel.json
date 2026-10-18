@@ -1,0 +1,152 @@
+{
+  "component": "SensorModel",
+  "structs": {
+    "SensorHealthTlm": {
+      "category": "TELEMETRY",
+      "opcode": "0x0100",
+      "size": 20,
+      "fields": [
+        {
+          "name": "temperature",
+          "type": "float",
+          "offset": 0,
+          "size": 4
+        },
+        {
+          "name": "rampRate",
+          "type": "float",
+          "offset": 4,
+          "size": 4
+        },
+        {
+          "name": "stepCount",
+          "type": "uint",
+          "offset": 8,
+          "size": 4
+        },
+        {
+          "name": "wrapCount",
+          "type": "uint",
+          "offset": 12,
+          "size": 4
+        },
+        {
+          "name": "overtemp",
+          "type": "uint",
+          "offset": 16,
+          "size": 1
+        },
+        {
+          "name": "reserved",
+          "type": "array",
+          "element_type": "uint",
+          "dims": [3],
+          "offset": 17,
+          "size": 3,
+          "value": [0, 0, 0]
+        }
+      ],
+      "spec_defined": true,
+      "layout_hash": "0xFD0D2FAC",
+      "canonical_spec": "temperature:float:4:0;rampRate:float:4:4;stepCount:uint:4:8;wrapCount:uint:4:12;overtemp:uint:1:16;reserved:array:3:17;[uint:1x3]|size:20"
+    },
+    "SensorOutput": {
+      "category": "OUTPUT",
+      "size": 12,
+      "fields": [
+        {
+          "name": "temperature",
+          "type": "float",
+          "offset": 0,
+          "size": 4,
+          "value": 0.0,
+          "doc": "Current temperature reading [deg]."
+        },
+        {
+          "name": "temperatureRate",
+          "type": "float",
+          "offset": 4,
+          "size": 4,
+          "value": 0.0,
+          "doc": "Rate of change [deg/step]."
+        },
+        {
+          "name": "overtemp",
+          "type": "uint",
+          "offset": 8,
+          "size": 1,
+          "doc": "1 if temperature > 100.0 (threshold)."
+        },
+        {
+          "name": "reserved",
+          "type": "array",
+          "element_type": "uint",
+          "dims": [3],
+          "offset": 9,
+          "size": 3,
+          "value": [0, 0, 0],
+          "doc": "Alignment padding."
+        }
+      ],
+      "spec_defined": true,
+      "layout_hash": "0xF9B53AAF",
+      "canonical_spec": "temperature:float:4:0;temperatureRate:float:4:4;overtemp:uint:1:8;reserved:array:3:9;[uint:1x3]|size:12"
+    },
+    "SensorState": {
+      "category": "STATE",
+      "size": 8,
+      "fields": [
+        {
+          "name": "stepCount",
+          "type": "uint",
+          "offset": 0,
+          "size": 4,
+          "doc": "Total step invocations."
+        },
+        {
+          "name": "wrapCount",
+          "type": "uint",
+          "offset": 4,
+          "size": 4,
+          "doc": "Number of temperature wrap-arounds."
+        }
+      ],
+      "spec_defined": true,
+      "layout_hash": "0xAB1015BD",
+      "canonical_spec": "stepCount:uint:4:0;wrapCount:uint:4:4;|size:8"
+    },
+    "SensorTunableParams": {
+      "category": "TUNABLE_PARAM",
+      "size": 12,
+      "fields": [
+        {
+          "name": "rampRate",
+          "type": "float",
+          "offset": 0,
+          "size": 4,
+          "value": 0.5,
+          "doc": "Temperature increase per step [deg/step]."
+        },
+        {
+          "name": "initialTemp",
+          "type": "float",
+          "offset": 4,
+          "size": 4,
+          "value": 20.0,
+          "doc": "Starting temperature [deg]."
+        },
+        {
+          "name": "maxTemp",
+          "type": "float",
+          "offset": 8,
+          "size": 4,
+          "value": 120.0,
+          "doc": "Wrap-around temperature (resets to initial)."
+        }
+      ],
+      "spec_defined": true,
+      "layout_hash": "0x4A9E522F",
+      "canonical_spec": "rampRate:float:4:0;initialTemp:float:4:4;maxTemp:float:4:8;|size:12"
+    }
+  }
+}

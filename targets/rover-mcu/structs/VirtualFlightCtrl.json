@@ -1,0 +1,42 @@
+{
+  "component": "VirtualFlightCtrl",
+  "structs": {
+    "VfcState": {
+      "category": "STATE",
+      "size": 16,
+      "fields": [
+        {
+          "name": "rxCount",
+          "type": "uint",
+          "offset": 0,
+          "size": 4,
+          "doc": "Valid VehicleState frames received."
+        },
+        {
+          "name": "txCount",
+          "type": "uint",
+          "offset": 4,
+          "size": 4,
+          "doc": "ControlCmd frames sent."
+        },
+        {
+          "name": "crcErrors",
+          "type": "uint",
+          "offset": 8,
+          "size": 4,
+          "doc": "CRC validation failures."
+        },
+        {
+          "name": "pollCount",
+          "type": "uint",
+          "offset": 12,
+          "size": 4,
+          "doc": "Transport poll iterations."
+        }
+      ],
+      "spec_defined": true,
+      "layout_hash": "0xC31087A9",
+      "canonical_spec": "rxCount:uint:4:0;txCount:uint:4:4;crcErrors:uint:4:8;pollCount:uint:4:12;|size:16"
+    }
+  }
+}
