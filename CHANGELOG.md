@@ -21,6 +21,15 @@ architecture review; work before that is the v0.0.1 tag.
   asks for the password over the page it was on and resends nothing.
 - `GET`, `POST` and `DELETE /api/auth/session`, and
   `POST /api/auth/session/refresh`. Bearer-token clients are unchanged.
+- A target names its generated directory with `dir`: its manifest,
+  dictionaries, layouts, commands and connect steps are found inside,
+  and Add Target takes the same directory.
+- `[[targets.poll]]` reads a data block (`uid`, `category`, `rate_hz`
+  up to 50) on a timer into telemetry, for an apex target that pushes
+  nothing.
+- A demo target for the apex rover in the development config
+  (`targets/rover-mcu`, host loopback port 9010), with health rules
+  for its command result and board link.
 
 ### Changed
 
@@ -37,6 +46,13 @@ architecture review; work before that is the v0.0.1 tag.
 - A console opened while the server is restarting retries its first
   session read (after 1 s, doubling to 10 s) instead of staying blank.
 - Without credentials the API answers "missing token or session".
+- Command completion frames are named from the component's result set
+  (for example INVALID_ARGUMENT, EXEC_FAILED); immediate and queued
+  frames keep the interface's names.
+- Layouts from a target's `telemetry.json` are listed in the order the
+  file declares them.
+- Screens suit a large display; empty plots say "Waiting for data", and
+  a link that is up with nothing to push shows "No data", not "Off".
 
 ### Security
 
@@ -55,6 +71,10 @@ architecture review; work before that is the v0.0.1 tag.
 - The image builds from the committed lockfiles (`--locked`, `npm ci`)
   and an allowlisted build context, so nothing from the host can enter
   it.
+- A link that reconnects after the remote hung up stays connected
+  instead of reading as disconnected moments later.
+- Quick commands generated with `payloadHex` send their payload
+  instead of an empty one.
 
 ## v0.2.0 - 2026-09-27
 

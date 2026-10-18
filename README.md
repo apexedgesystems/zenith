@@ -147,7 +147,7 @@ ELF ident) decode correctly with zero configuration.
 | Frontend      | React 19, TypeScript strict, Canvas API                                                    |
 | Storage       | SQLite (WAL mode) with read connection pool (1 writer + N readers)                         |
 | Protocol      | APROTO over TCP + SLIP framing                                                             |
-| Tests         | `cargo test --lib` (166 unit tests) + Vitest with React Testing Library (107 unit tests)   |
+| Tests         | `cargo test --lib` (173 unit tests) + Vitest with React Testing Library (107 unit tests)   |
 | Benches       | criterion + pprof flamegraphs                                                              |
 | Auth          | Console sign-in with server-side sessions; JWT bearer tokens for API clients (default off) |
 | Rate limiting | Per-IP token bucket on POST endpoints (when auth is on)                                    |
@@ -299,7 +299,7 @@ make run
 | `make stop`          | Stop the running container                                                                     |
 | `make dev`           | Build + run in foreground (logs to stdout)                                                     |
 | `make test`          | Run **both** backend and frontend test suites                                                  |
-| `make test-backend`  | Backend only: `cargo test --lib` (currently 166 unit tests)                                    |
+| `make test-backend`  | Backend only: `cargo test --lib` (currently 173 unit tests)                                    |
 | `make test-frontend` | Frontend only: `vitest run` (currently 107 unit tests)                                         |
 | `make bench`         | Run criterion benches (`protocol`, `storage`, `decoder`)                                       |
 | `make format`        | Run rustfmt across the backend                                                                 |
@@ -411,6 +411,21 @@ rule with none or several refuses to boot. Field names match
 lowercased with underscores stripped. This is ground-side judgement,
 not vehicle truth, so it stays in the zenith config rather than the
 generated bundle.
+
+An apex target that pushes no telemetry of its own can be polled
+instead: each `[[targets.poll]]` row reads one data block with INSPECT
+at `rate_hz` while the link is up and feeds it into telemetry as if
+the target had pushed it. `uid` is the component's fullUid (`0x` hex
+or decimal), `category` the block's (0 STATIC_PARAM .. 4 OUTPUT), and
+`rate_hz` at most 50 (default 5); polls share the command path with
+operators. A row that cannot run refuses to boot.
+
+```toml
+[[targets.poll]]
+uid = "0x00DE00"
+category = 4                   # OUTPUT
+rate_hz = 5.0
+```
 
 ## Config Validation
 

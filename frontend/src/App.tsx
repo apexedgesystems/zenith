@@ -482,8 +482,8 @@ function Shell() {
         setSelectedTarget(data.id);
         setShowAddForm(false);
       } else {
-        // A refused add used to vanish silently, leaving the form
-        // open with no reason -- say what the server said.
+        // A refused add shows the server's reason and keeps the form
+        // open, so the operator can correct the definition and retry.
         await notify(await r.text(), "Add target failed");
       }
     } catch (e) {

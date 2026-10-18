@@ -609,10 +609,10 @@ mod tests {
     use super::*;
 
     /// @test Reconnecting after the remote hangs up leaves the link
-    /// connected. The earlier connection's writer used to wake when
-    /// its command channel was replaced and clear the connected flag
-    /// with no generation check, so a live, working link reported
-    /// connected=false within moments and block polling stopped.
+    /// connected. A replaced session's tasks must not touch the new
+    /// session: connect aborts them, and a reader or writer clears the
+    /// connected flag only while its generation is current; otherwise a
+    /// live link reads as down moments after the reconnect.
     #[tokio::test]
     async fn reconnect_after_remote_close_stays_connected() {
         let (push_tx, _) = tokio::sync::broadcast::channel(16);
