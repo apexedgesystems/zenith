@@ -13,7 +13,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use tokio::sync::broadcast;
 
-use crate::core::config_manager::{FieldDef, RecordTable, StructDictionary};
+use crate::core::config_manager::{DataCategory, FieldDef, RecordTable, StructDictionary};
 use crate::core::transport::PushTelemetryPacket;
 
 /* ----------------------------- Types ----------------------------- */
@@ -59,6 +59,20 @@ struct CachedField {
     big_endian: bool,
 }
 
+/// A block's payload size with its precomputed fields.
+type SizedFields = (usize, Vec<CachedField>);
+
+/// One dictionary struct a component's packets could carry, before
+/// field-name claiming: its priority, size, fields, byte order and
+/// block category.
+struct Candidate {
+    prio: u8,
+    size: usize,
+    fields: Vec<FieldDef>,
+    big_endian: bool,
+    category: Option<DataCategory>,
+}
+
 /// Pre-built lookup table for decoding push telemetry using struct definitions.
 ///
 /// Maps (fullUid, payload_size) -> precomputed list of fields ready to emit
@@ -70,6 +84,11 @@ struct CachedField {
 pub struct TelemetryDecoder {
     /// (fullUid, payload_byte_size) -> precomputed fields
     lookup: HashMap<(u32, usize), Vec<CachedField>>,
+    /// (fullUid, data category) -> each block of that category as
+    /// (size, precomputed fields): the struct a packet that names its
+    /// category was read as, even when another block of the same
+    /// component has the same size.
+    by_category: HashMap<(u32, DataCategory), Vec<SizedFields>>,
     /// fullUid -> Arc<str> display name (for generic fallback)
     uid_names: HashMap<u32, Arc<str>>,
 }
@@ -85,6 +104,7 @@ impl TelemetryDecoder {
     /// string allocation per sample.
     pub fn new(dicts: &StructDictionary, known_components: &[(u32, &str, Option<&str>)]) -> Self {
         let mut lookup: HashMap<(u32, usize), Vec<CachedField>> = HashMap::new();
+        let mut by_category: HashMap<(u32, DataCategory), Vec<SizedFields>> = HashMap::new();
         let mut uid_names: HashMap<u32, Arc<str>> = HashMap::new();
         // Track which field names are already claimed by higher-priority structs
         // to prevent duplicates (e.g. OUTPUT and STATE both having "output" field)
@@ -97,7 +117,7 @@ impl TelemetryDecoder {
             let bn = base_name.to_lowercase();
 
             // Collect all matching structs, sorted by priority (OUTPUT first)
-            let mut candidates: Vec<(u8, usize, Vec<FieldDef>, bool)> = Vec::new();
+            let mut candidates: Vec<Candidate> = Vec::new();
 
             let matching_dicts: Vec<&crate::core::config_manager::ComponentDict> = match dict_key {
                 // Exact join on the manifest's dataFile stem.
@@ -124,17 +144,29 @@ impl TelemetryDecoder {
                     if sdef.fields.is_empty() || sdef.size == 0 {
                         continue;
                     }
-                    let prio = category_priority(&sdef.category);
-                    candidates.push((prio, sdef.size, sdef.fields.clone(), big_endian));
+                    candidates.push(Candidate {
+                        prio: category_priority(&sdef.category),
+                        size: sdef.size,
+                        fields: sdef.fields.clone(),
+                        big_endian,
+                        category: DataCategory::from_dict_name(&sdef.category),
+                    });
                 }
             }
 
             // Sort by priority descending (OUTPUT=4, STATE=3, TELEMETRY=2, etc.)
-            candidates.sort_by_key(|c| std::cmp::Reverse(c.0));
+            candidates.sort_by_key(|c| std::cmp::Reverse(c.prio));
 
             let claimed = claimed_fields.entry(uid).or_default();
 
-            for (prio, size, mut fields, big_endian) in candidates {
+            for Candidate {
+                prio,
+                size,
+                mut fields,
+                big_endian,
+                category,
+            } in candidates
+            {
                 let before = fields.len();
                 // Remove fields already claimed by a higher-priority struct
                 fields.retain(|f| !claimed.contains(&f.name));
@@ -182,11 +214,21 @@ impl TelemetryDecoder {
                     continue;
                 }
 
+                if let Some(category) = category {
+                    by_category
+                        .entry((uid, category))
+                        .or_default()
+                        .push((size, cached.clone()));
+                }
                 lookup.insert((uid, size), cached);
             }
         }
 
-        Self { lookup, uid_names }
+        Self {
+            lookup,
+            by_category,
+            uid_names,
+        }
     }
 
     /// Extend the lookup from a record dictionary: each channel
@@ -237,7 +279,19 @@ impl TelemetryDecoder {
     ) -> Vec<TelemetrySample> {
         let data = &pkt.payload;
 
-        // Try struct-aware decode: match by (uid, payload_size)
+        // A packet that names its category decodes as that block when
+        // the dictionary has one of the payload's size; two blocks of a
+        // component can share a size, and (uid, size) alone would pick
+        // one of them regardless.
+        if let Some(category) = pkt.category {
+            if let Some(blocks) = self.by_category.get(&(pkt.full_uid, category)) {
+                if let Some((_, cached)) = blocks.iter().find(|(size, _)| *size == data.len()) {
+                    return self.decode_with_struct(target_id, timestamp_ms, cached, data);
+                }
+            }
+        }
+
+        // Otherwise match by (uid, payload_size)
         if let Some(cached) = self.lookup.get(&(pkt.full_uid, data.len())) {
             return self.decode_with_struct(target_id, timestamp_ms, cached, data);
         }
@@ -614,6 +668,7 @@ mod tests {
         let pkt = PushTelemetryPacket {
             full_uid: 0x00D000,
             payload: vec![0x00, 0x00, 0x00, 0x3F, 0x00, 0x00, 0x80, 0x3F],
+            category: None,
         };
         let samples = decoder.decode(&target_id(), 1000, &pkt);
         let names: Vec<&str> = samples.iter().map(|s| &*s.channel).collect();
@@ -696,6 +751,7 @@ mod tests {
                 &PushTelemetryPacket {
                     full_uid: 0x42,
                     payload,
+                    category: None,
                 },
             );
             let get = |n: &str| {
@@ -767,6 +823,7 @@ mod tests {
             &PushTelemetryPacket {
                 full_uid: 0x77,
                 payload,
+                category: None,
             },
         );
         let names: Vec<&str> = samples.iter().map(|s| &*s.channel).collect();
@@ -834,6 +891,7 @@ mod tests {
                 &PushTelemetryPacket {
                     full_uid: 0x43,
                     payload,
+                    category: None,
                 },
             );
             let get = |n: &str| {
@@ -878,6 +936,7 @@ mod tests {
             &PushTelemetryPacket {
                 full_uid: 4660,
                 payload: record,
+                category: None,
             },
         );
         assert_eq!(samples.len(), 1);
@@ -895,6 +954,7 @@ mod tests {
             full_uid: 0x00D000,
             // 0.5_f32, 1.0_f32 little-endian
             payload: vec![0x00, 0x00, 0x00, 0x3F, 0x00, 0x00, 0x80, 0x3F],
+            category: None,
         };
         let samples = decoder.decode(&target_id(), 1000, &pkt);
         assert_eq!(samples.len(), 2);
@@ -920,6 +980,7 @@ mod tests {
         let pkt = PushTelemetryPacket {
             full_uid: 0x00D000,
             payload,
+            category: None,
         };
         let samples = decoder.decode(&target_id(), 2000, &pkt);
         let names: Vec<&str> = samples.iter().map(|s| &*s.channel).collect();
@@ -960,6 +1021,7 @@ mod tests {
         let pkt = PushTelemetryPacket {
             full_uid: 0x00DEAD,
             payload,
+            category: None,
         };
         let samples = decoder.decode(&target_id(), 3000, &pkt);
         assert_eq!(samples.len(), 3);
@@ -1013,6 +1075,7 @@ mod tests {
         let pkt = PushTelemetryPacket {
             full_uid: 0x1,
             payload: vec![0u8; 8],
+            category: None,
         };
         let samples = decoder.decode(&target_id(), 0, &pkt);
         assert_eq!(samples.len(), 1, "padding and reserved should be skipped");
@@ -1032,6 +1095,7 @@ mod tests {
         let pkt = PushTelemetryPacket {
             full_uid: 0x00D000,
             payload: vec![0u8; 8],
+            category: None,
         };
         let s1 = decoder.decode(&target_id(), 0, &pkt);
         let s2 = decoder.decode(&target_id(), 1, &pkt);
@@ -1091,6 +1155,7 @@ mod tests {
         let pkt = crate::core::transport::PushTelemetryPacket {
             full_uid: 0x00D000,
             payload: vec![0u8; 8],
+            category: None,
         };
         push_tx.send(pkt.clone()).unwrap();
         push_tx.send(pkt).unwrap();
@@ -1109,5 +1174,94 @@ mod tests {
         assert!(sample_rx.try_recv().is_ok());
         assert!(sample_rx.try_recv().is_ok());
         assert!(sample_rx.try_recv().is_err());
+    }
+
+    fn spec_demo_decoder() -> TelemetryDecoder {
+        let dicts = StructDictionary::load_dir(std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../targets/sil-spec-demo/structs"
+        )))
+        .unwrap();
+        TelemetryDecoder::new(&dicts, &[(0x00DA00, "SpecChannel", Some("SpecChannel"))])
+    }
+
+    /// SpecChannel's eight bytes: 2.5 as float32, then 7 as uint32.
+    const SPEC_CHANNEL_BYTES: [u8; 8] = [0x00, 0x00, 0x20, 0x40, 0x07, 0x00, 0x00, 0x00];
+
+    fn named(samples: &[TelemetrySample]) -> Vec<(String, f64)> {
+        samples
+            .iter()
+            .map(|s| (s.channel.to_string(), s.value))
+            .collect()
+    }
+
+    fn spec_packet(payload: &[u8], category: Option<DataCategory>) -> PushTelemetryPacket {
+        PushTelemetryPacket {
+            full_uid: 0x00DA00,
+            payload: payload.to_vec(),
+            category,
+        }
+    }
+
+    /// @test A packet that names its data category decodes as that
+    /// block: in the shipped spec demo SpecChannel's OUTPUT and STATE
+    /// are both eight bytes, and the same bytes read as OUTPUT are
+    /// value and sequence, read as STATE elapsed and zeros.
+    #[test]
+    fn packet_category_selects_among_equal_size_blocks() {
+        let decoder = spec_demo_decoder();
+        let output = spec_packet(&SPEC_CHANNEL_BYTES, Some(DataCategory::Output));
+        assert_eq!(
+            named(&decoder.decode(&target_id(), 1, &output)),
+            [
+                ("SpecChannel.value".to_string(), 2.5),
+                ("SpecChannel.sequence".to_string(), 7.0)
+            ]
+        );
+        let state = spec_packet(&SPEC_CHANNEL_BYTES, Some(DataCategory::State));
+        assert_eq!(
+            named(&decoder.decode(&target_id(), 1, &state)),
+            [
+                ("SpecChannel.elapsed".to_string(), 2.5),
+                ("SpecChannel.zeros".to_string(), 7.0)
+            ]
+        );
+    }
+
+    /// @test A pushed packet names no category and decodes by (uid,
+    /// size) as before: of SpecChannel's two eight-byte blocks, the
+    /// size lookup keeps the one it always has (STATE).
+    #[test]
+    fn pushed_packet_without_category_decodes_by_size() {
+        let decoder = spec_demo_decoder();
+        let pushed = spec_packet(&SPEC_CHANNEL_BYTES, None);
+        assert_eq!(
+            named(&decoder.decode(&target_id(), 1, &pushed)),
+            [
+                ("SpecChannel.elapsed".to_string(), 2.5),
+                ("SpecChannel.zeros".to_string(), 7.0)
+            ]
+        );
+    }
+
+    /// @test A category with no block of the payload's size falls back
+    /// to (uid, size): twelve bytes named OUTPUT decode as SpecChannel's
+    /// twelve-byte TUNABLE_PARAM block (gain, offset; the string field
+    /// is not a channel).
+    #[test]
+    fn category_without_a_block_of_that_size_falls_back() {
+        let decoder = spec_demo_decoder();
+        // gain 1.5, offset -2.0 (float32 LE), then a 4-byte tag
+        let bytes = [
+            0x00, 0x00, 0xC0, 0x3F, 0x00, 0x00, 0x00, 0xC0, b'a', b'b', 0, 0,
+        ];
+        let pkt = spec_packet(&bytes, Some(DataCategory::Output));
+        assert_eq!(
+            named(&decoder.decode(&target_id(), 1, &pkt)),
+            [
+                ("SpecChannel.gain".to_string(), 1.5),
+                ("SpecChannel.offset".to_string(), -2.0)
+            ]
+        );
     }
 }

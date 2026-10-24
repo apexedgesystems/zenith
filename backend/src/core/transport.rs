@@ -40,12 +40,18 @@ pub enum ClientError {
 /// knowing nothing about the wire that carried them.
 ///
 /// The original opcode/APID is intentionally NOT stored: zenith
-/// routes purely on (fullUid, payload size), so wire addressing is
-/// opaque past the transport.
+/// routes on (fullUid, payload size), so wire addressing is opaque
+/// past the transport.
 #[derive(Debug, Clone)]
 pub struct PushTelemetryPacket {
     pub full_uid: u32,
     pub payload: Vec<u8>,
+    /// The data category the payload was read as, when the sender
+    /// asked for one block (a polled read). Two blocks of one
+    /// component can share a size; the category tells the decoder
+    /// which one this is. None for pushed telemetry, which is
+    /// identified by (fullUid, payload size) alone.
+    pub category: Option<crate::core::config_manager::DataCategory>,
 }
 
 /// Wire protocol a target speaks, from per-target config.

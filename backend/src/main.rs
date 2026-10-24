@@ -655,60 +655,13 @@ async fn do_connect_target(state: &AppState, id: &str) -> Result<bool, (StatusCo
         for h in target._poll_handles.drain(..) {
             h.abort();
         }
-        target._poll_handles = spawn_polls(
+        target._poll_handles = crate::core::poll::spawn_polls(
             &target.config.poll,
             target.client.clone(),
             target.push_tlm_tx.clone(),
         );
     }
     Ok(true)
-}
-
-/// Read a target's declared data blocks on a timer and publish each
-/// read into its telemetry stream, exactly as a pushed packet would
-/// arrive -- the router, storage, and dashboard cannot tell the
-/// difference. A task ends when the link drops; the next connect
-/// starts fresh ones.
-fn spawn_polls(
-    blocks: &[config::PollBlock],
-    client: Arc<Mutex<ProtocolLink>>,
-    push_tx: broadcast::Sender<PushTelemetryPacket>,
-) -> Vec<tokio::task::JoinHandle<()>> {
-    blocks
-        .iter()
-        .filter_map(|b| {
-            let uid = b.full_uid()?;
-            let category = b.category;
-            let period = std::time::Duration::from_secs_f64(1.0 / b.rate_hz);
-            let client = client.clone();
-            let push_tx = push_tx.clone();
-            Some(tokio::spawn(async move {
-                let mut tick = tokio::time::interval(period);
-                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
-                    tick.tick().await;
-                    let read = {
-                        let mut link = client.lock().await;
-                        if !link.is_connected() {
-                            break;
-                        }
-                        let Some(cli) = link.aproto() else {
-                            break;
-                        };
-                        cli.inspect(uid, category, 0, 0).await
-                    };
-                    if let Ok(resp) = read {
-                        if resp.status == 0 && !resp.extra.is_empty() {
-                            let _ = push_tx.send(PushTelemetryPacket {
-                                full_uid: uid,
-                                payload: resp.extra,
-                            });
-                        }
-                    }
-                }
-            }))
-        })
-        .collect()
 }
 
 async fn list_targets(State(state): State<AppState>) -> Json<serde_json::Value> {

@@ -91,6 +91,46 @@ pub struct FieldDef {
     pub enum_ref: Option<String>,
 }
 
+/// The category of a registered data block, as dictionaries name it
+/// (`StructDef::category`) and as a block read asks for it by index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DataCategory {
+    StaticParam,
+    TunableParam,
+    State,
+    Input,
+    Output,
+}
+
+impl DataCategory {
+    /// The category a block read names by index: 0 STATIC_PARAM,
+    /// 1 TUNABLE_PARAM, 2 STATE, 3 INPUT, 4 OUTPUT.
+    pub fn from_index(index: u8) -> Option<Self> {
+        match index {
+            0 => Some(Self::StaticParam),
+            1 => Some(Self::TunableParam),
+            2 => Some(Self::State),
+            3 => Some(Self::Input),
+            4 => Some(Self::Output),
+            _ => None,
+        }
+    }
+
+    /// The category a dictionary struct declares; None for struct
+    /// kinds that are not registered blocks (commands, telemetry
+    /// replies, nested type definitions).
+    pub fn from_dict_name(name: &str) -> Option<Self> {
+        match name {
+            "STATIC_PARAM" => Some(Self::StaticParam),
+            "TUNABLE_PARAM" => Some(Self::TunableParam),
+            "STATE" => Some(Self::State),
+            "INPUT" => Some(Self::Input),
+            "OUTPUT" => Some(Self::Output),
+            _ => None,
+        }
+    }
+}
+
 /// A struct definition with its fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StructDef {

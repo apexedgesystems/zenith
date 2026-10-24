@@ -164,6 +164,7 @@ impl AprotoClient {
                                     let _ = push_tx.send(PushTelemetryPacket {
                                         full_uid: pkt.header.full_uid,
                                         payload: pkt.payload,
+                                        category: None,
                                     });
                                 }
                             }

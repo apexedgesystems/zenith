@@ -264,6 +264,7 @@ impl PacketPipeline {
                         Some(&uid) => out.push(PushTelemetryPacket {
                             full_uid: uid,
                             payload,
+                            category: None,
                         }),
                         None => unroutable += 1,
                     }
@@ -286,6 +287,7 @@ impl PacketPipeline {
                             Some(&uid) => out.push(PushTelemetryPacket {
                                 full_uid: uid,
                                 payload,
+                                category: None,
                             }),
                             None => unroutable += 1,
                         },
@@ -311,6 +313,7 @@ impl PacketPipeline {
                             Some(&uid) => out.push(PushTelemetryPacket {
                                 full_uid: uid,
                                 payload,
+                                category: None,
                             }),
                             None => unroutable += 1,
                         }
@@ -342,6 +345,7 @@ impl PacketPipeline {
                             out.push(PushTelemetryPacket {
                                 full_uid: uid,
                                 payload: record,
+                                category: None,
                             });
                         }
                         if dropped_tail {
@@ -359,6 +363,7 @@ impl PacketPipeline {
                         Some(uid) => out.push(PushTelemetryPacket {
                             full_uid: *uid,
                             payload: frame,
+                            category: None,
                         }),
                         None => unroutable += 1,
                     }
@@ -882,6 +887,7 @@ mod tests {
             &PushTelemetryPacket {
                 full_uid: 0x00D000,
                 payload: body(),
+                category: None,
             },
         );
         assert_eq!(direct.len(), 2);
