@@ -93,35 +93,84 @@ function decodeResponseHex(
   return result;
 }
 
-export function encodeField(field: CommandFieldDef, value: string): string {
-  // Parse as hex if starts with 0x, otherwise decimal
-  const num =
-    value.startsWith("0x") || value.startsWith("0X")
-      ? parseInt(value, 16)
-      : parseInt(value);
-  if (isNaN(num)) return "00"; // Safe fallback: zero
-  // Clamp unsigned types to non-negative
-  const n = field.type.startsWith("uint") ? Math.max(0, num) : num;
+/** One form field encoded for the wire, or why it cannot be. */
+export type EncodedField =
+  | { ok: true; hex: string }
+  | { ok: false; error: string };
+
+function hexOf(buf: ArrayBuffer): string {
+  return [...new Uint8Array(buf)]
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/** Encode one typed form field little-endian. Unsigned integers parse
+ *  decimal or 0x hex; float and double are the IEEE 754 binary32 and
+ *  binary64 of a finite number. Any other catalog type is refused, so
+ *  the form never sends bytes that do not match the field's layout. */
+export function encodeField(
+  field: CommandFieldDef,
+  value: string,
+): EncodedField {
   switch (field.type) {
     case "uint8":
-      return (n & 0xff).toString(16).padStart(2, "0");
-    case "uint16": {
-      const buf = new ArrayBuffer(2);
-      new DataView(buf).setUint16(0, n & 0xffff, true);
-      return [...new Uint8Array(buf)]
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join("");
-    }
+    case "uint16":
     case "uint32": {
+      // Parse as hex if starts with 0x, otherwise decimal
+      const num =
+        value.startsWith("0x") || value.startsWith("0X")
+          ? parseInt(value, 16)
+          : parseInt(value);
+      // Non-numeric input encodes zero; unsigned types clamp to >= 0
+      const n = isNaN(num) ? 0 : Math.max(0, num);
+      if (field.type === "uint8") {
+        return { ok: true, hex: (n & 0xff).toString(16).padStart(2, "0") };
+      }
+      if (field.type === "uint16") {
+        const buf = new ArrayBuffer(2);
+        new DataView(buf).setUint16(0, n & 0xffff, true);
+        return { ok: true, hex: hexOf(buf) };
+      }
       const buf = new ArrayBuffer(4);
       new DataView(buf).setUint32(0, n >>> 0, true);
-      return [...new Uint8Array(buf)]
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join("");
+      return { ok: true, hex: hexOf(buf) };
+    }
+    case "float":
+    case "double": {
+      const n = Number(value);
+      const single = field.type === "float";
+      if (!Number.isFinite(single ? Math.fround(n) : n)) {
+        return {
+          ok: false,
+          error: `field '${field.name}': '${value}' is not a finite ${field.type}`,
+        };
+      }
+      const buf = new ArrayBuffer(single ? 4 : 8);
+      if (single) new DataView(buf).setFloat32(0, n, true);
+      else new DataView(buf).setFloat64(0, n, true);
+      return { ok: true, hex: hexOf(buf) };
     }
     default:
-      return (n & 0xff).toString(16).padStart(2, "0");
+      return {
+        ok: false,
+        error: `field '${field.name}' has type '${field.type}', which the form cannot encode; send this command in Raw Mode`,
+      };
   }
+}
+
+/** Encode a command's fields in catalog order into one hex payload, or
+ *  return the first field's refusal. Empty inputs encode as 0. */
+export function buildPayload(
+  fields: CommandFieldDef[],
+  values: Record<string, string>,
+): EncodedField {
+  let hex = "";
+  for (const field of fields) {
+    const encoded = encodeField(field, values[field.name] || "0");
+    if (!encoded.ok) return encoded;
+    hex += encoded.hex;
+  }
+  return { ok: true, hex };
 }
 
 /* ----------------------------- Page ----------------------------- */
@@ -140,6 +189,11 @@ export default function CommandingPage({
   const [selectedComponent, setSelectedComponent] = useState("");
   const [selectedCommand, setSelectedCommand] = useState("");
   const [fieldValues, setFieldValues] = useState<Record<string, string>>({});
+  // A form payload the encoder refused, for the command it belongs to
+  const [formError, setFormError] = useState<{
+    command: string;
+    message: string;
+  } | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [sending, setSending] = useState(false);
   const [showRaw, setShowRaw] = useState(false);
@@ -381,14 +435,22 @@ export default function CommandingPage({
     const cmd = comp.commands.find((c) => c.name === selectedCommand);
     if (!cmd) return;
 
-    // Encode fields to hex payload
-    let payload = "";
-    for (const field of cmd.fields) {
-      const val = fieldValues[field.name] || "0";
-      payload += encodeField(field, val);
+    const payload = buildPayload(cmd.fields, fieldValues);
+    if (!payload.ok) {
+      setFormError({
+        command: `${selectedComponent}/${cmd.name}`,
+        message: payload.error,
+      });
+      return;
     }
-
-    sendCommand(comp.fullUid, cmd.opcode, payload, selectedComponent, cmd.name);
+    setFormError(null);
+    sendCommand(
+      comp.fullUid,
+      cmd.opcode,
+      payload.hex,
+      selectedComponent,
+      cmd.name,
+    );
   };
 
   const currentComp = components[selectedComponent];
@@ -592,6 +654,16 @@ export default function CommandingPage({
           >
             {sending ? "Sending..." : "Send"}
           </button>
+          {formError &&
+            formError.command === `${selectedComponent}/${selectedCommand}` && (
+              <span
+                role="alert"
+                className="text-xs"
+                style={{ color: "var(--color-crit)" }}
+              >
+                Not sent: {formError.message}
+              </span>
+            )}
           {currentCmd && (
             <button
               onClick={toggleFavorite}
