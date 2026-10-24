@@ -76,6 +76,11 @@ architecture review; work before that is the v0.0.1 tag.
   instead of reading as disconnected moments later.
 - Quick commands generated with `payloadHex` send their payload
   instead of an empty one.
+- The command form encodes `float` and `double` fields as
+  little-endian IEEE 754 values instead of sending one byte, and
+  refuses a field type it cannot encode (a `raw[N]` field, for
+  example), naming the field and sending nothing; Raw Mode still sends
+  any payload.
 
 ## v0.2.0 - 2026-09-27
 

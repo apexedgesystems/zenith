@@ -420,10 +420,11 @@ generated bundle.
 An apex target that pushes no telemetry of its own can be polled
 instead: each `[[targets.poll]]` row reads one data block with INSPECT
 at `rate_hz` while the link is up and feeds it into telemetry as if
-the target had pushed it. `uid` is the component's fullUid (`0x` hex
-or decimal), `category` the block's (0 STATIC_PARAM .. 4 OUTPUT), and
-`rate_hz` at most 50 (default 5); polls share the command path with
-operators. A row that cannot run refuses to boot.
+the target had pushed it, decoded as the block of the category it
+asked for. `uid` is the component's fullUid (`0x` hex or decimal),
+`category` the block's (0 STATIC_PARAM .. 4 OUTPUT), and `rate_hz` at
+most 50 (default 5); polls share the command path with operators. A
+row that cannot run refuses to boot.
 
 ```toml
 [[targets.poll]]
