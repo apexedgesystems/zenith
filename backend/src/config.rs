@@ -403,12 +403,14 @@ fn default_health() -> Vec<HealthRule> {
         .collect()
 }
 
+/// Health keys of the apex error counters: the policy for a target
+/// that declares no list. Every key matches a field of the shipped apex
+/// dictionaries (a test holds the list to that).
 fn default_health_names() -> Vec<String> {
     [
-        "overruns",
-        "frameoverruns",
-        "watchdogwarnings",
-        "watchdogwarns",
+        "frameoverruncount",
+        "watchdogwarningcount",
+        "resyncdroppedticks",
         "totalperiodviolations",
         "violationsthistick",
         "totalskipcount",
@@ -664,6 +666,93 @@ mod tests {
         assert!(retired_key(&old)
             .unwrap()
             .contains("health_nonzero_bad was renamed"));
+    }
+
+    /// @test Every apex target the shipped configs declare (the dev
+    /// config.toml and the image's deploy/config.toml) reads the
+    /// executive's error counters as bad when nonzero: frame overruns,
+    /// watchdog warnings, and the ticks a clock-grid resync dropped
+    /// (zero unless the vehicle stalled). The apex targets declare no
+    /// health list, so the rules come from the default one.
+    #[test]
+    fn shipped_apex_targets_flag_the_executive_error_counters() {
+        let rules = [
+            "frameOverrunCount",
+            "watchdogWarningCount",
+            "resyncDroppedTicks",
+        ]
+        .map(|f| HealthCheck {
+            field: health_field_key(f),
+            op: "ne".into(),
+            value: 0.0,
+        });
+        let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        for file in ["config.toml", "deploy/config.toml"] {
+            let text = std::fs::read_to_string(repo.join(file)).unwrap();
+            let cfg: ServerConfig = toml::from_str(&text).unwrap();
+            let apex: Vec<&TargetSection> = cfg
+                .targets
+                .iter()
+                .filter(|t| t.protocol == "aproto-slip")
+                .collect();
+            assert!(!apex.is_empty(), "{file} declares no apex target");
+            for t in apex {
+                let checks = t.health_checks().unwrap();
+                for rule in &rules {
+                    assert!(
+                        checks.contains(rule),
+                        "{file}: {} does not flag {}",
+                        t.name,
+                        rule.field
+                    );
+                }
+            }
+        }
+    }
+
+    /// @test Every default health key matches at least one field in the
+    /// struct dictionaries of the shipped apex targets (config.toml's
+    /// aproto-slip targets, whose /data/targets paths are this
+    /// repository's targets/ as compose mounts it), so a default name
+    /// that matches nothing cannot sit in the list.
+    #[test]
+    fn default_health_keys_match_shipped_apex_dictionaries() {
+        let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let text = std::fs::read_to_string(repo.join("config.toml")).unwrap();
+        let cfg: ServerConfig = toml::from_str(&text).unwrap();
+        let mut fields = std::collections::HashSet::new();
+        for t in cfg.targets.iter().filter(|t| t.protocol == "aproto-slip") {
+            let dir = t
+                .structs_dir
+                .as_deref()
+                .expect("apex target names its structs_dir");
+            let dir = dir
+                .strip_prefix("/data/targets/")
+                .expect("structs_dir under /data/targets");
+            for entry in std::fs::read_dir(repo.join("targets").join(dir)).unwrap() {
+                let text = std::fs::read_to_string(entry.unwrap().path()).unwrap();
+                let dict: serde_json::Value = serde_json::from_str(&text).unwrap();
+                for st in dict["structs"]
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|m| m.values())
+                {
+                    for f in st["fields"].as_array().into_iter().flatten() {
+                        if let Some(name) = f["name"].as_str() {
+                            fields.insert(health_field_key(name));
+                        }
+                    }
+                }
+            }
+        }
+        let unmatched: Vec<String> = default_health_names()
+            .into_iter()
+            .filter(|k| !fields.contains(k))
+            .collect();
+        assert!(
+            unmatched.is_empty(),
+            "default health keys matching no field of a shipped apex dictionary: {unmatched:?}"
+        );
     }
 
     /// @test The retired udp_listen_port key refuses boot naming the

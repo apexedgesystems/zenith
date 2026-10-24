@@ -1526,17 +1526,17 @@ async fn update_params(
             })
             .collect();
         let hash = tprm::layout_hash(
-            dict_leaf_specs(&hdr_struct.fields)
-                .into_iter()
-                .chain(entry_offsets.iter().flat_map(|offs| {
-                    dict_leaf_specs(&ent_struct.fields)
+            tprm::dict_leaf_specs(&hdr_struct.fields).into_iter().chain(
+                entry_offsets.iter().flat_map(|offs| {
+                    tprm::dict_leaf_specs(&ent_struct.fields)
                         .into_iter()
                         .zip(offs.iter())
                         .map(|(mut leaf, &off)| {
                             leaf.offset = off;
                             leaf
                         })
-                })),
+                }),
+            ),
             total_size,
         );
 
@@ -1601,32 +1601,31 @@ async fn update_params(
             ));
         }
         // Producer-stated hash when the dictionary exports one -- that
-        // is the value the vehicle verifies. Recompute only for
-        // dictionaries predating the export, with a warning: the
-        // flattened-fields recompute predates string leaves and cannot
-        // be trusted once those appear.
+        // is the value the vehicle verifies. Otherwise recompute it from
+        // the leaves, under the same canonical rule (a test holds the
+        // recompute to every hash the shipped dictionaries export), and
+        // warn that the dictionary carries none.
         let hash = dict_hash.unwrap_or_else(|| {
             tracing::warn!(
                 "no layout_hash in dictionary for uid 0x{:06X}; recomputing from flattened fields",
                 full_uid
             );
-            tprm::layout_hash(dict_leaf_specs(&struct_fields), struct_size)
+            tprm::layout_hash(tprm::dict_leaf_specs(&struct_fields), struct_size)
         });
         (buf, hash)
     };
 
-    // Stamp the v3 prelude: the vehicle verifies magic, version, size,
-    // target uid, layout hash, and body CRC before the payload reaches
-    // a component, and rejects unstamped uploads. The layout hash came
-    // from the same dict fields that encoded the body (dict
-    // declaration order is template emission order). The dicts are
-    // flattened, so a template using explicitly-typed nested-struct
-    // containers would hash differently on the vehicle -- which
-    // rejects with a distinct layout-hash fault rather than
-    // misloading; the dict generator exporting the hash is accepted
-    // apex-side work (relay thread).
-    let stamped = tprm::stamp_v3(full_uid, payload_layout_hash, &binary)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("TPRM stamp failed: {}", e)))?;
+    // Stamp the payload prelude: the vehicle verifies magic, version,
+    // size, target uid, layout hash and body CRC before the payload
+    // reaches a component, and rejects unstamped uploads. The layout
+    // hash is the dictionary's exported one when it carries one, else
+    // a recompute over the same dict fields that encoded the body
+    // (dict declaration order is template emission order). The
+    // recompute covers flattened leaves only, so a template using
+    // explicitly typed nested-struct containers hashes differently on
+    // the vehicle, which refuses it as a layout mismatch rather than
+    // misloading.
+    let stamped = tprm::stamp_v4(full_uid, payload_layout_hash, &binary);
 
     // Upload and reload
     let detail = format!(
@@ -1694,7 +1693,7 @@ async fn update_params(
             // A RELOAD refusal carries the TprmPayloadCheck verdict in
             // the extra: decode it so the operator reads a named
             // reason, never a bare status number.
-            if resp.status == 5 && !resp.extra.is_empty() {
+            if resp.status == tprm::LOAD_FAILED && !resp.extra.is_empty() {
                 out["reload_verdict"] = serde_json::json!(tprm::payload_check_name(resp.extra[0]));
             }
             Ok(Json(out))
@@ -1717,7 +1716,7 @@ async fn update_params(
 
 /// The verify-before-apply pipeline for readback-capable targets.
 /// Returns the terminal RELOAD response plus a step-by-step report,
-/// or the failing step's response with the report explaining where
+/// or the stopping step's response with the report explaining where
 /// and why the pipeline stopped (active bytes untouched).
 async fn staged_update_flow(
     cli: &mut AprotoClient,
@@ -1731,7 +1730,19 @@ async fn staged_update_flow(
 
     // Our own prelude is the intent the vehicle must echo back. The
     // caller guarded the protocol: only the APROTO family stages TPRM.
-    let (sent_prelude, _) = tprm::parse_v3(stamped).expect("stamp_v3 output always parses");
+    let (sent_prelude, _) = tprm::parse_v4(stamped).expect("stamp_v4 output always parses");
+
+    // A stop is the stopping step's response named by its reason, and
+    // never reads as success: a step the vehicle answered with SUCCESS
+    // stops as LOAD_FAILED (nothing was loaded). The report carries
+    // the step's details, so the extra is dropped and no step's payload
+    // can read as a RELOAD verdict.
+    let stop = |step: aproto::AckResponse, reason: &str| aproto::AckResponse {
+        status: tprm::stop_status(step.status),
+        status_name: reason.to_string(),
+        extra: Vec::new(),
+        ..step
+    };
 
     // 1. Stage (no reload).
     let up = cli.stage_tprm(full_uid, stamped).await?;
@@ -1742,8 +1753,9 @@ async fn staged_update_flow(
         ));
     }
 
-    // 2. Digest cross-check: the staged bank must declare exactly the
-    // identity we sent (uid, layout hash, payload CRC).
+    // 2. Digest cross-check: the row declaring our uid must declare
+    // exactly the identity we sent (layout hash, payload CRC) under an
+    // OK header verdict.
     let rb = cli
         .send_command(0x000000, tprm::OP_READBACK_TPRM, &[])
         .await?;
@@ -1751,31 +1763,29 @@ async fn staged_update_flow(
         Ok(page) => page.rows.into_iter().find(|r| r.full_uid == full_uid),
         Err(_) => None,
     };
-    let row_ok = row.as_ref().is_some_and(|r| {
-        r.layout_hash == sent_prelude.layout_hash
-            && r.payload_crc == sent_prelude.payload_crc
-            && r.verdict == 0
-    });
-    if !row_ok {
-        let report = serde_json::json!({
+    let staged = tprm::judge_staged_row(row.as_ref(), &sent_prelude);
+    let readback_report = |outcome: &str| {
+        serde_json::json!({
             "step": "readback",
-            "outcome": "staged bytes do not match intent",
+            "outcome": outcome,
             "sent_layout_hash": format!("0x{:08X}", sent_prelude.layout_hash),
             "sent_payload_crc": format!("0x{:08X}", sent_prelude.payload_crc),
             "staged_row": row,
-        });
-        // Shape the refusal as a NAK-like response so callers get one
-        // uniform (response, report) surface for every stop point.
-        let refused = aproto::AckResponse {
-            cmd_opcode: tprm::OP_READBACK_TPRM,
-            cmd_sequence: rb.cmd_sequence,
-            status: rb.status,
-            status_name: "READBACK_MISMATCH".to_string(),
-            stage: rb.stage,
-            queued: rb.queued,
-            extra: Vec::new(),
-        };
-        return Ok((refused, report));
+        })
+    };
+    match staged {
+        tprm::StagedRow::Refused(verdict) => {
+            let report = readback_report("vehicle refused the staged prelude");
+            return Ok((stop(rb, tprm::payload_check_name(verdict)), report));
+        }
+        tprm::StagedRow::Differs => {
+            let report = readback_report("staged bytes do not match intent");
+            return Ok((stop(rb, "READBACK_MISMATCH"), report));
+        }
+        // An unattributed file goes on to VERIFY, which addresses the
+        // staged file by uid and names a fault the digest could not;
+        // it never reaches apply (below).
+        tprm::StagedRow::Matches | tprm::StagedRow::Unattributed => {}
     }
 
     // 3. Vehicle-side verify (full ingest checks, no apply).
@@ -1785,17 +1795,20 @@ async fn staged_update_flow(
     let verdict = tprm::parse_verify_verdict(&vr.extra).ok();
     let verdict_ok = vr.status == 0 && verdict.as_ref().is_some_and(|v| v.ok);
     if !verdict_ok {
+        let reason = verdict
+            .as_ref()
+            .map(|v| v.verdict_name.to_string())
+            .unwrap_or_else(|| vr.status_name.clone());
         let report = serde_json::json!({
             "step": "verify",
             "outcome": "vehicle verify refused",
             "verdict": verdict,
         });
-        let mut refused = vr;
-        refused.status_name = verdict
-            .as_ref()
-            .map(|v| v.verdict_name.to_string())
-            .unwrap_or_else(|| refused.status_name.clone());
-        return Ok((refused, report));
+        return Ok((stop(vr, &reason), report));
+    }
+    if staged == tprm::StagedRow::Unattributed {
+        let report = readback_report("no staged row declares this uid");
+        return Ok((stop(rb, "READBACK_MISMATCH"), report));
     }
 
     // 4. Apply.
@@ -2024,35 +2037,6 @@ fn constraint_violations(
         }
     }
     violations
-}
-
-/// LeafSpec views over dict fields, shared by flat and variable-length
-/// layout hashing. Dict declaration order is template emission order.
-fn dict_leaf_specs(fields: &[crate::core::config_manager::FieldDef]) -> Vec<tprm::LeafSpec<'_>> {
-    fields
-        .iter()
-        .map(|f| tprm::LeafSpec {
-            name: &f.name,
-            field_type: &f.field_type,
-            size: f.size,
-            offset: f.offset,
-            array: if f.field_type == "array" {
-                let count = f
-                    .dims
-                    .as_ref()
-                    .map(|d| d.iter().product::<usize>())
-                    .unwrap_or(1)
-                    .max(1);
-                Some((
-                    f.element_type.as_deref().unwrap_or("uint"),
-                    f.size / count,
-                    count,
-                ))
-            } else {
-                None
-            },
-        })
-        .collect()
 }
 
 /// Encode one edited field into the payload buffer. Returns false when
