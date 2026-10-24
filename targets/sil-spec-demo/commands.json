@@ -590,9 +590,9 @@
           "fields": []
         },
         {
-          "name": "GET_HEALTH",
+          "name": "HEALTH_SAMPLE",
           "opcode": "0x0100",
-          "desc": "Component health telemetry",
+          "desc": "Health Sample",
           "fields": []
         }
       ]

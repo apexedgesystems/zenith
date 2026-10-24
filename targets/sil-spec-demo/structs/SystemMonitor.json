@@ -80,8 +80,8 @@
         }
       ],
       "spec_defined": true,
-      "layout_hash": "0xA3D00836",
-      "canonical_spec": "sampleCount:uint:4;warnCount:uint:4;critCount:uint:4;monitoredCoreCount:uint:1;pad0:uint:1;cpuTempC:int:2;coreLoad:array:64;[float:4x16]ramUsedPercent:float:4;fdCount:uint:4;"
+      "layout_hash": "0x5A677FA1",
+      "canonical_spec": "sampleCount:uint:4:0;warnCount:uint:4:4;critCount:uint:4:8;monitoredCoreCount:uint:1:12;pad0:uint:1:13;cpuTempC:int:2:14;coreLoad:array:64:16;[float:4x16]ramUsedPercent:float:4:80;fdCount:uint:4:84;|size:88"
     },
     "SystemMonitorTunableParams": {
       "category": "TUNABLE_PARAM",
@@ -92,218 +92,251 @@
           "type": "float",
           "offset": 0,
           "size": 4,
-          "value": "1.0F"
+          "value": 1.0,
+          "doc": "Telemetry rate (Hz)."
         },
         {
           "name": "cpuEnabled",
           "type": "uint",
           "offset": 4,
           "size": 1,
-          "value": 1
+          "value": 1,
+          "doc": "CPU domain: 1 = enabled, 0 = disabled."
         },
         {
           "name": "monitoredCoreCount",
           "type": "uint",
           "offset": 5,
           "size": 1,
-          "value": 0
+          "value": 0,
+          "doc": "Number of valid entries in monitoredCores."
         },
         {
           "name": "monitoredCores",
           "type": "array",
+          "element_type": "uint",
+          "dims": [16],
           "offset": 6,
           "size": 32,
-          "value": [],
-          "element_type": "uint",
-          "dims": [16]
+          "value": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+          "doc": "Core indices to monitor."
         },
         {
           "name": "cpuLoadWarnPercent",
           "type": "float",
           "offset": 38,
           "size": 4,
-          "value": "80.0F"
+          "value": 80.0,
+          "doc": "Per-core load warning threshold."
         },
         {
           "name": "cpuLoadCritPercent",
           "type": "float",
           "offset": 42,
           "size": 4,
-          "value": "95.0F"
+          "value": 95.0,
+          "doc": "Per-core load critical threshold."
         },
         {
           "name": "cpuTempWarnC",
           "type": "int",
           "offset": 46,
           "size": 2,
-          "value": 75
+          "value": 75,
+          "doc": "CPU temperature warning (Celsius)."
         },
         {
           "name": "cpuTempCritC",
           "type": "int",
           "offset": 48,
           "size": 2,
-          "value": 85
+          "value": 85,
+          "doc": "CPU temperature critical (Celsius)."
         },
         {
           "name": "cpuRtThrottleWarn",
           "type": "uint",
           "offset": 50,
           "size": 4,
-          "value": 1
+          "value": 1,
+          "doc": "RT throttle delta warning threshold."
         },
         {
           "name": "cpuRtThrottleCrit",
           "type": "uint",
           "offset": 54,
           "size": 4,
-          "value": 10
+          "value": 10,
+          "doc": "RT throttle delta critical threshold."
         },
         {
           "name": "memEnabled",
           "type": "uint",
           "offset": 58,
           "size": 1,
-          "value": 1
+          "value": 1,
+          "doc": "Memory domain: 1 = enabled, 0 = disabled."
         },
         {
           "name": "memPad",
           "type": "array",
+          "element_type": "uint",
+          "dims": [3],
           "offset": 59,
           "size": 3,
-          "value": [],
-          "element_type": "uint",
-          "dims": [3]
+          "value": [0, 0, 0],
+          "doc": "Explicit padding."
         },
         {
           "name": "memRamWarnPercent",
           "type": "float",
           "offset": 62,
           "size": 4,
-          "value": "80.0F"
+          "value": 80.0,
+          "doc": "RAM utilization warning threshold."
         },
         {
           "name": "memRamCritPercent",
           "type": "float",
           "offset": 66,
           "size": 4,
-          "value": "95.0F"
+          "value": 95.0,
+          "doc": "RAM utilization critical threshold."
         },
         {
           "name": "memSwapWarnBytes",
           "type": "uint",
           "offset": 70,
           "size": 8,
-          "value": 1
+          "value": 1,
+          "doc": "Swap usage warning threshold (bytes)."
         },
         {
           "name": "memSwapCritBytes",
           "type": "uint",
           "offset": 78,
           "size": 8,
-          "value": 1
+          "value": 1,
+          "doc": "Swap usage critical threshold (bytes)."
         },
         {
           "name": "memFdWarnPercent",
           "type": "float",
           "offset": 86,
           "size": 4,
-          "value": "70.0F"
+          "value": 70.0,
+          "doc": "FD utilization warning threshold."
         },
         {
           "name": "memFdCritPercent",
           "type": "float",
           "offset": 90,
           "size": 4,
-          "value": "90.0F"
+          "value": 90.0,
+          "doc": "FD utilization critical threshold."
         },
         {
           "name": "gpuEnabled",
           "type": "uint",
           "offset": 94,
           "size": 1,
-          "value": 0
+          "value": 0,
+          "doc": "GPU domain: 1 = enabled, 0 = disabled."
         },
         {
           "name": "gpuDeviceIndex",
           "type": "int",
           "offset": 95,
           "size": 1,
-          "value": 0
+          "value": 0,
+          "doc": "GPU device index."
         },
         {
           "name": "gpuTempWarnC",
           "type": "int",
           "offset": 96,
           "size": 2,
-          "value": 75
+          "value": 75,
+          "doc": "GPU temperature warning (Celsius)."
         },
         {
           "name": "gpuTempCritC",
           "type": "int",
           "offset": 98,
           "size": 2,
-          "value": 85
+          "value": 85,
+          "doc": "GPU temperature critical (Celsius)."
         },
         {
           "name": "gpuPad",
           "type": "uint",
           "offset": 100,
           "size": 2,
-          "value": 0
+          "value": 0,
+          "doc": "Explicit padding."
         },
         {
           "name": "gpuUtilWarnPercent",
           "type": "float",
           "offset": 102,
           "size": 4,
-          "value": "90.0F"
+          "value": 90.0,
+          "doc": "GPU utilization warning threshold."
         },
         {
           "name": "gpuUtilCritPercent",
           "type": "float",
           "offset": 106,
           "size": 4,
-          "value": "98.0F"
+          "value": 98.0,
+          "doc": "GPU utilization critical threshold."
         },
         {
           "name": "gpuMemWarnPercent",
           "type": "float",
           "offset": 110,
           "size": 4,
-          "value": "80.0F"
+          "value": 80.0,
+          "doc": "GPU memory warning threshold."
         },
         {
           "name": "gpuMemCritPercent",
           "type": "float",
           "offset": 114,
           "size": 4,
-          "value": "95.0F"
+          "value": 95.0,
+          "doc": "GPU memory critical threshold."
         },
         {
           "name": "gpuThrottleWarnOnAny",
           "type": "uint",
           "offset": 118,
           "size": 1,
-          "value": 1
+          "value": 1,
+          "doc": "1 = warn on any GPU throttle."
         },
         {
           "name": "gpuPad2",
           "type": "array",
+          "element_type": "uint",
+          "dims": [3],
           "offset": 119,
           "size": 3,
-          "value": [],
-          "element_type": "uint",
-          "dims": [3]
+          "value": [0, 0, 0],
+          "doc": "Explicit padding."
         }
-      ]
+      ],
+      "spec_defined": true,
+      "layout_hash": "0xD9C53260",
+      "canonical_spec": "sampleRateHz:float:4:0;cpuEnabled:uint:1:4;monitoredCoreCount:uint:1:5;monitoredCores:array:32:6;[uint:2x16]cpuLoadWarnPercent:float:4:38;cpuLoadCritPercent:float:4:42;cpuTempWarnC:int:2:46;cpuTempCritC:int:2:48;cpuRtThrottleWarn:uint:4:50;cpuRtThrottleCrit:uint:4:54;memEnabled:uint:1:58;memPad:array:3:59;[uint:1x3]memRamWarnPercent:float:4:62;memRamCritPercent:float:4:66;memSwapWarnBytes:uint:8:70;memSwapCritBytes:uint:8:78;memFdWarnPercent:float:4:86;memFdCritPercent:float:4:90;gpuEnabled:uint:1:94;gpuDeviceIndex:int:1:95;gpuTempWarnC:int:2:96;gpuTempCritC:int:2:98;gpuPad:uint:2:100;gpuUtilWarnPercent:float:4:102;gpuUtilCritPercent:float:4:106;gpuMemWarnPercent:float:4:110;gpuMemCritPercent:float:4:114;gpuThrottleWarnOnAny:uint:1:118;gpuPad2:array:3:119;[uint:1x3]|size:122"
     }
   },
   "enums": {
     "SysMonTlmOpcode": {
-      "underlying_type": "int",
-      "values": {},
-      "_warning": "Enum 'SysMonTlmOpcode' not found in headers"
+      "underlying_type": "uint16_t",
+      "values": {
+        "HEALTH_SAMPLE": 256
+      }
     }
   }
 }

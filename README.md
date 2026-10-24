@@ -157,7 +157,9 @@ or later require it, and earlier ones refuse it. The byte-level
 contract lives in `compat/tprm/` -- a deliberate copy of the
 producing repo's golden vectors, taken from apex_csf 5bda98c; the
 backend conformance suite fails CI on any divergence, and the copy's
-README documents the refresh procedure.
+README documents the refresh procedure. The contract and the demo
+target directories under `targets/` were proven against apex_csf
+d8d003c.
 
 ## Refreshing a Target Directory
 

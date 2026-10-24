@@ -37,6 +37,9 @@ architecture review; work before that is the v0.0.1 tag.
 
 - A TPRM upload is no longer limited to a 64 KiB payload: the v4
   prelude carries a 64-bit size.
+- The shipped demo target directories are regenerated from apex_csf
+  d8d003c; the command console's catalog lists SystemMonitor's 0x0100
+  command as HEALTH_SAMPLE, the vehicle's name for it.
 - The session cookie is Secure by default: serve the console over
   HTTPS (see the README's remote-deployment steps) or set
   `[auth] cookie_secure = false` on a trusted network.
