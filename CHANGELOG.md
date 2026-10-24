@@ -63,6 +63,10 @@ architecture review; work before that is the v0.0.1 tag.
 
 ### Fixed
 
+- A tunable update to a nested struct whose dictionary exports no
+  layout hash carries the hash the vehicle verifies: the recompute
+  hashes each nested leaf under its own name, as the producer's
+  canonical form does.
 - A tunable update that a readback-capable vehicle refuses before
   applying it reads as refused, in the console and in the audit log,
   under the vehicle's reason (for example BAD_MAGIC or

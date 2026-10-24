@@ -1526,17 +1526,17 @@ async fn update_params(
             })
             .collect();
         let hash = tprm::layout_hash(
-            dict_leaf_specs(&hdr_struct.fields)
-                .into_iter()
-                .chain(entry_offsets.iter().flat_map(|offs| {
-                    dict_leaf_specs(&ent_struct.fields)
+            tprm::dict_leaf_specs(&hdr_struct.fields).into_iter().chain(
+                entry_offsets.iter().flat_map(|offs| {
+                    tprm::dict_leaf_specs(&ent_struct.fields)
                         .into_iter()
                         .zip(offs.iter())
                         .map(|(mut leaf, &off)| {
                             leaf.offset = off;
                             leaf
                         })
-                })),
+                }),
+            ),
             total_size,
         );
 
@@ -1601,16 +1601,16 @@ async fn update_params(
             ));
         }
         // Producer-stated hash when the dictionary exports one -- that
-        // is the value the vehicle verifies. Recompute only for
-        // dictionaries predating the export, with a warning: the
-        // flattened-fields recompute predates string leaves and cannot
-        // be trusted once those appear.
+        // is the value the vehicle verifies. Otherwise recompute it from
+        // the leaves, under the same canonical rule (a test holds the
+        // recompute to every hash the shipped dictionaries export), and
+        // warn that the dictionary carries none.
         let hash = dict_hash.unwrap_or_else(|| {
             tracing::warn!(
                 "no layout_hash in dictionary for uid 0x{:06X}; recomputing from flattened fields",
                 full_uid
             );
-            tprm::layout_hash(dict_leaf_specs(&struct_fields), struct_size)
+            tprm::layout_hash(tprm::dict_leaf_specs(&struct_fields), struct_size)
         });
         (buf, hash)
     };
@@ -2037,35 +2037,6 @@ fn constraint_violations(
         }
     }
     violations
-}
-
-/// LeafSpec views over dict fields, shared by flat and variable-length
-/// layout hashing. Dict declaration order is template emission order.
-fn dict_leaf_specs(fields: &[crate::core::config_manager::FieldDef]) -> Vec<tprm::LeafSpec<'_>> {
-    fields
-        .iter()
-        .map(|f| tprm::LeafSpec {
-            name: &f.name,
-            field_type: &f.field_type,
-            size: f.size,
-            offset: f.offset,
-            array: if f.field_type == "array" {
-                let count = f
-                    .dims
-                    .as_ref()
-                    .map(|d| d.iter().product::<usize>())
-                    .unwrap_or(1)
-                    .max(1);
-                Some((
-                    f.element_type.as_deref().unwrap_or("uint"),
-                    f.size / count,
-                    count,
-                ))
-            } else {
-                None
-            },
-        })
-        .collect()
 }
 
 /// Encode one edited field into the payload buffer. Returns false when

@@ -133,7 +133,7 @@ ELF ident) decode correctly with zero configuration.
 | Frontend      | React 19, TypeScript strict, Canvas API                                                    |
 | Storage       | SQLite (WAL mode) with read connection pool (1 writer + N readers)                         |
 | Protocol      | APROTO over TCP + SLIP framing                                                             |
-| Tests         | `cargo test --lib` (171 unit tests) + Vitest with React Testing Library (107 unit tests)   |
+| Tests         | `cargo test --lib` (173 unit tests) + Vitest with React Testing Library (107 unit tests)   |
 | Benches       | criterion + pprof flamegraphs                                                              |
 | Auth          | Console sign-in with server-side sessions; JWT bearer tokens for API clients (default off) |
 | Rate limiting | Per-IP token bucket on POST endpoints (when auth is on)                                    |
@@ -173,6 +173,10 @@ make apex-data-db && make zenith-target APP=MyApp
 # in zenith
 rm -rf targets/<name> && cp -r <apex>/build/*/zenith_targets/MyApp targets/<name>
 ```
+
+The committed target files are prettier-formatted, so run `make format`
+after the copy; raw generator output fails `make format-check`
+otherwise.
 
 On the next startup zenith re-syncs config-seeded layouts to the new
 file (stale ones removed, changed ones updated) and leaves DB-saved
@@ -289,7 +293,7 @@ make run
 | `make stop`          | Stop the running container                                                                     |
 | `make dev`           | Build + run in foreground (logs to stdout)                                                     |
 | `make test`          | Run **both** backend and frontend test suites                                                  |
-| `make test-backend`  | Backend only: `cargo test --lib` (currently 171 unit tests)                                    |
+| `make test-backend`  | Backend only: `cargo test --lib` (currently 173 unit tests)                                    |
 | `make test-frontend` | Frontend only: `vitest run` (currently 107 unit tests)                                         |
 | `make bench`         | Run criterion benches (`protocol`, `storage`, `decoder`)                                       |
 | `make format`        | Run rustfmt across the backend                                                                 |

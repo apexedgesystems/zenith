@@ -33,6 +33,8 @@
 
 use std::ops::Range;
 
+use crate::core::config_manager::{leaf_name, FieldDef};
+
 /// Prelude magic bytes.
 pub const MAGIC: &[u8; 4] = b"APV4";
 /// Prelude format version.
@@ -217,6 +219,40 @@ pub fn parse_v4(data: &[u8]) -> Result<(PreludeFields, &[u8]), TprmError> {
         return Err(TprmError::BadCrc);
     }
     Ok((fields, body))
+}
+
+/* ----------------------------- Dictionary layouts ----------------------------- */
+
+/// LeafSpec views over a dictionary struct's leaves, in declaration
+/// (template emission) order, as `config_manager::expanded_fields`
+/// lays them out. A nested leaf hashes under its own name: the
+/// canonical spec inlines a nested field's leaves at their absolute
+/// offsets, once per instance, with no row for the nested field.
+pub fn dict_leaf_specs(fields: &[FieldDef]) -> Vec<LeafSpec<'_>> {
+    fields
+        .iter()
+        .map(|f| LeafSpec {
+            name: leaf_name(&f.name),
+            field_type: &f.field_type,
+            size: f.size,
+            offset: f.offset,
+            array: if f.field_type == "array" {
+                let count = f
+                    .dims
+                    .as_ref()
+                    .map(|d| d.iter().product::<usize>())
+                    .unwrap_or(1)
+                    .max(1);
+                Some((
+                    f.element_type.as_deref().unwrap_or("uint"),
+                    f.size / count,
+                    count,
+                ))
+            } else {
+                None
+            },
+        })
+        .collect()
 }
 
 /* ----------------------------- READBACK / VERIFY ----------------------------- */
@@ -822,5 +858,61 @@ mod tests {
         assert_eq!(stop_status(0), LOAD_FAILED);
         assert_eq!(stop_status(4), 4);
         assert_eq!(stop_status(LOAD_FAILED), LOAD_FAILED);
+    }
+
+    /// @test For every struct that exports a layout hash in the struct
+    /// dictionaries of config.toml's targets, the fallback recompute
+    /// (the struct's fields expanded to leaves, then dict_leaf_specs)
+    /// equals the exported hash. A nested field inlines its fragment's
+    /// leaves under their own names, once per instance, with no row of
+    /// its own; the shipped dictionaries carry such structs, so the
+    /// rule is exercised, not assumed.
+    #[test]
+    fn dictionary_recompute_matches_exported_layout_hashes() {
+        use crate::core::config_manager::{expanded_fields, ComponentDict};
+        let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
+        let text = std::fs::read_to_string(repo.join("config.toml")).unwrap();
+        let cfg: crate::config::ServerConfig = toml::from_str(&text).unwrap();
+        let mut mismatches = Vec::new();
+        let mut nested_checked = 0;
+        for dir in cfg.targets.iter().filter_map(|t| t.structs_dir.as_deref()) {
+            let dir = dir
+                .strip_prefix("/data/targets/")
+                .expect("structs_dir under /data/targets");
+            let mut files: Vec<PathBuf> = std::fs::read_dir(repo.join("targets").join(dir))
+                .unwrap()
+                .map(|e| e.unwrap().path())
+                .collect();
+            files.sort();
+            for path in files {
+                let text = std::fs::read_to_string(&path).unwrap();
+                let dict: ComponentDict = serde_json::from_str(&text).unwrap();
+                for (name, sdef) in &dict.structs {
+                    let Some(want) = sdef.layout_hash_u32() else {
+                        continue;
+                    };
+                    let leaves = expanded_fields(&dict, &sdef.fields, 0);
+                    let got = layout_hash(dict_leaf_specs(&leaves), sdef.size);
+                    if sdef.fields.iter().any(|f| f.field_type == "nested") {
+                        nested_checked += 1;
+                    }
+                    if got != want {
+                        mismatches.push(format!(
+                            "{dir}/{}: {name} exports 0x{want:08X}, recompute 0x{got:08X}",
+                            path.file_name().unwrap().to_string_lossy()
+                        ));
+                    }
+                }
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "the recompute disagrees with exported layout hashes:\n{}",
+            mismatches.join("\n")
+        );
+        assert!(
+            nested_checked > 0,
+            "no exported hash covers a struct with a nested field"
+        );
     }
 }
