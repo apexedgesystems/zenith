@@ -32,9 +32,18 @@ pub fn spawn_polls(
         .iter()
         .filter_map(|b| {
             let uid = b.full_uid()?;
+            // Boot refuses a row without a usable period; one that gets
+            // here anyway is skipped, never converted.
+            let Some(period) = b.period() else {
+                tracing::error!(
+                    "poll row {} has no usable timer period (rate_hz {:e}); not started",
+                    b.uid,
+                    b.rate_hz
+                );
+                return None;
+            };
             let category = b.category;
             let data_category = DataCategory::from_index(category);
-            let period = std::time::Duration::from_secs_f64(1.0 / b.rate_hz);
             let client = client.clone();
             let push_tx = push_tx.clone();
             Some(tokio::spawn(async move {
@@ -189,5 +198,29 @@ mod tests {
                 ("SpecChannel.sequence".to_string(), 7.0)
             ]
         );
+    }
+
+    /// @test A row whose rate gives no usable period is skipped, not
+    /// converted: the conversion site takes the validated period, so an
+    /// unvalidated 1e-300 Hz row starts no task (and does not panic)
+    /// while a valid row beside it still starts.
+    #[tokio::test]
+    async fn spawn_polls_skips_a_row_without_a_usable_period() {
+        let (push_tx, _rx) = broadcast::channel(4);
+        let link = Arc::new(Mutex::new(ProtocolLink::Aproto(AprotoClient::new(
+            push_tx.clone(),
+        ))));
+        let row = |rate_hz: f64| PollBlock {
+            uid: "0x00DE00".to_string(),
+            category: 4,
+            rate_hz,
+        };
+
+        let handles = spawn_polls(&[row(1e-300), row(5.0)], link, push_tx);
+
+        assert_eq!(handles.len(), 1, "only the valid row starts a task");
+        for h in &handles {
+            h.abort();
+        }
     }
 }

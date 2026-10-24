@@ -282,6 +282,11 @@ pub struct PollBlock {
 }
 
 impl PollBlock {
+    /// The timer period this row's rate gives; see [`poll_period`].
+    pub fn period(&self) -> Option<std::time::Duration> {
+        poll_period(self.rate_hz)
+    }
+
     pub fn full_uid(&self) -> Option<u32> {
         let t = self.uid.trim();
         match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
@@ -298,6 +303,23 @@ fn default_poll_hz() -> f64 {
 /// Upper bound on a polled block's rate: every read is a command round
 /// trip sharing the link with operator commands.
 pub const MAX_POLL_HZ: f64 = 50.0;
+
+/// The timer period a poll rate gives: the reciprocal of `rate_hz`,
+/// when the rate is in (0, MAX_POLL_HZ] and the period is one the poll
+/// timer can use -- a finite, non-zero Duration that the clock can hold
+/// one period past the current instant (the timer's missed-tick path
+/// adds the period to now). None otherwise.
+pub fn poll_period(rate_hz: f64) -> Option<std::time::Duration> {
+    if !(rate_hz > 0.0 && rate_hz <= MAX_POLL_HZ) {
+        return None;
+    }
+    let period = std::time::Duration::try_from_secs_f64(1.0 / rate_hz).ok()?;
+    if period.is_zero() {
+        return None;
+    }
+    std::time::Instant::now().checked_add(period)?;
+    Some(period)
+}
 
 /// The first target whose poll declaration cannot run, with the reason.
 /// Polling reads blocks through the APROTO command path, so it is a
@@ -333,6 +355,15 @@ pub fn invalid_poll(targets: &[TargetSection]) -> Option<(&str, String)> {
                 return Some((
                     t.name.as_str(),
                     format!("poll rate_hz {} is outside (0, {}]", b.rate_hz, MAX_POLL_HZ),
+                ));
+            }
+            if b.period().is_none() {
+                return Some((
+                    t.name.as_str(),
+                    format!(
+                        "poll rate_hz {:e} gives no period the poll timer can use",
+                        b.rate_hz
+                    ),
                 ));
             }
         }
@@ -720,6 +751,58 @@ pub fn apply_env_overrides(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn aproto_poll_target(rate_hz: f64) -> TargetSection {
+        let mut t = target("rover", "tcp", None);
+        t.protocol = "aproto-slip".to_string();
+        t.poll = vec![PollBlock {
+            uid: "0x00DE00".to_string(),
+            category: 4,
+            rate_hz,
+        }];
+        t
+    }
+
+    /// @test A positive rate whose period the poll timer cannot use is
+    /// refused at load, naming the target and the rate: 1e-300 and the
+    /// smallest positive double (the reciprocal overflows Duration), and
+    /// 1e-19 (a Duration, but too long for the clock to hold one period
+    /// past now).
+    #[test]
+    fn poll_rate_without_a_usable_period_is_refused() {
+        for (rate, shown) in [
+            (1e-300, "1e-300"),
+            (f64::MIN_POSITIVE, "2.2250738585072014e-308"),
+            (1e-19, "1e-19"),
+        ] {
+            let targets = [aproto_poll_target(rate)];
+            let (name, reason) = invalid_poll(&targets).expect("must refuse");
+            assert_eq!(name, "rover");
+            assert!(
+                reason.contains(shown) && reason.contains("period"),
+                "{reason}"
+            );
+            assert!(targets[0].poll[0].period().is_none());
+        }
+    }
+
+    /// @test The published ceiling and tiny positive rates whose period
+    /// the timer can use are accepted, and the period a row converts to
+    /// is the validated one: 50 Hz gives 20 ms, 5 Hz 200 ms, 2^-30 Hz
+    /// 2^30 seconds and 2^-60 Hz 2^60 seconds (exact reciprocals).
+    #[test]
+    fn poll_rates_with_a_usable_period_are_accepted() {
+        for (rate, period) in [
+            (50.0, std::time::Duration::from_millis(20)),
+            (5.0, std::time::Duration::from_millis(200)),
+            (2f64.powi(-30), std::time::Duration::from_secs(1 << 30)),
+            (2f64.powi(-60), std::time::Duration::from_secs(1 << 60)),
+        ] {
+            let targets = [aproto_poll_target(rate)];
+            assert!(invalid_poll(&targets).is_none(), "rate {rate:e} refused");
+            assert_eq!(targets[0].poll[0].period(), Some(period), "rate {rate:e}");
+        }
+    }
 
     /// @test Poll declarations refuse boot unless they can run: only on
     /// aproto-slip, with a numeric uid, a real category, and a rate in
