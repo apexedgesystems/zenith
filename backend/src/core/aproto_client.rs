@@ -57,15 +57,19 @@ pub struct AprotoClient {
     push_tlm_tx: broadcast::Sender<PushTelemetryPacket>,
     reader_handle: Option<tokio::task::JoinHandle<()>>,
     writer_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Tasks a disconnect aborted, awaited by the next connect before
+    /// it publishes its session.
+    retired: Vec<tokio::task::JoinHandle<()>>,
     seq: u16,
     command_timeout: Duration,
     /// Optional pipeline counters; when set, every command round trip
     /// records send/error/timeout counts and successful-trip latency.
     metrics: Option<Arc<crate::core::metrics::TargetMetrics>>,
     connected: Arc<AtomicBool>,
-    /// Generation counter: increments on each connect. Reader tasks only
-    /// clear `connected` if their generation matches (prevents stale tasks
-    /// from clearing a newer connection's flag).
+    /// Generation counter: increments on each connect, after the previous
+    /// session's tasks have finished. Reader and writer clear `connected`
+    /// only while their generation is current, a second line behind that
+    /// retirement.
     generation: Arc<AtomicU64>,
 }
 
@@ -79,6 +83,7 @@ impl AprotoClient {
             push_tlm_tx,
             reader_handle: None,
             writer_handle: None,
+            retired: Vec::new(),
             seq: 0,
             command_timeout: Duration::from_secs(5),
             metrics: None,
@@ -115,14 +120,18 @@ impl AprotoClient {
         // Command callers -> writer: outbound packets
         let (cmd_tx, cmd_rx) = mpsc::channel::<CommandRequest>(64);
 
-        // The previous connection's tasks must not outlive it: its
-        // writer is parked on the command channel replaced below, and
-        // wakes to run its exit path the moment that channel drops.
-        if let Some(h) = self.reader_handle.take() {
+        // Retire the previous session before publishing this one: abort
+        // its reader and writer (and any a disconnect aborted) and wait
+        // until each has finished, so none of them can run -- and clear
+        // the connected flag -- after the new generation is visible. A
+        // task cancelled by the abort resolves with a cancellation
+        // error, which is the expected outcome.
+        let mut previous = std::mem::take(&mut self.retired);
+        previous.extend(self.reader_handle.take());
+        previous.extend(self.writer_handle.take());
+        for h in previous {
             h.abort();
-        }
-        if let Some(h) = self.writer_handle.take() {
-            h.abort();
+            let _ = h.await;
         }
 
         let connected = self.connected.clone();
@@ -257,15 +266,18 @@ impl AprotoClient {
     }
 
     /// Tear down the connection: clear the connected flag, drop the
-    /// command sender, and abort the reader and writer tasks.
+    /// command sender, and abort the reader and writer tasks. The
+    /// aborted tasks are kept for the next connect, which waits for
+    /// them to finish before it publishes its session.
     pub fn disconnect(&mut self) {
         self.connected.store(false, Ordering::Release);
         self.cmd_tx = None;
-        if let Some(h) = self.reader_handle.take() {
+        for h in [self.reader_handle.take(), self.writer_handle.take()]
+            .into_iter()
+            .flatten()
+        {
             h.abort();
-        }
-        if let Some(h) = self.writer_handle.take() {
-            h.abort();
+            self.retired.push(h);
         }
         tracing::info!("Disconnected");
     }
@@ -965,5 +977,106 @@ mod tests {
     fn crc32c_known_vectors() {
         assert_eq!(crc32c(b""), 0x0000_0000);
         assert_eq!(crc32c(b"123456789"), 0xE306_9283);
+    }
+
+    /// A loopback peer that accepts one connection and holds it open
+    /// until the test ends.
+    async fn holding_peer() -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (_sock, _) = listener.accept().await.unwrap();
+            std::future::pending::<()>().await;
+        });
+        addr
+    }
+
+    /// The running session's reader and writer, as handles that report
+    /// whether each task has finished.
+    fn session_tasks(client: &AprotoClient) -> [tokio::task::AbortHandle; 2] {
+        [
+            client.reader_handle.as_ref().unwrap().abort_handle(),
+            client.writer_handle.as_ref().unwrap().abort_handle(),
+        ]
+    }
+
+    /// @test A reconnect retires the previous session before it returns,
+    /// on a multi-worker runtime: the old reader and writer have both
+    /// finished by the time connect hands back, so neither can run --
+    /// or clear the connected flag -- once the new session is published.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn reconnect_finishes_previous_tasks_before_returning() {
+        let (push_tx, _) = broadcast::channel(16);
+        let mut client = AprotoClient::new(push_tx);
+        let first = holding_peer().await;
+        client.connect("127.0.0.1", first.port()).await.unwrap();
+        let old = session_tasks(&client);
+
+        let second = holding_peer().await;
+        client.connect("127.0.0.1", second.port()).await.unwrap();
+
+        assert!(
+            old[0].is_finished(),
+            "old reader still running after connect"
+        );
+        assert!(
+            old[1].is_finished(),
+            "old writer still running after connect"
+        );
+        assert!(client.is_connected());
+        client.disconnect();
+    }
+
+    /// @test The same holds across a disconnect. Disconnect keeps the
+    /// reader and writer it aborts, and the next connect waits for them
+    /// before it publishes. A task already inside its exit path is not
+    /// at an await, so the abort cannot stop it; the test stands one in
+    /// (a task that blocks its worker) and checks that it finished
+    /// before the new generation and the connected flag were visible.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn connect_after_disconnect_waits_for_the_disconnected_tasks() {
+        let (push_tx, _) = broadcast::channel(16);
+        let mut client = AprotoClient::new(push_tx);
+        let first = holding_peer().await;
+        client.connect("127.0.0.1", first.port()).await.unwrap();
+        let old = session_tasks(&client);
+        client.disconnect();
+        assert_eq!(
+            client.retired.len(),
+            2,
+            "disconnect keeps the aborted tasks"
+        );
+
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let (generation, connected) = (client.generation.clone(), client.connected.clone());
+        let (entered_task, seen_task) = (entered.clone(), seen.clone());
+        client.retired.push(tokio::spawn(async move {
+            entered_task.wait();
+            std::thread::sleep(Duration::from_millis(100));
+            *seen_task.lock().unwrap() = Some((
+                generation.load(Ordering::Acquire),
+                connected.load(Ordering::Acquire),
+            ));
+        }));
+        tokio::task::spawn_blocking(move || {
+            entered.wait();
+        })
+        .await
+        .unwrap();
+
+        let second = holding_peer().await;
+        client.connect("127.0.0.1", second.port()).await.unwrap();
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            Some((1, false)),
+            "a disconnected task ran after the next session was published"
+        );
+        assert!(old[0].is_finished(), "disconnected reader still running");
+        assert!(old[1].is_finished(), "disconnected writer still running");
+        assert!(client.retired.is_empty());
+        assert!(client.is_connected());
+        client.disconnect();
     }
 }
