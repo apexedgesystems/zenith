@@ -244,6 +244,7 @@ mod tests {
             ),
             ("core/stream_link.rs", include_str!("stream_link.rs")),
             ("core/config_manager.rs", include_str!("config_manager.rs")),
+            ("core/registration.rs", include_str!("registration.rs")),
         ] {
             let lower = source.to_lowercase();
             for (token, what) in FORBIDDEN {

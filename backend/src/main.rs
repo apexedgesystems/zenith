@@ -87,8 +87,6 @@ struct TargetState {
     struct_dicts: Arc<StructDictionary>,
     /// App manifest (component registry from build artifact)
     manifest: Option<Arc<crate::core::config_manager::AppManifest>>,
-    /// Telemetry display config (plot layouts from target config)
-    telemetry_config: Option<Arc<crate::core::config_manager::TelemetryConfig>>,
     /// Command definitions (quick commands + per-component commands)
     commands_config: Option<Arc<crate::core::config_manager::CommandConfig>>,
     /// Connect-time init sequence (named steps; the link runs it,
@@ -335,15 +333,15 @@ fn build_link(
     }
 }
 
-/// Every generated artifact a target has, loaded once. Boot and the
-/// runtime add-target path share this so a target added to a running
-/// zenith is as fully-featured as one declared in config.toml --
-/// named channels, command catalog, curated plots, connect-init --
-/// instead of silently degrading to anonymous field decode.
+/// The generated artifacts a target's link and decoder use, loaded
+/// once. Boot and the runtime add-target path resolve them through
+/// this one loader, so an added target names its channels and offers
+/// its command catalog as a configured one does. Curated plot layouts
+/// are not held here: they live in the database, seeded at
+/// registration by `core::registration`.
 struct TargetArtifacts {
     dicts: Arc<StructDictionary>,
     manifest: Option<Arc<crate::core::config_manager::AppManifest>>,
-    telemetry_config: Option<Arc<crate::core::config_manager::TelemetryConfig>>,
     commands_config: Option<Arc<crate::core::config_manager::CommandConfig>>,
     connect_init: Option<Arc<crate::core::config_manager::ConnectInit>>,
     record_table: Option<Arc<crate::core::config_manager::RecordTable>>,
@@ -351,9 +349,9 @@ struct TargetArtifacts {
 
 /// Load a target's artifacts from wherever its definition points --
 /// a target directory by convention, or explicit paths. Display
-/// artifacts degrade to warnings (a missing plot layout costs plots,
-/// not the target); the connect-init sequence is load-bearing, so a
-/// broken one is returned as an error for the caller to refuse on.
+/// artifacts degrade to warnings (a missing command catalog costs the
+/// catalog, not the target); the connect-init sequence is load-bearing,
+/// so a broken one is returned as an error for the caller to refuse on.
 fn load_target_artifacts(
     tc: &config::TargetSection,
     global_dicts: &Arc<StructDictionary>,
@@ -406,29 +404,6 @@ fn load_target_artifacts(
             }
         }
     });
-
-    let telemetry_config =
-        tc.telemetry_path().and_then(
-            |path| match crate::core::config_manager::TelemetryConfig::load(std::path::Path::new(
-                &path,
-            )) {
-                Ok(cfg) => {
-                    tracing::info!(
-                        "Loaded telemetry config for {}: {} layouts",
-                        name,
-                        cfg.layouts.len()
-                    );
-                    for w in cfg.validate() {
-                        tracing::warn!("  telemetry config warning [{}]: {}", name, w);
-                    }
-                    Some(Arc::new(cfg))
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to load telemetry config for {}: {}", name, e);
-                    None
-                }
-            },
-        );
 
     let commands_config =
         tc.commands_path().and_then(
@@ -487,7 +462,6 @@ fn load_target_artifacts(
     Ok(TargetArtifacts {
         dicts,
         manifest,
-        telemetry_config,
         commands_config,
         connect_init,
         record_table,
@@ -3016,9 +2990,10 @@ async fn add_target(
 
     let (push_tlm_tx, _) = broadcast::channel::<PushTelemetryPacket>(4096);
     let (sample_tx, _) = broadcast::channel::<TelemetrySample>(4096);
+    let telemetry_path = tc.telemetry_path();
 
     let mut st = state.write().await;
-    let db_for_audit = st.db.clone();
+    let db = st.db.clone();
 
     // ID scheme: config-file targets are positional (target-0,
     // target-1, ...) and stable across restarts so their DB history
@@ -3059,7 +3034,6 @@ async fn add_target(
             sample_tx,
             struct_dicts: artifacts.dicts,
             manifest: artifacts.manifest,
-            telemetry_config: artifacts.telemetry_config,
             commands_config: artifacts.commands_config,
             connect_init: artifacts.connect_init,
             record_table: artifacts.record_table,
@@ -3067,10 +3041,28 @@ async fn add_target(
             _poll_handles: Vec::new(),
         },
     );
+    drop(st);
 
-    tracing::info!("Added target: {} ({}:{})", body.name, body.host, body.port);
+    // Curated plots are served from the database: register them before
+    // answering, outside the write guard (file and database work), so
+    // the caller's next layouts read finds them as it would for a
+    // configured target.
+    let layouts = crate::core::registration::register_layouts(
+        &db,
+        &id,
+        &body.name,
+        telemetry_path.as_deref(),
+    );
+
+    tracing::info!(
+        "Added target: {} ({}:{}), {} layouts",
+        body.name,
+        body.host,
+        body.port,
+        layouts.map_or(0, |cfg| cfg.layouts.len())
+    );
     record_audit(
-        &db_for_audit,
+        &db,
         &actor.0,
         "add_target",
         Some(&id),
@@ -4377,7 +4369,6 @@ async fn main() {
         });
         let target_dicts = artifacts.dicts;
         let manifest = artifacts.manifest;
-        let telemetry_config = artifacts.telemetry_config;
         let commands_config = artifacts.commands_config;
         let connect_init = artifacts.connect_init;
         let record_table = artifacts.record_table;
@@ -4455,7 +4446,6 @@ async fn main() {
                 sample_tx,
                 struct_dicts: target_dicts,
                 manifest,
-                telemetry_config,
                 commands_config,
                 connect_init,
                 record_table,
@@ -4714,15 +4704,15 @@ async fn main() {
         }
     });
 
-    // Seed telemetry layouts from config files into DB
+    // Register each target's curated layouts with the database, the
+    // same helper runtime Add Target uses.
     for (id, target) in &targets {
-        if let Some(ref tc) = target.telemetry_config {
-            match db.seed_layouts(id, tc) {
-                Ok(n) if n > 0 => tracing::info!("Seeded {} telemetry layouts for {}", n, id),
-                Ok(_) => {}
-                Err(e) => tracing::warn!("Failed to seed layouts for {}: {}", id, e),
-            }
-        }
+        crate::core::registration::register_layouts(
+            &db,
+            id,
+            &target.config.name,
+            target.config.telemetry_path().as_deref(),
+        );
     }
 
     // Browser sessions live in the database so a restart keeps them;
