@@ -2381,8 +2381,7 @@ mod tests {
 
     /// @test Config layouts list in the order the current file declares
     /// them, even when a name survives from an earlier seed with a lower
-    /// row id -- the positional-id reuse that put a stale "Default"
-    /// ahead of a producer's first layout.
+    /// row id: the file's order decides, never the row id.
     #[test]
     fn seed_layouts_list_in_file_order() {
         let (_dir, db) = open_temp_db();

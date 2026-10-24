@@ -224,8 +224,9 @@ pub fn parse_packet(data: &[u8]) -> Option<Packet> {
 /// terminal of a queued command, so its status is the component
 /// handler's own result; every other frame is written by the
 /// interface itself, so its status is the interface's NAK code.
-/// Reading a completion's 3 through the interface table turned a
-/// component's INVALID_ARGUMENT into NO_RESOLVER.
+/// The two sets share values (3 is a handler's INVALID_ARGUMENT and
+/// the interface's NO_RESOLVER), so the stage, never the value,
+/// selects the table.
 fn status_name_for(status: u8, stage: u8) -> String {
     if stage == STAGE_COMPLETION {
         return match status {
