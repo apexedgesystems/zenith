@@ -22,8 +22,9 @@ architecture review; work before that is the v0.0.1 tag.
 - `GET`, `POST` and `DELETE /api/auth/session`, and
   `POST /api/auth/session/refresh`. Bearer-token clients are unchanged.
 - A target names its generated directory with `dir`: its manifest,
-  dictionaries, layouts, commands and connect steps are found inside,
-  and Add Target takes the same directory.
+  dictionaries, layouts, commands and connect steps are found inside.
+  Add Target takes the same directory for an aproto-slip target;
+  stream protocols and connect steps stay in `config.toml`.
 - `[[targets.poll]]` reads a data block (`uid`, `category`, `rate_hz`
   up to 50) on a timer into telemetry, for an apex target that pushes
   nothing.

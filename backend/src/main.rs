@@ -2865,9 +2865,11 @@ struct AddTargetRequest {
     host: String,
     #[serde(default = "default_port_9000")]
     port: u16,
-    /// The target's generated artifact directory. Naming it gives the
-    /// added target everything a config.toml one gets: named channels,
-    /// command catalog, curated plots, connect-init.
+    /// The target's generated artifact directory: named channels,
+    /// command catalog and curated plots, found as boot finds them for
+    /// a config.toml target. Add Target creates aproto-slip targets
+    /// only, so a directory with a connect-init sequence is refused;
+    /// stream protocols and connect-init are declared in config.toml.
     #[serde(default)]
     dir: Option<String>,
     /// Struct dictionaries alone, for a bundle that does not follow
@@ -2896,8 +2898,8 @@ async fn add_target(
     }
 
     // Build the definition first so artifact loading goes through the
-    // same resolver boot uses -- a target added here is as
-    // fully-featured as one declared in config.toml.
+    // same resolver boot uses: an aproto-slip target added here gets
+    // the channels, catalog and plots one declared in config.toml gets.
     let tc = config::TargetSection {
         name: body.name.clone(),
         host: body.host.clone(),
@@ -4314,8 +4316,8 @@ async fn main() {
 
         // Every generated artifact this target has, from its
         // directory or its explicit paths. One loader, shared with the
-        // runtime add-target path, so a target added to a running
-        // zenith is as fully-featured as one declared here.
+        // runtime add-target path, so an aproto-slip target added to a
+        // running zenith finds its artifacts as one declared here does.
         let artifacts = load_target_artifacts(tc, &global_dicts).unwrap_or_else(|e| {
             eprintln!("FATAL: target '{}': {}", tc.name, e);
             std::process::exit(1);

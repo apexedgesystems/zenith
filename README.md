@@ -93,10 +93,14 @@ dir = "/data/targets/pi-ops-demo"   # everything above, by convention
 
 Individual paths (`manifest`, `structs_dir`, `telemetry_config`,
 `commands_config`, `connect_init`) still override the convention for
-directories that do not follow it. The same directory can be handed to
-a **running** zenith -- Add Target takes it, and the target comes up
-with named channels, its command catalog, and its curated plots,
-without restarting the server or dropping other targets' links.
+directories that do not follow it. An aproto-slip target's directory
+can also be handed to a **running** zenith -- Add Target takes it, and
+the target comes up with named channels, its command catalog, and its
+curated plots, without restarting the server or dropping other
+targets' links. Add Target creates aproto-slip targets only and
+refuses a directory with connect steps (`on_connect.json`): stream
+protocols (the cFS and F-prime targets) and connect-init sequences are
+configured in `config.toml`.
 
 The config directory is always generator output, one generator per
 framework, all emitting the same neutral format: apex targets use
@@ -137,7 +141,8 @@ ELF ident) decode correctly with zero configuration.
 - **Right-click target menu**: Connect / Disconnect, Copy address,
   **Auto-reconnect toggle** (persisted across browser sessions),
   Export telemetry CSV, Trim oldest 25%, Remove target
-- Add Target form for runtime target creation
+- Add Target form for runtime target creation (aproto-slip targets;
+  other protocols are declared in `config.toml`)
 
 ## Stack
 
@@ -470,7 +475,7 @@ DELETE /api/auth/session                         # Sign out; ends the session, c
 
 # Targets
 GET    /api/targets
-POST   /api/targets/add
+POST   /api/targets/add                          # Add an aproto-slip target at runtime (dir optional)
 POST   /api/targets/{id}/connect
 POST   /api/targets/{id}/disconnect
 POST   /api/targets/{id}/remove
