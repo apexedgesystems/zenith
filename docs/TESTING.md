@@ -11,7 +11,7 @@ Rust or Node toolchain required.
 # Run all tests (backend + frontend)
 make test
 
-# Backend only (185 unit tests, Rust)
+# Backend only (190 unit tests, Rust)
 make test-backend
 
 # Frontend only (128 unit tests, Vitest + React Testing Library)
