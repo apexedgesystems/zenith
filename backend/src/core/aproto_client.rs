@@ -57,8 +57,10 @@ pub struct AprotoClient {
     push_tlm_tx: broadcast::Sender<PushTelemetryPacket>,
     reader_handle: Option<tokio::task::JoinHandle<()>>,
     writer_handle: Option<tokio::task::JoinHandle<()>>,
-    /// Tasks a disconnect aborted, awaited by the next connect before
-    /// it publishes its session.
+    /// Tasks being retired: those a disconnect aborted, and those a
+    /// connect aborted but has not yet seen finish (a connect dropped
+    /// while it waits leaves them here). The next connect waits for
+    /// them before it publishes its session.
     retired: Vec<tokio::task::JoinHandle<()>>,
     seq: u16,
     command_timeout: Duration,
@@ -120,18 +122,24 @@ impl AprotoClient {
         // Command callers -> writer: outbound packets
         let (cmd_tx, cmd_rx) = mpsc::channel::<CommandRequest>(64);
 
-        // Retire the previous session before publishing this one: abort
-        // its reader and writer (and any a disconnect aborted) and wait
-        // until each has finished, so none of them can run -- and clear
-        // the connected flag -- after the new generation is visible. A
-        // task cancelled by the abort resolves with a cancellation
-        // error, which is the expected outcome.
-        let mut previous = std::mem::take(&mut self.retired);
-        previous.extend(self.reader_handle.take());
-        previous.extend(self.writer_handle.take());
-        for h in previous {
+        // Retire the previous session before publishing this one, so no
+        // old task can run -- or clear the connected flag -- after the
+        // new generation is visible. Every task the client still owns
+        // (this session's reader and writer, and any a disconnect or an
+        // interrupted connect left) is asked to stop before the first
+        // wait, and stays owned by the client until it has finished: a
+        // connect dropped while it waits leaves the rest for the next
+        // connect to finish before that one publishes. A task stopped by
+        // the abort resolves with a cancellation error, the expected
+        // outcome.
+        self.retired.extend(self.reader_handle.take());
+        self.retired.extend(self.writer_handle.take());
+        for h in &self.retired {
             h.abort();
+        }
+        while let Some(h) = self.retired.last_mut() {
             let _ = h.await;
+            self.retired.pop();
         }
 
         let connected = self.connected.clone();
@@ -1076,6 +1084,114 @@ mod tests {
         assert!(old[0].is_finished(), "disconnected reader still running");
         assert!(old[1].is_finished(), "disconnected writer still running");
         assert!(client.retired.is_empty());
+        assert!(client.is_connected());
+        client.disconnect();
+    }
+
+    /// @test A connect dropped while it waits for a retiring task loses
+    /// none of them: every task it was retiring has been asked to stop
+    /// before the first wait and stays owned by the client, and the next
+    /// connect finishes the retirement before it publishes. Stand-ins:
+    /// one parked at an await, first in line, which an abort ends at
+    /// once; two inside their exit paths, blocking their workers where
+    /// an abort cannot stop them until released, after which each
+    /// records the generation it sees and reaches an await, where a
+    /// requested abort ends it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cancelled_connect_leaves_its_retiring_tasks_to_the_next() {
+        let (push_tx, _) = broadcast::channel(16);
+        let mut client = AprotoClient::new(push_tx);
+        let first = holding_peer().await;
+        client.connect("127.0.0.1", first.port()).await.unwrap();
+        let old = session_tasks(&client);
+
+        let parked = tokio::spawn(std::future::pending::<()>());
+        let parked_task = parked.abort_handle();
+        client.retired.push(parked);
+        let entered = Arc::new(std::sync::Barrier::new(3));
+        let release = Arc::new(std::sync::Barrier::new(3));
+        let mut stand_ins = Vec::new();
+        for _ in 0..2 {
+            let seen = Arc::new(std::sync::Mutex::new(None));
+            let ran_on = Arc::new(AtomicBool::new(false));
+            let generation = client.generation.clone();
+            let (entered, release) = (entered.clone(), release.clone());
+            let (seen_task, ran_on_task) = (seen.clone(), ran_on.clone());
+            client.retired.push(tokio::spawn(async move {
+                entered.wait();
+                release.wait();
+                *seen_task.lock().unwrap() = Some(generation.load(Ordering::Acquire));
+                tokio::task::yield_now().await;
+                ran_on_task.store(true, Ordering::Release);
+            }));
+            stand_ins.push((seen, ran_on));
+        }
+        let entered_test = entered.clone();
+        tokio::task::spawn_blocking(move || {
+            entered_test.wait();
+        })
+        .await
+        .unwrap();
+
+        // Observations are kept and asserted after the release, so a
+        // failure ends the test instead of leaving the stand-ins blocked.
+        let second = holding_peer().await;
+        let interrupted = timeout(
+            Duration::from_millis(200),
+            client.connect("127.0.0.1", second.port()),
+        )
+        .await
+        .is_err();
+        let kept = client.retired.len();
+        let generation_then = client.generation.load(Ordering::Acquire);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        while !parked_task.is_finished() && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        let parked_stopped = parked_task.is_finished();
+
+        let third = holding_peer().await;
+        let reconnect = async move {
+            client.connect("127.0.0.1", third.port()).await.unwrap();
+            client
+        };
+        let release_stand_ins = async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            tokio::task::spawn_blocking(move || {
+                release.wait();
+            })
+            .await
+            .unwrap();
+        };
+        let (mut client, ()) = tokio::join!(reconnect, release_stand_ins);
+
+        assert!(interrupted, "connect waits for the stand-ins");
+        assert_eq!(
+            kept, 3,
+            "the joins not yet awaited stay owned by the client"
+        );
+        assert_eq!(
+            generation_then, 1,
+            "nothing published by the dropped connect"
+        );
+        assert!(
+            parked_stopped,
+            "a retiring task was not asked to stop before the first wait"
+        );
+        for (seen, ran_on) in &stand_ins {
+            assert_eq!(
+                *seen.lock().unwrap(),
+                Some(1),
+                "a retiring task ran after the next session was published"
+            );
+            assert!(
+                !ran_on.load(Ordering::Acquire),
+                "a retiring task was never asked to stop"
+            );
+        }
+        assert!(old[0].is_finished() && old[1].is_finished());
+        assert!(client.retired.is_empty());
+        assert_eq!(client.generation.load(Ordering::Acquire), 2);
         assert!(client.is_connected());
         client.disconnect();
     }
