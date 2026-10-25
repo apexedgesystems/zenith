@@ -480,14 +480,22 @@ fn category_priority(category: &str) -> u8 {
 }
 
 impl TelemetryDecoder {
-    /// Every channel name this decoder can emit, sorted and deduped.
-    /// Status surfaces use this to flag saved-layout references that a
-    /// dictionary refresh has orphaned.
+    /// Every channel name this decoder can emit, sorted and deduped:
+    /// the (uid, size) index, record channels included, and every block
+    /// a packet's data category can select, which can name fields the
+    /// size index does not keep. Status surfaces use this to flag
+    /// saved-layout references that a dictionary refresh has orphaned.
     pub fn channel_names(&self) -> Vec<String> {
+        let by_category = self
+            .by_category
+            .values()
+            .flatten()
+            .flat_map(|(_, fields)| fields);
         let mut names: Vec<String> = self
             .lookup
             .values()
             .flatten()
+            .chain(by_category)
             .map(|f| f.channel.to_string())
             .collect();
         names.sort();
@@ -978,7 +986,8 @@ mod tests {
     /// @test A record dictionary is a first-class decode source: a
     /// whole record (header + value) decodes to a sample named by
     /// the table's full channel string, honoring the table's byte
-    /// order -- no struct dictionaries involved at all.
+    /// order -- no struct dictionaries involved at all -- and its
+    /// channel is in the decoder's inventory.
     #[test]
     fn record_dictionary_decodes_channels() {
         let table: crate::core::config_manager::RecordTable = serde_json::from_str(
@@ -1010,6 +1019,7 @@ mod tests {
         assert_eq!(samples.len(), 1);
         assert_eq!(&*samples[0].channel, "Sys.res.CPU");
         assert!((samples[0].value - 42.5).abs() < 1e-6);
+        assert_eq!(decoder.channel_names(), ["Sys.res.CPU"]);
     }
 
     /// @test 8-byte WaveGen OUTPUT struct decodes into the two
@@ -1407,5 +1417,69 @@ mod tests {
         assert_eq!(metrics.decoded_samples.load(Ordering::Relaxed), 0);
         assert_eq!(metrics.snapshot(0)["category_mismatch_drops"], 1);
         assert!(sample_rx.try_recv().is_err());
+    }
+
+    /// @test The inventory names every channel the decoder emits: the
+    /// blocks a category selects (SpecChannel's OUTPUT value and
+    /// sequence, which the size index does not keep) as well as the
+    /// size index's.
+    #[test]
+    fn channel_names_include_every_category_decoded_channel() {
+        let decoder = spec_demo_decoder();
+        let inventory = decoder.channel_names();
+        for category in [Some(DataCategory::Output), Some(DataCategory::State), None] {
+            for sample in
+                decoder.decode(&target_id(), 1, &spec_packet(&SPEC_CHANNEL_BYTES, category))
+            {
+                assert!(
+                    inventory.contains(&sample.channel.to_string()),
+                    "emitted channel {} missing from the inventory {:?}",
+                    sample.channel,
+                    inventory
+                );
+            }
+        }
+        assert!(inventory.windows(2).all(|w| w[0] < w[1]), "sorted, deduped");
+    }
+
+    /// @test The shipped spec demo's SpecChannel layout references
+    /// are channels its decoder emits, with the decoder built as the
+    /// layouts endpoint builds it (manifest joins over the shipped
+    /// dictionaries): SpecChannel#0 and #1 value and sequence, which
+    /// only the category index names, are no longer reported unknown.
+    #[test]
+    fn shipped_spec_channel_layout_references_are_known() {
+        use crate::core::config_manager::{AppManifest, TelemetryConfig};
+        let dir = std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../targets/sil-spec-demo"
+        ));
+        let dicts = StructDictionary::load_dir(&dir.join("structs")).unwrap();
+        let manifest = AppManifest::load(&dir.join("app_manifest.json")).unwrap();
+        let joins = manifest.component_dict_joins();
+        let refs: Vec<(u32, &str, Option<&str>)> = joins
+            .iter()
+            .map(|(u, n, k)| (*u, n.as_str(), k.as_deref()))
+            .collect();
+        let known = TelemetryDecoder::new(&dicts, &refs).channel_names();
+        let layouts = TelemetryConfig::load(&dir.join("telemetry.json")).unwrap();
+        let spec_channel: Vec<&String> = layouts
+            .layouts
+            .iter()
+            .flat_map(|l| l.plots.iter().flat_map(|p| p.channels.iter()))
+            .filter(|c| c.starts_with("SpecChannel#"))
+            .collect();
+        assert_eq!(
+            spec_channel,
+            [
+                "SpecChannel#0.value",
+                "SpecChannel#0.sequence",
+                "SpecChannel#1.value",
+                "SpecChannel#1.sequence"
+            ]
+        );
+        for name in spec_channel {
+            assert!(known.contains(name), "{name} reported unknown");
+        }
     }
 }
