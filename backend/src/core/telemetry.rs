@@ -1332,7 +1332,7 @@ mod tests {
     /// not decoded by (uid, size): twelve bytes read as OUTPUT match
     /// SpecChannel's twelve-byte TUNABLE_PARAM block, and must not come
     /// out as its gain and offset. A category on a component with no
-    /// dictionary is refused too, not extracted generically.
+    /// dictionary is also refused, not extracted generically.
     #[test]
     fn category_without_a_block_of_that_size_is_refused() {
         let decoder = spec_demo_decoder();
@@ -1354,8 +1354,8 @@ mod tests {
         };
         assert!(decoder.decode_checked(&target_id(), 1, &unknown).is_err());
 
-        // The same twelve bytes pushed without a category still match
-        // by size, as every push always has.
+        // The same twelve bytes pushed without a category match by
+        // size, as a push does.
         let pushed = spec_packet(&SPEC_TWELVE_BYTES, None);
         assert_eq!(
             named(&decoder.decode(&target_id(), 1, &pushed)),
@@ -1445,8 +1445,8 @@ mod tests {
     /// @test The shipped spec demo's SpecChannel layout references
     /// are channels its decoder emits, with the decoder built as the
     /// layouts endpoint builds it (manifest joins over the shipped
-    /// dictionaries): SpecChannel#0 and #1 value and sequence, which
-    /// only the category index names, are no longer reported unknown.
+    /// dictionaries): SpecChannel#0 and #1 value and sequence are
+    /// known, although only the category index names them.
     #[test]
     fn shipped_spec_channel_layout_references_are_known() {
         use crate::core::config_manager::{AppManifest, TelemetryConfig};
