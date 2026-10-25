@@ -21,16 +21,16 @@ architecture review; work before that is the v0.0.1 tag.
   asks for the password over the page it was on and resends nothing.
 - `GET`, `POST` and `DELETE /api/auth/session`, and
   `POST /api/auth/session/refresh`. Bearer-token clients are unchanged.
-- A target names its generated directory with `dir`: its manifest,
-  dictionaries, layouts, commands and connect steps are found inside.
-  Add Target takes the same directory for an aproto-slip target;
-  stream protocols and connect steps stay in `config.toml`.
-- `[[targets.poll]]` reads a data block (`uid`, `category`, `rate_hz`
-  up to 50) on a timer into telemetry, for an apex target that pushes
-  nothing.
-- A demo target for the apex rover in the development config
-  (`targets/rover-mcu`, host loopback port 9010), with health rules
-  for its command result and board link.
+- Generated target directories can be selected with `dir`, including
+  at runtime for aproto-slip targets. Stream protocols and connect steps
+  require `config.toml`.
+  ([#49](https://github.com/apexedgesystems/zenith/pull/49))
+- Apex targets without pushed telemetry can poll data blocks with
+  `[[targets.poll]]` at up to 50 Hz.
+  ([#49](https://github.com/apexedgesystems/zenith/pull/49))
+- The development config includes the apex rover demo with telemetry
+  and health rules.
+  ([#49](https://github.com/apexedgesystems/zenith/pull/49))
 
 ### Changed
 
@@ -47,13 +47,13 @@ architecture review; work before that is the v0.0.1 tag.
 - A console opened while the server is restarting retries its first
   session read (after 1 s, doubling to 10 s) instead of staying blank.
 - Without credentials the API answers "missing token or session".
-- Command completion frames are named from the component's result set
-  (for example INVALID_ARGUMENT, EXEC_FAILED); immediate and queued
-  frames keep the interface's names.
-- Layouts from a target's `telemetry.json` are listed in the order the
-  file declares them.
-- Screens suit a large display; empty plots say "Waiting for data", and
-  a link that is up with nothing to push shows "No data", not "Off".
+- Command completions show component result names.
+  ([#49](https://github.com/apexedgesystems/zenith/pull/49))
+- Generated telemetry layouts follow their file order.
+  ([#49](https://github.com/apexedgesystems/zenith/pull/49))
+- Console screens suit large displays and distinguish an empty plot or
+  idle connected link from a disconnected target.
+  ([#49](https://github.com/apexedgesystems/zenith/pull/49))
 
 ### Security
 
@@ -72,15 +72,13 @@ architecture review; work before that is the v0.0.1 tag.
 - The image builds from the committed lockfiles (`--locked`, `npm ci`)
   and an allowlisted build context, so nothing from the host can enter
   it.
-- A link that reconnects after the remote hung up stays connected
-  instead of reading as disconnected moments later.
-- Quick commands generated with `payloadHex` send their payload
-  instead of an empty one.
-- The command form encodes `float` and `double` fields as
-  little-endian IEEE 754 values instead of sending one byte, and
-  refuses a field type it cannot encode (a `raw[N]` field, for
-  example), naming the field and sending nothing; Raw Mode still sends
-  any payload.
+- Reconnected target links keep their connected status.
+  ([#49](https://github.com/apexedgesystems/zenith/pull/49))
+- Generated quick commands send their declared payloads.
+  ([#49](https://github.com/apexedgesystems/zenith/pull/49))
+- Command forms encode floating-point fields and refuse unsupported
+  field types. Use Raw Mode for commands the form cannot encode.
+  ([#49](https://github.com/apexedgesystems/zenith/pull/49))
 
 ## v0.2.0 - 2026-09-27
 
