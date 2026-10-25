@@ -98,12 +98,6 @@ export type EncodedField =
   | { ok: true; hex: string }
   | { ok: false; error: string };
 
-function hexOf(buf: ArrayBuffer): string {
-  return [...new Uint8Array(buf)]
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
-}
-
 /** Encode one typed form field little-endian. Unsigned integers parse
  *  decimal or 0x hex; float and double are the IEEE 754 binary32 and
  *  binary64 of a finite number. Any other catalog type is refused, so
@@ -129,11 +123,11 @@ export function encodeField(
       if (field.type === "uint16") {
         const buf = new ArrayBuffer(2);
         new DataView(buf).setUint16(0, n & 0xffff, true);
-        return { ok: true, hex: hexOf(buf) };
+        return { ok: true, hex: bytesToHex(new Uint8Array(buf)) };
       }
       const buf = new ArrayBuffer(4);
       new DataView(buf).setUint32(0, n >>> 0, true);
-      return { ok: true, hex: hexOf(buf) };
+      return { ok: true, hex: bytesToHex(new Uint8Array(buf)) };
     }
     case "float":
     case "double": {
@@ -148,7 +142,7 @@ export function encodeField(
       const buf = new ArrayBuffer(single ? 4 : 8);
       if (single) new DataView(buf).setFloat32(0, n, true);
       else new DataView(buf).setFloat64(0, n, true);
-      return { ok: true, hex: hexOf(buf) };
+      return { ok: true, hex: bytesToHex(new Uint8Array(buf)) };
     }
     default:
       return {
