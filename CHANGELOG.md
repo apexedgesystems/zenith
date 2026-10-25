@@ -13,17 +13,13 @@ architecture review; work before that is the v0.0.1 tag.
 
 ### Breaking
 
-- TPRM uploads stamp the v4 payload prelude (28 bytes, magic APV4),
-  which Apex CSF vehicles built from apex_csf 2543279 (2026-09-10) or
-  later require. A vehicle built before that commit refuses these
-  uploads; zenith 0.2.0 stamped the v3 prelude, which vehicles at or
-  after that commit refuse.
+- TPRM uploads use the v4 prelude and carry payloads beyond 64 KiB.
+  Apex CSF vehicles built before apex_csf 2543279 refuse them; vehicles
+  from that commit on require v4 and refuse zenith 0.2.0's v3 uploads.
+  ([#50](https://github.com/apexedgesystems/zenith/pull/50))
 
 ### Added
 
-- Apex targets that declare no health list flag a nonzero
-  `resyncDroppedTicks` on the dashboard: the executive's count of
-  ticks dropped when its clock grid re-anchors after a stall.
 - With auth on, the console signs in: a login page, a server-side
   session and Sign out. A session ends after `[auth] session_idle_min`
   without operator input (default 30; 0 disables) and `[auth]
@@ -35,11 +31,9 @@ architecture review; work before that is the v0.0.1 tag.
 
 ### Changed
 
-- A TPRM upload is no longer limited to a 64 KiB payload: the v4
-  prelude carries a 64-bit size.
-- The shipped demo target directories are regenerated from apex_csf
-  d8d003c; the command console's catalog lists SystemMonitor's 0x0100
-  command as HEALTH_SAMPLE, the vehicle's name for it.
+- Demo target directories are regenerated from apex_csf d8d003c;
+  SystemMonitor's 0x0100 command appears as HEALTH_SAMPLE.
+  ([#50](https://github.com/apexedgesystems/zenith/pull/50))
 - The session cookie is Secure by default: serve the console over
   HTTPS (see the README's remote-deployment steps) or set
   `[auth] cookie_secure = false` on a trusted network.
@@ -63,18 +57,16 @@ architecture review; work before that is the v0.0.1 tag.
 
 ### Fixed
 
-- A tunable update to a nested struct whose dictionary exports no
-  layout hash carries the hash the vehicle verifies: the recompute
-  hashes each nested leaf under its own name, as the producer's
-  canonical form does.
-- A tunable update that a readback-capable vehicle refuses before
-  applying it reads as refused, in the console and in the audit log,
-  under the vehicle's reason (for example BAD_MAGIC or
-  LAYOUT_MISMATCH) instead of as updated.
-- Frame overruns and watchdog warnings on the apex executive
-  (`frameOverrunCount`, `watchdogWarningCount`) are flagged on the
-  dashboard by default; the default health names had not matched those
-  dictionary fields.
+- Tunable updates to nested structs carry the layout hash the vehicle
+  verifies when their dictionary exports none.
+  ([#50](https://github.com/apexedgesystems/zenith/pull/50))
+- A staged tunable update the vehicle refuses reads as refused, under
+  the vehicle's reason, in the console and the audit log.
+  ([#50](https://github.com/apexedgesystems/zenith/pull/50))
+- Apex targets without their own health list flag a nonzero
+  `frameOverrunCount`, `watchdogWarningCount` or `resyncDroppedTicks`
+  on the dashboard.
+  ([#50](https://github.com/apexedgesystems/zenith/pull/50))
 - Telemetry socket clients that send keep-alive pings no longer lose
   the stream at their ping timeout; the server answers pings and ends
   a socket when its client closes.
