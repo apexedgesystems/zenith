@@ -1620,11 +1620,7 @@ async fn update_params(
     // reaches a component, and rejects unstamped uploads. The layout
     // hash is the dictionary's exported one when it carries one, else
     // a recompute over the same dict fields that encoded the body
-    // (dict declaration order is template emission order). The
-    // recompute covers flattened leaves only, so a template using
-    // explicitly typed nested-struct containers hashes differently on
-    // the vehicle, which refuses it as a layout mismatch rather than
-    // misloading.
+    // (dict declaration order is template emission order).
     let stamped = tprm::stamp_v4(full_uid, payload_layout_hash, &binary);
 
     // Upload and reload

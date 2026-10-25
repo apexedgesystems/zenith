@@ -416,7 +416,7 @@ mod tests {
     /// own `name:struct:0:offset;` row ahead of its leaves. By the
     /// contract it does not: a key typed struct is a grouping whose
     /// leaves carry the rows, as for a plain nested table, and the
-    /// nested_enum vector hashes its four leaves only.
+    /// nested_enum vector hashes its five leaves only.
     const STRUCT_CONTAINER_ROWS: bool = false;
 
     /// One parsed vector-toml leaf (owned strings; tests build
