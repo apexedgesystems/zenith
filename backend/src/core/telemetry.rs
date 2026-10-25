@@ -4,8 +4,9 @@
 //! resolution. Each field is decoded according to its declared type (uint8,
 //! uint16, float, etc.) from the struct dict, not blindly extracted as f32.
 //!
-//! Falls back to generic f32 extraction only for payloads that don't match
-//! any known struct definition.
+//! A packet that names its data category decodes only as a block of that
+//! category, or not at all. A packet without one falls back to generic f32
+//! extraction when it matches no known struct definition.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -61,6 +62,16 @@ struct CachedField {
 
 /// A block's payload size with its precomputed fields.
 type SizedFields = (usize, Vec<CachedField>);
+
+/// A packet read as a known data category whose payload size matches no
+/// block of that category in the component's dictionary. It is refused,
+/// never decoded under another block's names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CategoryMismatch {
+    pub full_uid: u32,
+    pub category: DataCategory,
+    pub size: usize,
+}
 
 /// One dictionary struct a component's packets could carry, before
 /// field-name claiming: its priority, size, fields, byte order and
@@ -266,38 +277,68 @@ impl TelemetryDecoder {
         }
     }
 
-    /// Decode a push telemetry packet into named samples.
+    /// Decode a push telemetry packet into named samples; a refused
+    /// packet (see [`Self::decode_checked`]) yields none. The router
+    /// calls `decode_checked` to count refusals; allow(dead_code)
+    /// because the bin target compiles this module too and calls only
+    /// that.
     ///
     /// `target_id` is taken as `&Arc<str>` so the caller can hand us
     /// a stable reference; the Arc is cloned into each emitted
     /// sample (no allocation).
+    #[allow(dead_code)]
     pub fn decode(
         &self,
         target_id: &Arc<str>,
         timestamp_ms: u64,
         pkt: &PushTelemetryPacket,
     ) -> Vec<TelemetrySample> {
+        self.decode_checked(target_id, timestamp_ms, pkt)
+            .unwrap_or_default()
+    }
+
+    /// Decode a packet, or refuse one that names a data category no
+    /// block of its payload's size has.
+    ///
+    /// A category is the block the payload was read as, so it decides:
+    /// the packet decodes as that category's block of the payload's
+    /// size (two blocks of a component can share a size, and (uid,
+    /// size) alone would pick one of them regardless), and with no such
+    /// block it decodes as nothing rather than as another block of that
+    /// size. A packet without a category matches by (uid, size), then
+    /// falls back to generic extraction.
+    pub fn decode_checked(
+        &self,
+        target_id: &Arc<str>,
+        timestamp_ms: u64,
+        pkt: &PushTelemetryPacket,
+    ) -> Result<Vec<TelemetrySample>, CategoryMismatch> {
         let data = &pkt.payload;
 
-        // A packet that names its category decodes as that block when
-        // the dictionary has one of the payload's size; two blocks of a
-        // component can share a size, and (uid, size) alone would pick
-        // one of them regardless.
         if let Some(category) = pkt.category {
-            if let Some(blocks) = self.by_category.get(&(pkt.full_uid, category)) {
-                if let Some((_, cached)) = blocks.iter().find(|(size, _)| *size == data.len()) {
-                    return self.decode_with_struct(target_id, timestamp_ms, cached, data);
+            let block = self
+                .by_category
+                .get(&(pkt.full_uid, category))
+                .and_then(|blocks| blocks.iter().find(|(size, _)| *size == data.len()));
+            return match block {
+                Some((_, cached)) => {
+                    Ok(self.decode_with_struct(target_id, timestamp_ms, cached, data))
                 }
-            }
+                None => Err(CategoryMismatch {
+                    full_uid: pkt.full_uid,
+                    category,
+                    size: data.len(),
+                }),
+            };
         }
 
         // Otherwise match by (uid, payload_size)
         if let Some(cached) = self.lookup.get(&(pkt.full_uid, data.len())) {
-            return self.decode_with_struct(target_id, timestamp_ms, cached, data);
+            return Ok(self.decode_with_struct(target_id, timestamp_ms, cached, data));
         }
 
         // Fallback: generic f32 extraction with component name prefix
-        self.decode_generic(target_id, timestamp_ms, pkt)
+        Ok(self.decode_generic(target_id, timestamp_ms, pkt))
     }
 
     /// Decode using precomputed cached fields.
@@ -474,6 +515,10 @@ pub fn spawn_router(
         // per lag event, so a sustained overload can't flood the log.
         const LAG_WARN_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
         let mut last_lag_warn: Option<std::time::Instant> = None;
+        // The same for refused packets: each is counted, one line per
+        // interval names the latest.
+        const MISMATCH_WARN_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+        let mut last_mismatch_warn: Option<std::time::Instant> = None;
         let uid_joins: Vec<(u32, String, Option<String>)> = manifest
             .as_ref()
             .map(|m| m.component_dict_joins())
@@ -503,7 +548,30 @@ pub fn spawn_router(
                         .unwrap_or_default()
                         .as_millis() as u64;
 
-                    let samples = decoder.decode(&target_arc, now_ms, &pkt);
+                    let samples = match decoder.decode_checked(&target_arc, now_ms, &pkt) {
+                        Ok(samples) => samples,
+                        Err(m) => {
+                            let total = metrics
+                                .category_mismatch_drops
+                                .fetch_add(1, Ordering::Relaxed)
+                                + 1;
+                            if last_mismatch_warn.is_none_or(|t| t.elapsed() >= MISMATCH_WARN_EVERY)
+                            {
+                                tracing::warn!(
+                                    "[{}] refused a {}-byte packet read as {} from 0x{:06X}: \
+                                     its dictionary has no {} block of that size ({} refused)",
+                                    target_arc,
+                                    m.size,
+                                    m.category.dict_name(),
+                                    m.full_uid,
+                                    m.category.dict_name(),
+                                    total
+                                );
+                                last_mismatch_warn = Some(std::time::Instant::now());
+                            }
+                            continue;
+                        }
+                    };
                     for sample in samples {
                         metrics.decoded_samples.fetch_add(1, Ordering::Relaxed);
                         metrics.last_sample_ms.store(now_ms, Ordering::Relaxed);
@@ -1244,24 +1312,100 @@ mod tests {
         );
     }
 
-    /// @test A category with no block of the payload's size falls back
-    /// to (uid, size): twelve bytes named OUTPUT decode as SpecChannel's
-    /// twelve-byte TUNABLE_PARAM block (gain, offset; the string field
-    /// is not a channel).
+    /// Twelve bytes: 1.5 and -2.0 as float32, then a four-byte tag;
+    /// the size of SpecChannel's TUNABLE_PARAM block, not its OUTPUT.
+    const SPEC_TWELVE_BYTES: [u8; 12] = [
+        0x00, 0x00, 0xC0, 0x3F, 0x00, 0x00, 0x00, 0xC0, b'a', b'b', 0, 0,
+    ];
+
+    /// @test A category with no block of the payload's size is refused,
+    /// not decoded by (uid, size): twelve bytes read as OUTPUT match
+    /// SpecChannel's twelve-byte TUNABLE_PARAM block, and must not come
+    /// out as its gain and offset. A category on a component with no
+    /// dictionary is refused too, not extracted generically.
     #[test]
-    fn category_without_a_block_of_that_size_falls_back() {
+    fn category_without_a_block_of_that_size_is_refused() {
         let decoder = spec_demo_decoder();
-        // gain 1.5, offset -2.0 (float32 LE), then a 4-byte tag
-        let bytes = [
-            0x00, 0x00, 0xC0, 0x3F, 0x00, 0x00, 0x00, 0xC0, b'a', b'b', 0, 0,
-        ];
-        let pkt = spec_packet(&bytes, Some(DataCategory::Output));
+        let pkt = spec_packet(&SPEC_TWELVE_BYTES, Some(DataCategory::Output));
         assert_eq!(
-            named(&decoder.decode(&target_id(), 1, &pkt)),
+            decoder.decode_checked(&target_id(), 1, &pkt).unwrap_err(),
+            CategoryMismatch {
+                full_uid: 0x00DA00,
+                category: DataCategory::Output,
+                size: 12
+            }
+        );
+        assert!(decoder.decode(&target_id(), 1, &pkt).is_empty());
+
+        let unknown = PushTelemetryPacket {
+            full_uid: 0x00ABCD,
+            payload: SPEC_CHANNEL_BYTES.to_vec(),
+            category: Some(DataCategory::Output),
+        };
+        assert!(decoder.decode_checked(&target_id(), 1, &unknown).is_err());
+
+        // The same twelve bytes pushed without a category still match
+        // by size, as every push always has.
+        let pushed = spec_packet(&SPEC_TWELVE_BYTES, None);
+        assert_eq!(
+            named(&decoder.decode(&target_id(), 1, &pushed)),
             [
                 ("SpecChannel.gain".to_string(), 1.5),
                 ("SpecChannel.offset".to_string(), -2.0)
             ]
         );
+    }
+
+    /// @test The router drops a refused packet and counts it: nothing
+    /// decoded, nothing sent, one refusal in the target's counters and
+    /// in its metrics snapshot.
+    #[tokio::test]
+    async fn router_counts_refused_category_packets() {
+        use crate::core::config_manager::{AppManifest, ManifestComponent};
+
+        let dicts = Arc::new(
+            StructDictionary::load_dir(std::path::Path::new(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../targets/sil-spec-demo/structs"
+            )))
+            .unwrap(),
+        );
+        let manifest = AppManifest {
+            application: "test".into(),
+            description: String::new(),
+            components: vec![ManifestComponent {
+                name: "SpecChannel".into(),
+                full_uid: "0x00DA00".into(),
+                comp_type: "SW_MODEL".into(),
+                instance_index: None,
+                data_file: Some("SpecChannel.json".into()),
+                notes: None,
+            }],
+            extra: HashMap::new(),
+        };
+        let (push_tx, push_rx) = broadcast::channel(16);
+        let (sample_tx, mut sample_rx) = broadcast::channel(16);
+        let metrics = crate::core::metrics::TargetMetrics::new();
+        let handle = spawn_router(
+            "t1".into(),
+            push_rx,
+            sample_tx,
+            dicts,
+            Some(Arc::new(manifest)),
+            None,
+            metrics.clone(),
+        );
+
+        push_tx
+            .send(spec_packet(&SPEC_TWELVE_BYTES, Some(DataCategory::Output)))
+            .unwrap();
+        drop(push_tx);
+        handle.await.unwrap();
+
+        use std::sync::atomic::Ordering;
+        assert_eq!(metrics.category_mismatch_drops.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.decoded_samples.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.snapshot(0)["category_mismatch_drops"], 1);
+        assert!(sample_rx.try_recv().is_err());
     }
 }

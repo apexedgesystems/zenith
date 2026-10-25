@@ -129,6 +129,18 @@ impl DataCategory {
             _ => None,
         }
     }
+
+    /// The name dictionaries give the category (the inverse of
+    /// [`Self::from_dict_name`]), for diagnostics.
+    pub fn dict_name(self) -> &'static str {
+        match self {
+            Self::StaticParam => "STATIC_PARAM",
+            Self::TunableParam => "TUNABLE_PARAM",
+            Self::State => "STATE",
+            Self::Input => "INPUT",
+            Self::Output => "OUTPUT",
+        }
+    }
 }
 
 /// A struct definition with its fields.
@@ -1100,6 +1112,28 @@ impl ConnectInit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// @test The five block categories map from a read's index to the
+    /// dictionary name and back; other indexes and struct kinds name no
+    /// category.
+    #[test]
+    fn data_category_names_round_trip() {
+        let names: Vec<&str> = (0..=4)
+            .map(|i| DataCategory::from_index(i).unwrap().dict_name())
+            .collect();
+        assert_eq!(
+            names,
+            ["STATIC_PARAM", "TUNABLE_PARAM", "STATE", "INPUT", "OUTPUT"]
+        );
+        for (i, name) in names.iter().enumerate() {
+            assert_eq!(
+                DataCategory::from_dict_name(name),
+                DataCategory::from_index(i as u8)
+            );
+        }
+        assert_eq!(DataCategory::from_index(5), None);
+        assert_eq!(DataCategory::from_dict_name("COMMAND"), None);
+    }
 
     /// @test A quick command's payload loads from either key spelling
     /// (a generator emitting `payloadHex` must not lose it -- a sequence
