@@ -163,7 +163,8 @@ criterion_group! {
         bench_full_pipeline,
         bench_spp_extract,
         bench_tm_deframe,
-        bench_record_walk
+        bench_record_walk,
+        bench_tprm_review
 }
 criterion_main!(benches);
 
@@ -284,5 +285,172 @@ fn bench_record_walk(c: &mut Criterion) {
     group.bench_function("20_records_2_skipped", |b| {
         b.iter(|| black_box(spec.walk(black_box(&payload))))
     });
+    group.finish();
+}
+
+/// The TPRM calls `bench_tprm_review` times, gathered in one place so
+/// the same cases compile against another revision of the crate by
+/// replacing this module alone: stamp a payload, parse a stamp back to
+/// its identity, list a dictionary struct's leaves for hashing, and
+/// the hash that leaf rule gives the nested TelemetryManager fixture.
+mod tprm_api {
+    use zenith::core::config_manager::FieldDef;
+    use zenith::core::tprm::{self, LeafSpec};
+
+    pub fn stamp(full_uid: u32, layout_hash: u32, body: &[u8]) -> Vec<u8> {
+        tprm::stamp_v4(full_uid, layout_hash, body)
+    }
+
+    /// (uid, layout hash, body CRC, declared size, body length).
+    pub fn parse(stamped: &[u8]) -> (u32, u32, u32, u64, usize) {
+        let (p, body) = tprm::parse_v4(stamped).expect("a valid stamp parses");
+        (
+            p.full_uid,
+            p.layout_hash,
+            p.payload_crc,
+            p.payload_size,
+            body.len(),
+        )
+    }
+
+    pub fn leaf_specs(fields: &[FieldDef]) -> Vec<LeafSpec<'_>> {
+        tprm::dict_leaf_specs(fields)
+    }
+
+    pub const NESTED_HASH: u32 = 0x816D_61C8;
+}
+
+/// The variable-length layout hash as the tunable update handler
+/// computes it: header leaves, then each entry instance's leaves moved
+/// to absolute offsets, then the total size.
+fn tprm_variable_hash(
+    hdr: &zenith::core::config_manager::StructDef,
+    ent: &zenith::core::config_manager::StructDef,
+    entries: usize,
+) -> u32 {
+    use zenith::core::tprm;
+    let total_size = hdr.size + entries * ent.size;
+    let entry_offsets: Vec<Vec<usize>> = (0..entries)
+        .map(|i| {
+            ent.fields
+                .iter()
+                .map(|f| hdr.size + i * ent.size + f.offset)
+                .collect()
+        })
+        .collect();
+    tprm::layout_hash(
+        tprm_api::leaf_specs(&hdr.fields)
+            .into_iter()
+            .chain(entry_offsets.iter().flat_map(|offs| {
+                tprm_api::leaf_specs(&ent.fields)
+                    .into_iter()
+                    .zip(offs.iter())
+                    .map(|(mut leaf, &off)| {
+                        leaf.offset = off;
+                        leaf
+                    })
+            })),
+        total_size,
+    )
+}
+
+/// The work one tunable upload does on payload bytes and dictionary
+/// layouts: the prelude stamp (allocation, copy and body CRC) and its
+/// parse at the body sizes of the contract vector, SystemMonitor,
+/// TelemetryManager, the first body that needs a second 4096-byte file
+/// chunk, and the largest body a 16-bit size holds; the layout-hash
+/// recompute a dictionary without an exported hash falls back to, over
+/// a flat and a nested shipped struct (leaf listing, canonical spec and
+/// CRC timed; field expansion done once outside); and the
+/// variable-length hash over the scheduler's header and 2 or 32
+/// entries. Each result is checked before it is timed.
+fn bench_tprm_review(c: &mut Criterion) {
+    use criterion::BenchmarkId;
+    use zenith::core::config_manager::{expanded_fields, ComponentDict};
+    use zenith::core::tprm;
+
+    const UID: u32 = 0x00_C800;
+    const HASH: u32 = 0xD9C5_3260;
+    let mut group = c.benchmark_group("tprm_review");
+
+    for len in [13usize, 122, 520, 4069, 65535] {
+        let body: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+        let stamped = tprm_api::stamp(UID, HASH, &body);
+        assert_eq!(
+            tprm_api::parse(&stamped),
+            (UID, HASH, tprm::crc32(&body), len as u64, len)
+        );
+        group.bench_with_input(BenchmarkId::new("stamp", len), &body, |b, body| {
+            b.iter(|| {
+                black_box(tprm_api::stamp(
+                    black_box(UID),
+                    black_box(HASH),
+                    black_box(body),
+                ))
+            })
+        });
+        group.bench_with_input(BenchmarkId::new("parse", len), &stamped, |b, stamped| {
+            b.iter(|| black_box(tprm_api::parse(black_box(stamped))))
+        });
+        group.bench_with_input(BenchmarkId::new("stamp_parse", len), &body, |b, body| {
+            b.iter(|| {
+                let stamped = tprm_api::stamp(black_box(UID), black_box(HASH), black_box(body));
+                black_box(tprm_api::parse(&stamped))
+            })
+        });
+    }
+
+    let dict = |text: &str| -> ComponentDict { serde_json::from_str(text).expect("dictionary") };
+    let monitor = dict(include_str!(
+        "../../targets/sil-ops-demo/structs/SystemMonitor.json"
+    ));
+    let telemetry = dict(include_str!(
+        "../../targets/sil-ops-demo/structs/TelemetryManager.json"
+    ));
+    for (d, name, want) in [
+        (&monitor, "SystemMonitorTunableParams", HASH),
+        (&telemetry, "TelemetryManagerTprm", tprm_api::NESTED_HASH),
+    ] {
+        let sdef = &d.structs[name];
+        let leaves = expanded_fields(d, &sdef.fields, 0);
+        assert_eq!(
+            tprm::layout_hash(tprm_api::leaf_specs(&leaves), sdef.size),
+            want
+        );
+        let id = BenchmarkId::new("hash", format!("{name}_{}_leaves", leaves.len()));
+        group.bench_with_input(id, &leaves, |b, leaves| {
+            b.iter(|| {
+                black_box(tprm::layout_hash(
+                    tprm_api::leaf_specs(black_box(leaves)),
+                    black_box(sdef.size),
+                ))
+            })
+        });
+    }
+
+    let scheduler = dict(include_str!(
+        "../../targets/sil-ops-demo/structs/Scheduler.json"
+    ));
+    let hdr = &scheduler.structs["SchedulerTprmHeader"];
+    let ent = &scheduler.structs["SchedulerTaskEntry"];
+    // The canonical spec over 33 and 483 bytes, computed independently.
+    assert_eq!(tprm_variable_hash(hdr, ent, 2), 0x626A_BA98);
+    assert_eq!(tprm_variable_hash(hdr, ent, 32), 0xC2CC_65F1);
+    for entries in [2usize, 32] {
+        group.bench_with_input(
+            BenchmarkId::new("variable_hash", entries),
+            &entries,
+            |b, &entries| {
+                b.iter(|| {
+                    black_box(tprm_variable_hash(
+                        black_box(hdr),
+                        black_box(ent),
+                        black_box(entries),
+                    ))
+                })
+            },
+        );
+    }
+
     group.finish();
 }
