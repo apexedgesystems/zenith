@@ -1,9 +1,11 @@
 # ==============================================================================
-# CI -- Build, test, and lint on push/PR to main
+# CI -- Build, test, and lint on pull requests to main
 #
 # Runs all checks inside the dev Docker Compose service (Rust + Node).
-# The production image is built as a final step to verify the multi-stage
-# Dockerfile stays valid.
+# The production image is built as a final step and booted as docker run
+# boots it with no mounts and no environment (make smoke-boot), so its
+# bundled config and demo targets are what boots; docs/TESTING.md lists
+# what the smoke checks it serves.
 # ==============================================================================
 name: CI
 
@@ -51,3 +53,6 @@ jobs:
 
       - name: Build production image
         run: docker compose build zenith
+
+      - name: Smoke-boot the production image
+        run: make smoke-boot

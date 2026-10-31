@@ -38,6 +38,11 @@ architecture review; work before that is the v0.0.1 tag.
 - The development config includes the apex rover demo with telemetry
   and health rules.
   ([#49](https://github.com/apexedgesystems/zenith/pull/49))
+- Release builds boot each architecture's image before pushing it, and
+  a tag publishes only the image that booted. It must report the
+  declared version, list the bundled demo targets, decode their curated
+  plots within each target's recorded ceiling of undecodable channels,
+  and serve the ops demo's command catalog and the console.
 
 ### Changed
 

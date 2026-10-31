@@ -212,11 +212,55 @@ await user.click(screen.getByRole("button", { name: "Submit" }));
 
 ## CI
 
-GitHub Actions runs on every push/PR to `main` (`.github/workflows/ci.yml`):
+GitHub Actions runs the gate on every pull request to `main`
+(`.github/workflows/ci.yml`):
 
 1. Build dev image (`docker compose build dev`)
-2. Backend tests (`cargo test --lib`)
+2. Backend tests (`cargo test --lib --locked`)
 3. Frontend tests (`npm ci && npm run test`)
-4. Clippy (`cargo clippy --lib --bins -- -D warnings`)
-5. Cargo fmt check (`cargo fmt -- --check`)
-6. Build production image (`docker compose build zenith`)
+4. Clippy (`cargo clippy --all-targets --locked -- -D warnings`)
+5. ESLint (`npx eslint . --max-warnings 200`)
+6. Cargo fmt check (`cargo fmt -- --check`)
+7. Build production image (`docker compose build zenith`)
+8. Smoke-boot the production image (`make smoke-boot`)
+
+The release workflow smoke-boots each architecture's image the same
+way before pushing it and, on a tag, stops before recording the pushed
+digest unless the pushed image's config is the booted build's
+(`tools/pushed-image-check.sh`).
+
+### Smoke boot
+
+`make smoke-boot` boots a built image as `docker run <image>` does with
+no mounts and no environment, so the config and demo targets baked into
+it are what boots. It publishes only the front door, on a loopback port
+over bridge networking; the compose deployment differs (host
+networking, a port variable, a data volume). It then checks that:
+
+- `/api/health` answers status `ok` with the version the workspace
+  `Cargo.toml` declares;
+- `/api/targets` lists the demo targets of `deploy/config.toml`, each
+  under its positional id;
+- each of those targets serves curated layouts with plotted channels,
+  within its recorded ceiling of undecodable channels (8 for the Apex
+  ops demo, none for the other two);
+- each target whose bundled config declares a command catalog (the
+  Apex ops demo) serves a non-empty one;
+- `/` serves a page whose module script answers a JavaScript type.
+
+A failed check, or a response of the wrong shape, names the problem
+and prints the container log. The container is removed either way, by
+its id, so a second run on the same port never removes the first's.
+
+It builds nothing and never pulls, so build (or pull) first. By
+default it boots this checkout's compose build, the name `docker
+compose config --images zenith` prints (compose names the image after
+the checkout directory). The checks run on the host and need `docker`,
+`curl` and `jq`:
+
+```bash
+make build                         # docker compose build zenith
+make smoke-boot                    # boots that build on 127.0.0.1:18080
+make smoke-boot SMOKE_PORT=18081   # another loopback port
+make smoke-boot SMOKE_IMAGE=<ref>  # any image in the local store
+```

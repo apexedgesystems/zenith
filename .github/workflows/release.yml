@@ -9,8 +9,11 @@
 #               CHANGELOG.md has its section (tools/changelog-section.sh),
 #               before any build spends a minute
 #   build    -- one native image build per architecture (amd64, arm64),
-#               with SBOM and provenance attestations; pushed by digest on
-#               a tag, built and discarded on a rehearsal
+#               booted with its bundled config and checked (make
+#               smoke-boot) before anything is pushed, then built with SBOM
+#               and provenance attestations; pushed by digest on a tag and
+#               checked to be the booted build before the digest is
+#               recorded, built and discarded on a rehearsal
 #   publish  -- tag only: one manifest list tagged vX.Y.Z (and latest for a
 #               full release; a pre-release such as v0.2.0-rc1 leaves latest
 #               alone), then the GitHub release with the CHANGELOG section as
@@ -117,6 +120,27 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
+      # The image is booted before anything is pushed. A push by digest
+      # with attestations cannot also load the image into the runner's
+      # daemon, so this build loads it first. The push build below reuses
+      # this build's cached steps only while the Dockerfile's FROM tags
+      # resolve to the same images; on a tag, the step after the push
+      # checks that the pushed image is this build.
+      - name: Build the image for the smoke boot
+        id: smoke_build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          tags: zenith-smoke:${{ matrix.arch }}
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=${{ matrix.arch }}
+
+      - name: Smoke-boot the image
+        run: make smoke-boot SMOKE_IMAGE=zenith-smoke:${{ matrix.arch }}
+
       - name: Build (and push by digest on a tag)
         id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
@@ -128,6 +152,19 @@ jobs:
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=${{ needs.check.outputs.publish }}
           cache-from: type=gha,scope=${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=${{ matrix.arch }}
+
+      # On a tag, the pushed linux/<arch> image's config digest must equal
+      # the booted build's (its metadata's containerimage.config.digest); a
+      # base image that moved between the two builds fails here. A failure
+      # leaves the pushed digest in the registry untagged and nothing is
+      # published. A rehearsal pushes nothing and skips this step.
+      - name: The pushed image is the build the smoke booted
+        if: needs.check.outputs.publish == 'true'
+        env:
+          PUSHED: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}
+          ARCH: ${{ matrix.arch }}
+          BOOTED_CONFIG: ${{ fromJSON(steps.smoke_build.outputs.metadata)['containerimage.config.digest'] }}
+        run: tools/pushed-image-check.sh --pushed "$PUSHED" --arch "$ARCH" --expected-config "$BOOTED_CONFIG"
 
       - name: Record the digest
         if: needs.check.outputs.publish == 'true'

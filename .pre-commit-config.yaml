@@ -8,6 +8,9 @@ files: |
     targets/|
     docs/|
     config/|
+    tools/|
+    deploy/|
+    \.github/|
     (Cargo\.toml|
      Cargo\.lock|
      Makefile|

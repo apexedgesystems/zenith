@@ -1,8 +1,9 @@
 # ==============================================================================
 # Zenith - Build System
 #
-# Build/run/test targets run inside Docker (no local Rust/Node required).
-# Format/lint targets run pre-commit on the host (one-time setup: `make hooks`).
+# Build/run/test/lint targets run inside Docker (no local Rust/Node required;
+# lint is clippy and ESLint in the dev container). Format targets run
+# pre-commit on the host (one-time setup: `make hooks`).
 #
 # Usage:
 #   make build          Build production Docker image
@@ -12,12 +13,13 @@
 #   make format         Auto-fix formatting via pre-commit
 #   make format-check   Check formatting (CI mode)
 #   make lint           Run clippy strict
+#   make smoke-boot     Boot the built image and check what it serves
 #   make hooks          Install git pre-commit hook
 #   make clean          Remove build artifacts
 #   make help           Show all targets
 # ==============================================================================
 
-.PHONY: build build-clean run run-clean dev stop test test-backend test-frontend bench clean format format-check lint hooks help
+.PHONY: build build-clean run run-clean dev stop test test-backend test-frontend smoke-boot bench clean format format-check lint hooks help
 
 IMAGE_NAME := zenith
 COMPOSE := docker compose
@@ -84,6 +86,30 @@ test-frontend:
 version-check:
 	tools/version-check.sh $(TAG)
 
+## Boot a built image as docker run does with no mounts and no environment,
+## and check what it serves (tools/smoke-boot.sh; builds nothing): health
+## and the declared version, the bundled demo targets under their ids,
+## their curated plots within each target's recorded ceiling of
+## undecodable channels, a non-empty command catalog where one is
+## declared, and the console. CI runs it on every image it builds.
+## SMOKE_IMAGE defaults to this checkout's compose build (docker compose
+## config --images zenith); SMOKE_PORT and SMOKE_TIMEOUT override the
+## script's defaults.
+smoke-boot: SMOKE_IMAGE ?= $(shell $(COMPOSE) config --images zenith 2>/dev/null)
+smoke-boot: SMOKE_ARGS = --image "$(SMOKE_IMAGE)" \
+	$(if $(SMOKE_PORT),--port "$(SMOKE_PORT)") \
+	$(if $(SMOKE_TIMEOUT),--timeout "$(SMOKE_TIMEOUT)")
+smoke-boot:
+	@if [ -z "$(SMOKE_IMAGE)" ]; then \
+		if [ "$(origin SMOKE_IMAGE)" = file ]; then \
+			echo "smoke-boot: docker compose config --images zenith printed no image; set SMOKE_IMAGE" >&2; \
+		else \
+			echo "smoke-boot: SMOKE_IMAGE is set but empty ($(origin SMOKE_IMAGE)); name an image, or unset it for the compose build" >&2; \
+		fi; \
+		exit 1; \
+	fi
+	tools/smoke-boot.sh $(strip $(SMOKE_ARGS))
+
 ## Run criterion benchmarks
 bench:
 	$(COMPOSE) run --rm -T dev bash -c \
@@ -113,7 +139,7 @@ bench:
 format:
 	pre-commit run --all-files
 
-## Check formatting (no fixes), show diffs on failure -- CI mode
+## Run every pre-commit hook; fail, showing the diff, when any changes a file (CI mode)
 format-check:
 	pre-commit run --all-files --show-diff-on-failure
 
@@ -154,4 +180,6 @@ help:
 	@echo "Targets:"
 	@grep -E '^## ' Makefile | sed 's/^## /  /'
 	@echo ""
-	@echo "All targets run inside Docker. No local Rust or Node required."
+	@echo "Builds, tests and lint run inside Docker; no local Rust or Node required."
+	@echo "format, format-check and hooks run pre-commit on the host; smoke-boot"
+	@echo "needs docker, curl and jq there (docs/TESTING.md)."

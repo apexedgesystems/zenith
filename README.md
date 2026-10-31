@@ -315,11 +315,15 @@ make run
 | `make test-backend`  | Backend only: `cargo test --lib` (currently 197 unit tests)                                    |
 | `make test-frontend` | Frontend only: `vitest run` (currently 128 unit tests)                                         |
 | `make bench`         | Run criterion benches (`protocol`, `storage`, `decoder`)                                       |
-| `make format`        | Run rustfmt across the backend                                                                 |
-| `make lint`          | Run clippy with `-D warnings`                                                                  |
+| `make format`        | Run every pre-commit hook over the repo; the formatters fix in place                           |
+| `make format-check`  | The same hooks; fails, showing the diff, when any of them changes a file (CI mode)             |
+| `make lint`          | Clippy with `-D warnings`, then ESLint, in Docker                                              |
+| `make smoke-boot`    | Boot the built image with `docker run` (no mounts) and check what it serves (CI runs it)       |
 
-All commands run inside Docker -- no local Rust or Node toolchain
-required.
+Builds, tests and lint run inside Docker -- no local Rust or Node
+toolchain required. `make format` runs pre-commit on the host, and
+`make smoke-boot` needs `docker`, `curl` and `jq` there
+([docs/TESTING.md](docs/TESTING.md)).
 
 The `make run` target uses `docker compose build` (not raw
 `docker build`) so the resulting image is tagged correctly for compose.
@@ -690,8 +694,11 @@ To cut a release: bump the two version fields, retitle the
 changelog section, merge, then tag `vX.Y.Z` on main and push the
 tag. The release workflow checks the tag against the declared
 version and the changelog before any build starts, builds the image
-natively for amd64 and arm64 with SBOM and provenance attestations,
-publishes the multi-arch manifest as
+natively for amd64 and arm64, boots each build with its bundled config
+and checks what it serves (`make smoke-boot`), builds it again with
+SBOM and provenance attestations to push it, stops unless the pushed
+image is the booted build (`tools/pushed-image-check.sh`), publishes
+the multi-arch manifest as
 `ghcr.io/apexedgesystems/zenith:vX.Y.Z` and `:latest`, and creates
 the GitHub release with that changelog section as its body and the
 compose file, the image manifest and SHA256SUMS attached. A
