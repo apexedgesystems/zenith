@@ -1,9 +1,13 @@
 # ==============================================================================
-# CI -- Build, test, and lint on push/PR to main
+# CI -- Build, test, and lint on pull requests to main
 #
 # Runs all checks inside the dev Docker Compose service (Rust + Node).
-# The production image is built as a final step to verify the multi-stage
-# Dockerfile stays valid.
+# The production image is built as a final step and booted as docker run
+# boots it with no mounts and no environment (make smoke-boot), so its
+# bundled config and demo targets are what boots; docs/TESTING.md lists
+# what the smoke checks it serves. A second job scans the tree and the
+# pull request's commits for secrets (make secret-scan, rules in
+# .gitleaks.toml).
 # ==============================================================================
 name: CI
 
@@ -51,3 +55,30 @@ jobs:
 
       - name: Build production image
         run: docker compose build zenith
+
+      - name: Smoke-boot the production image
+        run: make smoke-boot
+
+  secret-scan:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Full history: the pull request's commits are scanned, not only
+          # the tree they produce.
+          fetch-depth: 0
+
+      - name: Scan the tree and the pull request's commits
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [ -n "$BASE_SHA" ]; then
+            make secret-scan SECRET_SCAN_RANGE="$BASE_SHA..$HEAD_SHA"
+          else
+            make secret-scan
+          fi
