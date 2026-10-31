@@ -42,18 +42,19 @@ function AddTargetForm({
   onAdd,
   onCancel,
 }: {
-  onAdd: (name: string, host: string, port: number) => void;
+  onAdd: (name: string, host: string, port: number, dir: string) => void;
   onCancel: () => void;
 }) {
   const [name, setName] = useState("");
   const [host, setHost] = useState("");
   const [port, setPort] = useState("9000");
+  const [dir, setDir] = useState("");
 
   const submit = () => {
     if (!name.trim() || !host.trim()) return;
     const p = parseInt(port);
     if (isNaN(p) || p < 1 || p > 65535) return; // Invalid port
-    onAdd(name.trim(), host.trim(), p);
+    onAdd(name.trim(), host.trim(), p, dir.trim());
   };
 
   return (
@@ -80,6 +81,13 @@ function AddTargetForm({
         placeholder="Port"
         className="mono text-xs px-2 py-1"
         type="number"
+      />
+      <input
+        value={dir}
+        onChange={(e) => setDir(e.target.value)}
+        placeholder="Target directory (optional)"
+        title="Generated artifact directory. Without it the target connects but decodes unnamed channels and has no command catalog."
+        className="mono text-xs px-2 py-1"
       />
       <div className="flex gap-1">
         <button
@@ -455,20 +463,31 @@ function Shell() {
     }
   };
 
-  const addTarget = async (name: string, host: string, port: number) => {
+  const addTarget = async (
+    name: string,
+    host: string,
+    port: number,
+    dir: string,
+  ) => {
     try {
       const r = await apiFetch("/api/targets/add", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, host, port }),
+        body: JSON.stringify(
+          dir ? { name, host, port, dir } : { name, host, port },
+        ),
       });
       if (r.ok) {
         const data = await r.json();
         setSelectedTarget(data.id);
         setShowAddForm(false);
+      } else {
+        // A refused add shows the server's reason and keeps the form
+        // open, so the operator can correct the definition and retry.
+        await notify(await r.text(), "Add target failed");
       }
-    } catch {
-      /* ignore */
+    } catch (e) {
+      await notify(`${e}`, "Add target failed");
     }
   };
 
@@ -613,7 +632,7 @@ function Shell() {
                     }
                   />
                   <span
-                    className="text-xs font-semibold truncate"
+                    className="text-[13px] font-semibold break-words min-w-0"
                     style={{
                       color: active
                         ? "var(--color-text-primary)"

@@ -87,8 +87,6 @@ struct TargetState {
     struct_dicts: Arc<StructDictionary>,
     /// App manifest (component registry from build artifact)
     manifest: Option<Arc<crate::core::config_manager::AppManifest>>,
-    /// Telemetry display config (plot layouts from target config)
-    telemetry_config: Option<Arc<crate::core::config_manager::TelemetryConfig>>,
     /// Command definitions (quick commands + per-component commands)
     commands_config: Option<Arc<crate::core::config_manager::CommandConfig>>,
     /// Connect-time init sequence (named steps; the link runs it,
@@ -98,6 +96,9 @@ struct TargetState {
     /// telemetry; the link's RecordSpec derives from it)
     record_table: Option<Arc<crate::core::config_manager::RecordTable>>,
     _router_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Timed block reads feeding the telemetry stream (config `poll`);
+    /// torn down wherever the router is.
+    _poll_handles: Vec<tokio::task::JoinHandle<()>>,
 }
 
 struct SharedState {
@@ -332,6 +333,141 @@ fn build_link(
     }
 }
 
+/// The generated artifacts a target's link and decoder use, loaded
+/// once. Boot and the runtime add-target path resolve them through
+/// this one loader, so an added target names its channels and offers
+/// its command catalog as a configured one does. Curated plot layouts
+/// are not held here: they live in the database, seeded at
+/// registration by `core::registration`.
+struct TargetArtifacts {
+    dicts: Arc<StructDictionary>,
+    manifest: Option<Arc<crate::core::config_manager::AppManifest>>,
+    commands_config: Option<Arc<crate::core::config_manager::CommandConfig>>,
+    connect_init: Option<Arc<crate::core::config_manager::ConnectInit>>,
+    record_table: Option<Arc<crate::core::config_manager::RecordTable>>,
+}
+
+/// Load a target's artifacts from wherever its definition points --
+/// a target directory by convention, or explicit paths. Display
+/// artifacts degrade to warnings (a missing command catalog costs the
+/// catalog, not the target); the connect-init sequence is load-bearing,
+/// so a broken one is returned as an error for the caller to refuse on.
+fn load_target_artifacts(
+    tc: &config::TargetSection,
+    global_dicts: &Arc<StructDictionary>,
+) -> Result<TargetArtifacts, String> {
+    let name = tc.name.as_str();
+
+    let dicts = match tc.structs_path() {
+        Some(dir) => match StructDictionary::load_dir(std::path::Path::new(&dir)) {
+            Ok(d) => {
+                tracing::info!(
+                    "Loaded per-target struct dicts for {} from {} ({} components)",
+                    name,
+                    dir,
+                    d.components.len()
+                );
+                for w in d.validate() {
+                    tracing::warn!("  struct dict warning [{}]: {}", name, w);
+                }
+                Arc::new(d)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to load struct dicts for {}: {}, using global",
+                    name,
+                    e
+                );
+                global_dicts.clone()
+            }
+        },
+        None => global_dicts.clone(),
+    };
+
+    let manifest = tc.manifest_path().and_then(|path| {
+        match crate::core::config_manager::AppManifest::load(std::path::Path::new(&path)) {
+            Ok(m) => {
+                tracing::info!(
+                    "Loaded app manifest for {}: {} ({} components)",
+                    name,
+                    m.application,
+                    m.components.len()
+                );
+                for w in m.validate() {
+                    tracing::warn!("  manifest warning [{}]: {}", name, w);
+                }
+                Some(Arc::new(m))
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load manifest for {}: {}", name, e);
+                None
+            }
+        }
+    });
+
+    let commands_config =
+        tc.commands_path().and_then(
+            |path| match crate::core::config_manager::CommandConfig::load(std::path::Path::new(
+                &path,
+            )) {
+                Ok(cc) => {
+                    tracing::info!(
+                        "Loaded command config for {}: {} quick commands, {} components",
+                        name,
+                        cc.quick_commands.len(),
+                        cc.components.len()
+                    );
+                    Some(Arc::new(cc))
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load command config for {}: {}", name, e);
+                    None
+                }
+            },
+        );
+
+    // Load-bearing: a broken init sequence means every connect comes
+    // up half-armed, so the caller refuses rather than degrading.
+    let connect_init = match tc.connect_init_path() {
+        Some(path) => {
+            let ci = crate::core::config_manager::ConnectInit::load(std::path::Path::new(&path))
+                .map_err(|e| format!("connect_init: {}", e))?;
+            tracing::info!(
+                "Loaded connect init for {}: {} step(s): {}",
+                name,
+                ci.on_connect.len(),
+                ci.step_names()
+            );
+            Some(Arc::new(ci))
+        }
+        None => None,
+    };
+
+    // Load-bearing as well: a record table that fails to parse would
+    // leave a record-stream target decoding nothing by name.
+    let record_table = match tc.records_path() {
+        Some(path) => {
+            let table = crate::core::config_manager::RecordTable::load(std::path::Path::new(&path))
+                .map_err(|e| format!("records: {}", e))?;
+            tracing::info!(
+                "Loaded record dictionary for {}: {} channels",
+                name,
+                table.records.len()
+            );
+            Some(Arc::new(table))
+        }
+        None => None,
+    };
+
+    Ok(TargetArtifacts {
+        dicts,
+        manifest,
+        commands_config,
+        connect_init,
+        record_table,
+    })
+}
+
 /// Resolve a target's carrier declaration against its protocol.
 /// Errors are boot refusals: a misspelled carrier or a UDP listener
 /// with no port must never silently become a link that hears nothing.
@@ -516,6 +652,14 @@ async fn do_connect_target(state: &AppState, id: &str) -> Result<bool, (StatusCo
         if let Some(old) = target._router_handle.replace(handle) {
             old.abort();
         }
+        for h in target._poll_handles.drain(..) {
+            h.abort();
+        }
+        target._poll_handles = crate::core::poll::spawn_polls(
+            &target.config.poll,
+            target.client.clone(),
+            target.push_tlm_tx.clone(),
+        );
     }
     Ok(true)
 }
@@ -622,6 +766,9 @@ async fn disconnect_target(
             .get_mut(&id)
             .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
         if let Some(h) = target._router_handle.take() {
+            h.abort();
+        }
+        for h in target._poll_handles.drain(..) {
             h.abort();
         }
         (target.client.clone(), db)
@@ -2718,6 +2865,15 @@ struct AddTargetRequest {
     host: String,
     #[serde(default = "default_port_9000")]
     port: u16,
+    /// The target's generated artifact directory: named channels,
+    /// command catalog and curated plots, found as boot finds them for
+    /// a config.toml target. Add Target creates aproto-slip targets
+    /// only, so a directory with a connect-init sequence is refused;
+    /// stream protocols and connect-init are declared in config.toml.
+    #[serde(default)]
+    dir: Option<String>,
+    /// Struct dictionaries alone, for a bundle that does not follow
+    /// the directory convention.
     #[serde(default)]
     structs_dir: Option<String>,
 }
@@ -2732,42 +2888,25 @@ async fn add_target(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<AddTargetRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    // Load struct dicts BEFORE taking the write guard -- load_dir hits
-    // the filesystem and must not stall every request behind a parked
-    // writer.
-    let loaded_dicts = body
-        .structs_dir
-        .as_ref()
-        .and_then(|dir| StructDictionary::load_dir(&std::path::PathBuf::from(dir)).ok())
-        .map(Arc::new);
-
-    let (push_tlm_tx, _) = broadcast::channel::<PushTelemetryPacket>(4096);
-    let (sample_tx, _) = broadcast::channel::<TelemetrySample>(4096);
-
-    let mut st = state.write().await;
-    let db_for_audit = st.db.clone();
-
-    // ID scheme: config-file targets are positional (target-0,
-    // target-1, ...) and stable across restarts so their DB history
-    // stays addressable. Dynamically added targets get a random
-    // suffix: any length-derived id can collide with an id already
-    // carried by another target's telemetry rows, layouts, and audit
-    // history after a remove-then-add sequence.
-    let id = loop {
-        let candidate = format!("target-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
-        if !st.targets.contains_key(&candidate) {
-            break candidate;
+    if let Some(dir) = body.dir.as_deref() {
+        if !std::path::Path::new(dir).is_dir() {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("target directory '{}' does not exist", dir),
+            ));
         }
-    };
+    }
 
-    let target_dicts = loaded_dicts.unwrap_or_else(|| st.struct_dicts.clone());
-
+    // Build the definition first so artifact loading goes through the
+    // same resolver boot uses: an aproto-slip target added here gets
+    // the channels, catalog and plots one declared in config.toml gets.
     let tc = config::TargetSection {
         name: body.name.clone(),
         host: body.host.clone(),
         port: body.port,
+        dir: body.dir.clone(),
         manifest: None,
-        structs_dir: body.structs_dir,
+        structs_dir: body.structs_dir.clone(),
         telemetry_config: None,
         commands_config: None,
         // UI-added targets speak the default protocol; config.toml is
@@ -2786,6 +2925,42 @@ async fn add_target(
         records_config: None,
         connect_init: None,
         auto_connect: false,
+        poll: Vec::new(),
+    };
+
+    // Load artifacts BEFORE taking the write guard -- these hit the
+    // filesystem and must not stall every request behind a parked
+    // writer.
+    let global_dicts = { state.read().await.struct_dicts.clone() };
+    let artifacts =
+        load_target_artifacts(&tc, &global_dicts).map_err(|e| (StatusCode::BAD_REQUEST, e))?;
+    if artifacts.connect_init.is_some() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "connect_init is not supported on aproto-slip; declare stream protocols \
+             in config.toml"
+                .to_string(),
+        ));
+    }
+
+    let (push_tlm_tx, _) = broadcast::channel::<PushTelemetryPacket>(4096);
+    let (sample_tx, _) = broadcast::channel::<TelemetrySample>(4096);
+    let telemetry_path = tc.telemetry_path();
+
+    let mut st = state.write().await;
+    let db = st.db.clone();
+
+    // ID scheme: config-file targets are positional (target-0,
+    // target-1, ...) and stable across restarts so their DB history
+    // stays addressable. Dynamically added targets get a random
+    // suffix: any length-derived id can collide with an id already
+    // carried by another target's telemetry rows, layouts, and audit
+    // history after a remove-then-add sequence.
+    let id = loop {
+        let candidate = format!("target-{}", &uuid::Uuid::new_v4().simple().to_string()[..8]);
+        if !st.targets.contains_key(&candidate) {
+            break candidate;
+        }
     };
 
     let metrics = TargetMetrics::new();
@@ -2812,19 +2987,37 @@ async fn add_target(
             metrics,
             push_tlm_tx,
             sample_tx,
-            struct_dicts: target_dicts,
-            manifest: None,
-            telemetry_config: None,
-            commands_config: None,
-            connect_init: None,
-            record_table: None,
+            struct_dicts: artifacts.dicts,
+            manifest: artifacts.manifest,
+            commands_config: artifacts.commands_config,
+            connect_init: artifacts.connect_init,
+            record_table: artifacts.record_table,
             _router_handle: None,
+            _poll_handles: Vec::new(),
         },
     );
+    drop(st);
 
-    tracing::info!("Added target: {} ({}:{})", body.name, body.host, body.port);
+    // Curated plots are served from the database: register them before
+    // answering, outside the write guard (file and database work), so
+    // the caller's next layouts read finds them as it would for a
+    // configured target.
+    let layouts = crate::core::registration::register_layouts(
+        &db,
+        &id,
+        &body.name,
+        telemetry_path.as_deref(),
+    );
+
+    tracing::info!(
+        "Added target: {} ({}:{}), {} layouts",
+        body.name,
+        body.host,
+        body.port,
+        layouts.map_or(0, |cfg| cfg.layouts.len())
+    );
     record_audit(
-        &db_for_audit,
+        &db,
         &actor.0,
         "add_target",
         Some(&id),
@@ -2869,8 +3062,11 @@ async fn remove_target(
     cli.disconnect();
     drop(cli);
 
-    // Abort telemetry router
+    // Abort telemetry router and any block polls
     if let Some(h) = target._router_handle {
+        h.abort();
+    }
+    for h in target._poll_handles {
         h.abort();
     }
 
@@ -4087,6 +4283,18 @@ async fn main() {
         Arc::new(StructDictionary::default())
     };
 
+    // A mistyped target directory would otherwise produce a silently
+    // featureless target: connected, decoding nothing by name.
+    if let Some((name, dir)) = config::missing_target_dir(&config.targets) {
+        eprintln!("FATAL: target '{}': dir '{}' is not a directory", name, dir);
+        std::process::exit(1);
+    }
+
+    if let Some((name, reason)) = config::invalid_poll(&config.targets) {
+        eprintln!("FATAL: target '{}': {}", name, reason);
+        std::process::exit(1);
+    }
+
     // Cross-target definition check: two targets binding one local
     // listen port cannot both hear their telemetry, and the loser
     // would only find out at connect time. Boot refusal instead.
@@ -4106,99 +4314,19 @@ async fn main() {
         let (push_tlm_tx, _) = broadcast::channel::<PushTelemetryPacket>(4096);
         let (sample_tx, _) = broadcast::channel::<TelemetrySample>(4096);
 
-        // Per-target struct dicts (falls back to global)
-        let target_dicts = if let Some(ref dir) = tc.structs_dir {
-            let path = std::path::PathBuf::from(dir);
-            match StructDictionary::load_dir(&path) {
-                Ok(dicts) => {
-                    tracing::info!(
-                        "Loaded per-target struct dicts for {} from {} ({} components)",
-                        tc.name,
-                        dir,
-                        dicts.components.len()
-                    );
-                    for w in dicts.validate() {
-                        tracing::warn!("  struct dict warning [{}]: {}", tc.name, w);
-                    }
-                    Arc::new(dicts)
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to load struct dicts for {}: {}, using global",
-                        tc.name,
-                        e
-                    );
-                    global_dicts.clone()
-                }
-            }
-        } else {
-            global_dicts.clone()
-        };
-
-        // Load app manifest (build artifact describing component registry)
-        let manifest = tc.manifest.as_ref().and_then(|path| {
-            match crate::core::config_manager::AppManifest::load(&std::path::PathBuf::from(path)) {
-                Ok(m) => {
-                    tracing::info!(
-                        "Loaded app manifest for {}: {} ({} components)",
-                        tc.name,
-                        m.application,
-                        m.components.len()
-                    );
-                    for w in m.validate() {
-                        tracing::warn!("  manifest warning [{}]: {}", tc.name, w);
-                    }
-                    Some(Arc::new(m))
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to load manifest for {}: {}", tc.name, e);
-                    None
-                }
-            }
+        // Every generated artifact this target has, from its
+        // directory or its explicit paths. One loader, shared with the
+        // runtime add-target path, so an aproto-slip target added to a
+        // running zenith finds its artifacts as one declared here does.
+        let artifacts = load_target_artifacts(tc, &global_dicts).unwrap_or_else(|e| {
+            eprintln!("FATAL: target '{}': {}", tc.name, e);
+            std::process::exit(1);
         });
-
-        // Load telemetry display config (plot layouts)
-        let telemetry_config = tc.telemetry_config.as_ref().and_then(|path| {
-            match crate::core::config_manager::TelemetryConfig::load(&std::path::PathBuf::from(
-                path,
-            )) {
-                Ok(tc_cfg) => {
-                    tracing::info!(
-                        "Loaded telemetry config for {}: {} layouts",
-                        tc.name,
-                        tc_cfg.layouts.len()
-                    );
-                    for w in tc_cfg.validate() {
-                        tracing::warn!("  telemetry config warning [{}]: {}", tc.name, w);
-                    }
-                    Some(Arc::new(tc_cfg))
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to load telemetry config for {}: {}", tc.name, e);
-                    None
-                }
-            }
-        });
-
-        // Load command definitions
-        let commands_config = tc.commands_config.as_ref().and_then(|path| {
-            match crate::core::config_manager::CommandConfig::load(&std::path::PathBuf::from(path))
-            {
-                Ok(cc) => {
-                    tracing::info!(
-                        "Loaded command config for {}: {} quick commands, {} components",
-                        tc.name,
-                        cc.quick_commands.len(),
-                        cc.components.len()
-                    );
-                    Some(Arc::new(cc))
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to load command config for {}: {}", tc.name, e);
-                    None
-                }
-            }
-        });
+        let target_dicts = artifacts.dicts;
+        let manifest = artifacts.manifest;
+        let commands_config = artifacts.commands_config;
+        let connect_init = artifacts.connect_init;
+        let record_table = artifacts.record_table;
 
         let metrics = TargetMetrics::new();
         // Boot refusal on an unknown protocol: a typo in config.toml
@@ -4231,7 +4359,7 @@ async fn main() {
         // handling), not raw bytes injected under it -- until that
         // exists, declaring the file there must refuse rather than
         // load-log-audit a sequence that never gets sent.
-        if protocol == Protocol::AprotoSlip && tc.connect_init.is_some() {
+        if protocol == Protocol::AprotoSlip && connect_init.is_some() {
             eprintln!(
                 "FATAL: target '{}': connect_init is not supported on aproto-slip \
                  (stream protocols only; the aproto command path owns connect-time behavior)",
@@ -4239,58 +4367,17 @@ async fn main() {
             );
             std::process::exit(1);
         }
-        // A broken file means every connect comes up half-armed, so
-        // it refuses boot like any other definition bug (contrast
-        // the display-only artifacts above, which degrade to
-        // warnings).
-        let connect_init =
-            tc.connect_init.as_ref().map(
-                |path| match crate::core::config_manager::ConnectInit::load(std::path::Path::new(
-                    path,
-                )) {
-                    Ok(ci) => {
-                        tracing::info!(
-                            "Loaded connect init for {}: {} step(s): {}",
-                            tc.name,
-                            ci.on_connect.len(),
-                            ci.step_names()
-                        );
-                        Arc::new(ci)
-                    }
-                    Err(e) => {
-                        eprintln!("FATAL: target '{}': connect_init: {}", tc.name, e);
-                        std::process::exit(1);
-                    }
-                },
-            );
         // Record-stage protocols need their generated table; a
-        // missing or broken one is a definition bug -> boot refusal.
-        let record_table = if protocol == Protocol::TmCcsdsSppRecords {
-            let Some(path) = tc.records_config.as_ref() else {
-                eprintln!(
-                    "FATAL: target '{}': protocol '{}' requires records_config \
-                     (the generated record table)",
-                    tc.name, tc.protocol
-                );
-                std::process::exit(1);
-            };
-            match crate::core::config_manager::RecordTable::load(std::path::Path::new(path)) {
-                Ok(table) => {
-                    tracing::info!(
-                        "Loaded record dictionary for {}: {} channels",
-                        tc.name,
-                        table.records.len()
-                    );
-                    Some(Arc::new(table))
-                }
-                Err(e) => {
-                    eprintln!("FATAL: target '{}': records_config: {}", tc.name, e);
-                    std::process::exit(1);
-                }
-            }
-        } else {
-            None
-        };
+        // missing one is a definition bug -> boot refusal (a broken
+        // one already refused in the loader).
+        if protocol == Protocol::TmCcsdsSppRecords && record_table.is_none() {
+            eprintln!(
+                "FATAL: target '{}': protocol '{}' requires records.json in the target \
+                 directory (or records_config)",
+                tc.name, tc.protocol
+            );
+            std::process::exit(1);
+        }
         let record_spec = record_table.as_ref().map(|t| record_spec_from_table(t));
         let mut new_client = build_link(
             protocol,
@@ -4314,11 +4401,11 @@ async fn main() {
                 sample_tx,
                 struct_dicts: target_dicts,
                 manifest,
-                telemetry_config,
                 commands_config,
                 connect_init,
                 record_table,
                 _router_handle: None,
+                _poll_handles: Vec::new(),
             },
         );
     }
@@ -4572,15 +4659,15 @@ async fn main() {
         }
     });
 
-    // Seed telemetry layouts from config files into DB
+    // Register each target's curated layouts with the database, the
+    // same helper runtime Add Target uses.
     for (id, target) in &targets {
-        if let Some(ref tc) = target.telemetry_config {
-            match db.seed_layouts(id, tc) {
-                Ok(n) if n > 0 => tracing::info!("Seeded {} telemetry layouts for {}", n, id),
-                Ok(_) => {}
-                Err(e) => tracing::warn!("Failed to seed layouts for {}: {}", id, e),
-            }
-        }
+        crate::core::registration::register_layouts(
+            &db,
+            id,
+            &target.config.name,
+            target.config.telemetry_path().as_deref(),
+        );
     }
 
     // Browser sessions live in the database so a restart keeps them;
@@ -4718,6 +4805,9 @@ async fn main() {
         let mut st = shutdown_state.write().await;
         for (id, target) in st.targets.iter_mut() {
             if let Some(h) = target._router_handle.take() {
+                h.abort();
+            }
+            for h in target._poll_handles.drain(..) {
                 h.abort();
             }
             let mut cli = target.client.lock().await;

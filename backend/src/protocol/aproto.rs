@@ -219,6 +219,41 @@ pub fn parse_packet(data: &[u8]) -> Option<Packet> {
     })
 }
 
+/// Name a status byte. The same byte carries two different code sets
+/// depending on who wrote it: a COMPLETION frame is the deferred
+/// terminal of a queued command, so its status is the component
+/// handler's own result; every other frame is written by the
+/// interface itself, so its status is the interface's NAK code.
+/// The two sets share values (3 is a handler's INVALID_ARGUMENT and
+/// the interface's NO_RESOLVER), so the stage, never the value,
+/// selects the table.
+fn status_name_for(status: u8, stage: u8) -> String {
+    if stage == STAGE_COMPLETION {
+        return match status {
+            0 => "SUCCESS".to_string(),
+            1 => "NOT_IMPLEMENTED".to_string(),
+            2 => "INVALID_PAYLOAD".to_string(),
+            3 => "INVALID_ARGUMENT".to_string(),
+            4 => "TARGET_NOT_FOUND".to_string(),
+            5 => "LOAD_FAILED".to_string(),
+            6 => "EXEC_FAILED".to_string(),
+            // Codes past the shared set belong to the component that
+            // raised them; the number is the honest label.
+            other => format!("COMPONENT_CODE_0x{:02X}", other),
+        };
+    }
+    match status {
+        0 => "SUCCESS",
+        1 => "UNKNOWN_OPCODE",
+        2 => "INVALID_PAYLOAD",
+        3 => "NO_RESOLVER",
+        4 => "COMPONENT_NOT_FOUND",
+        5 => "LOAD_FAILED",
+        _ => "UNKNOWN",
+    }
+    .to_string()
+}
+
 /// Parse an ACK/NAK payload (8+ bytes).
 pub fn parse_ack(payload: &[u8]) -> Option<AckResponse> {
     if payload.len() < 8 {
@@ -235,16 +270,7 @@ pub fn parse_ack(payload: &[u8]) -> Option<AckResponse> {
         Vec::new()
     };
 
-    let status_name = match status {
-        0 => "SUCCESS",
-        1 => "UNKNOWN_OPCODE",
-        2 => "INVALID_PAYLOAD",
-        3 => "NO_RESOLVER",
-        4 => "COMPONENT_NOT_FOUND",
-        5 => "LOAD_FAILED",
-        _ => "UNKNOWN",
-    }
-    .to_string();
+    let status_name = status_name_for(status, stage);
 
     Some(AckResponse {
         cmd_opcode,
@@ -333,6 +359,37 @@ mod tests {
     fn parse_ack_rejects_short_payload() {
         assert!(parse_ack(&[]).is_none());
         assert!(parse_ack(&[0x00, 0x01, 0x02]).is_none());
+    }
+
+    /// @test A COMPLETION frame's status is the component handler's
+    /// result, not an interface NAK: the same byte 3 reads
+    /// INVALID_ARGUMENT on a completion and NO_RESOLVER on an
+    /// immediate frame, 6 reads EXEC_FAILED, and codes past the
+    /// shared set keep their number instead of a guessed name.
+    #[test]
+    fn completion_status_names_use_component_results() {
+        let ack_at = |status: u8, stage: u8| {
+            parse_ack(&[0x06, 0x01, 0x07, 0x00, status, stage, 0, 0]).unwrap()
+        };
+        for (status, expected) in [
+            (0u8, "SUCCESS"),
+            (1, "NOT_IMPLEMENTED"),
+            (2, "INVALID_PAYLOAD"),
+            (3, "INVALID_ARGUMENT"),
+            (4, "TARGET_NOT_FOUND"),
+            (5, "LOAD_FAILED"),
+            (6, "EXEC_FAILED"),
+            (0x20, "COMPONENT_CODE_0x20"),
+        ] {
+            assert_eq!(
+                ack_at(status, STAGE_COMPLETION).status_name,
+                expected,
+                "completion status {}",
+                status
+            );
+        }
+        assert_eq!(ack_at(3, STAGE_RESULT).status_name, "NO_RESOLVER");
+        assert_eq!(ack_at(3, STAGE_QUEUED).status_name, "NO_RESOLVER");
     }
 
     /// @test Every documented status code maps to its named string,

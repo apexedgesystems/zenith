@@ -4,6 +4,8 @@ pub mod aproto_client;
 pub mod auth;
 pub mod config_manager;
 pub mod metrics;
+pub mod poll;
+pub mod registration;
 pub mod sequence;
 pub mod session;
 pub mod stream_link;

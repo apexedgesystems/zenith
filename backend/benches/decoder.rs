@@ -322,15 +322,18 @@ fn make_packets() -> Vec<PushTelemetryPacket> {
                 0x00, 0x00, 0x00, 0x3F, // output = 0.5
                 0x00, 0x00, 0x80, 0x3F, // phase = 1.0
             ],
+            category: None,
         });
         packets.push(PushTelemetryPacket {
             full_uid: uid,
             payload: vec![0u8; 48],
+            category: None,
         });
     }
     packets.push(PushTelemetryPacket {
         full_uid: 0x00D100,
         payload: vec![0u8; 24],
+        category: None,
     });
     packets
 }

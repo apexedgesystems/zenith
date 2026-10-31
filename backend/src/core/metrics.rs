@@ -17,6 +17,9 @@ pub struct TargetMetrics {
     pub dedup_drops: AtomicU64,
     /// Push packets missed by the router (broadcast lag).
     pub router_lag_drops: AtomicU64,
+    /// Packets refused by the router: read as a data category whose
+    /// blocks have no member of the payload's size.
+    pub category_mismatch_drops: AtomicU64,
     /// Samples missed by the DB writer (broadcast lag).
     pub db_writer_lag_drops: AtomicU64,
     /// Samples committed to the DB.
@@ -61,6 +64,7 @@ impl TargetMetrics {
             "decoded_samples": self.decoded_samples.load(Ordering::Relaxed),
             "dedup_drops": self.dedup_drops.load(Ordering::Relaxed),
             "router_lag_drops": self.router_lag_drops.load(Ordering::Relaxed),
+            "category_mismatch_drops": self.category_mismatch_drops.load(Ordering::Relaxed),
             "db_writer_lag_drops": self.db_writer_lag_drops.load(Ordering::Relaxed),
             "db_written_samples": self.db_written_samples.load(Ordering::Relaxed),
             "db_write_failures": self.db_write_failures.load(Ordering::Relaxed),

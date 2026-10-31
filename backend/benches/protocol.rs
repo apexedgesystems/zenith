@@ -89,6 +89,55 @@ fn bench_aproto_parse(c: &mut Criterion) {
     group.finish();
 }
 
+/// ACK frames by stage and status, one ACK per iteration: an immediate
+/// RESULT with two extra bytes (the existing ack_parse frame), deferred
+/// COMPLETIONs whose status is a handler code (3, 6) and past the shared
+/// set (0x20), and an INSPECT RESULT carrying a 256-byte block. Each
+/// frame's stage, status and extra length are checked before timing.
+fn bench_ack_parse_cases(c: &mut Criterion) {
+    fn ack(opcode: u16, status: u8, stage: u8, extra: &[u8]) -> Vec<u8> {
+        let mut p = Vec::with_capacity(8 + extra.len());
+        p.extend_from_slice(&opcode.to_le_bytes());
+        p.extend_from_slice(&42u16.to_le_bytes());
+        p.extend_from_slice(&[status, stage, 0, 0]);
+        p.extend_from_slice(extra);
+        p
+    }
+    let block: Vec<u8> = (0..256u32).map(|i| (i * 7 + 1) as u8).collect();
+    let cases: [(&str, Vec<u8>, u8, u8, usize); 5] = [
+        (
+            "result_success_2B",
+            ack(0x0100, 0, 0, &[0xFF, 0xFE]),
+            0,
+            0,
+            2,
+        ),
+        ("completion_status_3", ack(0x0104, 3, 2, &[]), 2, 3, 0),
+        ("completion_status_6", ack(0x0104, 6, 2, &[]), 2, 6, 0),
+        (
+            "completion_status_0x20",
+            ack(0x0104, 0x20, 2, &[]),
+            2,
+            0x20,
+            0,
+        ),
+        ("inspect_result_256B", ack(0x0130, 0, 0, &block), 0, 0, 256),
+    ];
+    let mut group = c.benchmark_group("ack_parse_cases");
+    for (name, frame, stage, status, extra_len) in &cases {
+        let parsed = aproto::parse_ack(frame).expect("fixture frame parses");
+        assert_eq!(
+            (parsed.stage, parsed.status, parsed.extra.len()),
+            (*stage, *status, *extra_len),
+            "fixture {name}"
+        );
+        group.bench_function(*name, |b| {
+            b.iter(|| black_box(aproto::parse_ack(black_box(frame))))
+        });
+    }
+    group.finish();
+}
+
 fn bench_full_pipeline(c: &mut Criterion) {
     let mut group = c.benchmark_group("full_pipeline");
 
@@ -160,6 +209,7 @@ criterion_group! {
         bench_slip_decode_chunked,
         bench_aproto_build,
         bench_aproto_parse,
+        bench_ack_parse_cases,
         bench_full_pipeline,
         bench_spp_extract,
         bench_tm_deframe,

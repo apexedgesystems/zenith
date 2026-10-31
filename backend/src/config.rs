@@ -242,6 +242,15 @@ pub struct TargetSection {
     /// the target config directory like every other artifact there.
     #[serde(default)]
     pub connect_init: Option<String>,
+    /// The target's generated artifact directory. Naming it is
+    /// enough: the conventional filenames inside it (app_manifest.json,
+    /// structs/, telemetry.json, commands.json, on_connect.json,
+    /// records.json) are found automatically, and whichever are absent
+    /// simply do not exist for this target. The explicit path fields
+    /// below still win when set, for directories that do not follow
+    /// the convention.
+    #[serde(default)]
+    pub dir: Option<String>,
     #[serde(default)]
     pub manifest: Option<String>,
     #[serde(default)]
@@ -252,6 +261,114 @@ pub struct TargetSection {
     pub commands_config: Option<String>,
     #[serde(default)]
     pub auto_connect: bool,
+    /// APROTO targets: data blocks read on a timer while connected and
+    /// fed into the telemetry pipeline as if pushed. For vehicles that
+    /// publish nothing on their own -- the blocks still chart, store,
+    /// and drive health cards. Each read is a command round trip, so
+    /// rates stay modest.
+    #[serde(default)]
+    pub poll: Vec<PollBlock>,
+}
+
+/// One data block to poll: whose, which category, how often.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PollBlock {
+    /// Component fullUid ("0x" hex or decimal).
+    pub uid: String,
+    /// Data category (0 STATIC_PARAM .. 4 OUTPUT).
+    pub category: u8,
+    #[serde(default = "default_poll_hz")]
+    pub rate_hz: f64,
+}
+
+impl PollBlock {
+    /// The timer period this row's rate gives; see [`poll_period`].
+    pub fn period(&self) -> Option<std::time::Duration> {
+        poll_period(self.rate_hz)
+    }
+
+    pub fn full_uid(&self) -> Option<u32> {
+        let t = self.uid.trim();
+        match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
+            Some(hex) => u32::from_str_radix(hex, 16).ok(),
+            None => t.parse().ok(),
+        }
+    }
+}
+
+fn default_poll_hz() -> f64 {
+    5.0
+}
+
+/// Upper bound on a polled block's rate: every read is a command round
+/// trip sharing the link with operator commands.
+pub const MAX_POLL_HZ: f64 = 50.0;
+
+/// The timer period a poll rate gives: the reciprocal of `rate_hz`,
+/// when the rate is in (0, MAX_POLL_HZ] and the period is one the poll
+/// timer can use -- a finite, non-zero Duration that the clock can hold
+/// one period past the current instant (the timer's missed-tick path
+/// adds the period to now). None otherwise.
+pub fn poll_period(rate_hz: f64) -> Option<std::time::Duration> {
+    if !(rate_hz > 0.0 && rate_hz <= MAX_POLL_HZ) {
+        return None;
+    }
+    let period = std::time::Duration::try_from_secs_f64(1.0 / rate_hz).ok()?;
+    if period.is_zero() {
+        return None;
+    }
+    std::time::Instant::now().checked_add(period)?;
+    Some(period)
+}
+
+/// The first target whose poll declaration cannot run, with the reason.
+/// Polling reads blocks through the APROTO command path, so it is a
+/// definition bug anywhere else.
+pub fn invalid_poll(targets: &[TargetSection]) -> Option<(&str, String)> {
+    for t in targets {
+        if t.poll.is_empty() {
+            continue;
+        }
+        if t.protocol != "aproto-slip" {
+            return Some((
+                t.name.as_str(),
+                format!(
+                    "poll is only supported on aproto-slip, not '{}'",
+                    t.protocol
+                ),
+            ));
+        }
+        for b in &t.poll {
+            if b.full_uid().is_none() {
+                return Some((
+                    t.name.as_str(),
+                    format!("poll uid '{}' is not a number", b.uid),
+                ));
+            }
+            if b.category > 4 {
+                return Some((
+                    t.name.as_str(),
+                    format!("poll category {} is not 0..4", b.category),
+                ));
+            }
+            if !(b.rate_hz > 0.0 && b.rate_hz <= MAX_POLL_HZ) {
+                return Some((
+                    t.name.as_str(),
+                    format!("poll rate_hz {} is outside (0, {}]", b.rate_hz, MAX_POLL_HZ),
+                ));
+            }
+            if b.period().is_none() {
+                return Some((
+                    t.name.as_str(),
+                    format!(
+                        "poll rate_hz {:e} gives no period the poll timer can use",
+                        b.rate_hz
+                    ),
+                ));
+            }
+        }
+    }
+    None
 }
 
 /* ----------------------------- Defaults ----------------------------- */
@@ -463,6 +580,62 @@ impl Default for StorageSection {
     }
 }
 
+impl TargetSection {
+    /// A conventional artifact inside the target directory, when the
+    /// directory is declared and the artifact is actually there. A
+    /// bundle without commands.json simply has no command catalog.
+    fn in_dir(&self, name: &str) -> Option<String> {
+        let dir = self.dir.as_ref()?;
+        let path = std::path::Path::new(dir).join(name);
+        path.exists().then(|| path.to_string_lossy().into_owned())
+    }
+
+    pub fn manifest_path(&self) -> Option<String> {
+        self.manifest
+            .clone()
+            .or_else(|| self.in_dir("app_manifest.json"))
+    }
+
+    pub fn structs_path(&self) -> Option<String> {
+        self.structs_dir.clone().or_else(|| self.in_dir("structs"))
+    }
+
+    pub fn telemetry_path(&self) -> Option<String> {
+        self.telemetry_config
+            .clone()
+            .or_else(|| self.in_dir("telemetry.json"))
+    }
+
+    pub fn commands_path(&self) -> Option<String> {
+        self.commands_config
+            .clone()
+            .or_else(|| self.in_dir("commands.json"))
+    }
+
+    pub fn connect_init_path(&self) -> Option<String> {
+        self.connect_init
+            .clone()
+            .or_else(|| self.in_dir("on_connect.json"))
+    }
+
+    pub fn records_path(&self) -> Option<String> {
+        self.records_config
+            .clone()
+            .or_else(|| self.in_dir("records.json"))
+    }
+}
+
+/// The first target whose declared directory is not a directory.
+/// A mistyped path would otherwise produce a silently featureless
+/// target -- connected, decoding nothing by name -- so it is a boot
+/// refusal like the other definition bugs.
+pub fn missing_target_dir(targets: &[TargetSection]) -> Option<(&str, &str)> {
+    targets.iter().find_map(|t| {
+        let dir = t.dir.as_deref()?;
+        (!std::path::Path::new(dir).is_dir()).then_some((t.name.as_str(), dir))
+    })
+}
+
 /// Find the first local listen port claimed by two target
 /// definitions of the same transport kind (TCP and UDP port spaces
 /// are distinct). Distinct targets binding one port cannot both
@@ -579,6 +752,172 @@ pub fn apply_env_overrides(
 mod tests {
     use super::*;
 
+    fn aproto_poll_target(rate_hz: f64) -> TargetSection {
+        let mut t = target("rover", "tcp", None);
+        t.protocol = "aproto-slip".to_string();
+        t.poll = vec![PollBlock {
+            uid: "0x00DE00".to_string(),
+            category: 4,
+            rate_hz,
+        }];
+        t
+    }
+
+    /// @test A positive rate whose period the poll timer cannot use is
+    /// refused at load, naming the target and the rate: 1e-300 and the
+    /// smallest positive double (the reciprocal overflows Duration), and
+    /// 1e-19 (a Duration, but too long for the clock to hold one period
+    /// past now).
+    #[test]
+    fn poll_rate_without_a_usable_period_is_refused() {
+        for (rate, shown) in [
+            (1e-300, "1e-300"),
+            (f64::MIN_POSITIVE, "2.2250738585072014e-308"),
+            (1e-19, "1e-19"),
+        ] {
+            let targets = [aproto_poll_target(rate)];
+            let (name, reason) = invalid_poll(&targets).expect("must refuse");
+            assert_eq!(name, "rover");
+            assert!(
+                reason.contains(shown) && reason.contains("period"),
+                "{reason}"
+            );
+            assert!(targets[0].poll[0].period().is_none());
+        }
+    }
+
+    /// @test The published ceiling and tiny positive rates whose period
+    /// the timer can use are accepted, and the period a row converts to
+    /// is the validated one: 50 Hz gives 20 ms, 5 Hz 200 ms, 2^-30 Hz
+    /// 2^30 seconds and 2^-60 Hz 2^60 seconds (exact reciprocals).
+    #[test]
+    fn poll_rates_with_a_usable_period_are_accepted() {
+        for (rate, period) in [
+            (50.0, std::time::Duration::from_millis(20)),
+            (5.0, std::time::Duration::from_millis(200)),
+            (2f64.powi(-30), std::time::Duration::from_secs(1 << 30)),
+            (2f64.powi(-60), std::time::Duration::from_secs(1 << 60)),
+        ] {
+            let targets = [aproto_poll_target(rate)];
+            assert!(invalid_poll(&targets).is_none(), "rate {rate:e} refused");
+            assert_eq!(targets[0].poll[0].period(), Some(period), "rate {rate:e}");
+        }
+    }
+
+    /// @test Poll declarations refuse boot unless they can run: only on
+    /// aproto-slip, with a numeric uid, a real category, and a rate in
+    /// (0, MAX_POLL_HZ]; a well-formed declaration passes.
+    #[test]
+    fn poll_declarations_are_validated() {
+        let block = |uid: &str, category: u8, rate_hz: f64| PollBlock {
+            uid: uid.to_string(),
+            category,
+            rate_hz,
+        };
+        let with_poll = |protocol: &str, b: PollBlock| {
+            let mut t = target("rover", "tcp", None);
+            t.protocol = protocol.to_string();
+            t.poll = vec![b];
+            t
+        };
+
+        let good = [with_poll("aproto-slip", block("0x00DE00", 4, 5.0))];
+        assert!(invalid_poll(&good).is_none());
+        assert_eq!(good[0].poll[0].full_uid(), Some(0x00DE00));
+
+        let cases = [
+            (
+                with_poll("ccsds-spp", block("0x00DE00", 4, 5.0)),
+                "aproto-slip",
+            ),
+            (
+                with_poll("aproto-slip", block("rover", 4, 5.0)),
+                "not a number",
+            ),
+            (
+                with_poll("aproto-slip", block("0x00DE00", 9, 5.0)),
+                "category",
+            ),
+            (
+                with_poll("aproto-slip", block("0x00DE00", 4, 0.0)),
+                "rate_hz",
+            ),
+            (
+                with_poll("aproto-slip", block("0x00DE00", 4, 500.0)),
+                "rate_hz",
+            ),
+        ];
+        for (t, expect) in cases {
+            let one = [t];
+            let (_, reason) = invalid_poll(&one).expect("must refuse");
+            assert!(reason.contains(expect), "{reason}");
+        }
+    }
+
+    /// @test The target-directory convention: naming one directory
+    /// finds the conventional artifacts inside it, absent ones stay
+    /// absent (a bundle without commands.json simply has no command
+    /// catalog), and an explicit path always wins over the
+    /// convention.
+    #[test]
+    fn target_directory_resolves_conventional_artifacts() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("app_manifest.json"), "{}").unwrap();
+        std::fs::write(dir.join("telemetry.json"), "{}").unwrap();
+        std::fs::create_dir(dir.join("structs")).unwrap();
+        // Deliberately no commands.json and no on_connect.json.
+
+        let mut t = target("rover", "tcp", None);
+        t.dir = Some(dir.to_string_lossy().into_owned());
+
+        assert_eq!(
+            t.manifest_path(),
+            Some(dir.join("app_manifest.json").to_string_lossy().into_owned())
+        );
+        assert_eq!(
+            t.structs_path(),
+            Some(dir.join("structs").to_string_lossy().into_owned())
+        );
+        assert_eq!(
+            t.telemetry_path(),
+            Some(dir.join("telemetry.json").to_string_lossy().into_owned())
+        );
+        assert_eq!(t.commands_path(), None, "absent artifact stays absent");
+        assert_eq!(t.connect_init_path(), None);
+
+        // An explicit path overrides the convention.
+        t.commands_config = Some("/elsewhere/commands.json".to_string());
+        assert_eq!(
+            t.commands_path(),
+            Some("/elsewhere/commands.json".to_string())
+        );
+
+        // With no directory declared, only explicit paths resolve.
+        let bare = target("bare", "tcp", None);
+        assert_eq!(bare.manifest_path(), None);
+        assert_eq!(bare.telemetry_path(), None);
+    }
+
+    /// @test A declared directory that is not a directory is named
+    /// for boot refusal; a real one and an undeclared one pass.
+    #[test]
+    fn missing_target_dir_is_named() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut good = target("good", "tcp", None);
+        good.dir = Some(tmp.path().to_string_lossy().into_owned());
+        let mut bad = target("bad", "tcp", None);
+        bad.dir = Some("/no/such/target/dir".to_string());
+
+        let only_good = [good.clone()];
+        assert_eq!(missing_target_dir(&only_good), None);
+        let no_dir = [target("plain", "tcp", None)];
+        assert_eq!(missing_target_dir(&no_dir), None);
+        let mixed = [good, bad];
+        let found = missing_target_dir(&mixed).unwrap();
+        assert_eq!(found.0, "bad");
+    }
+
     fn target(name: &str, carrier: &str, listen: Option<u16>) -> TargetSection {
         TargetSection {
             name: name.to_string(),
@@ -587,6 +926,7 @@ mod tests {
             protocol: "ccsds-spp".to_string(),
             health: Vec::new(),
             health_nonzero_bad: None,
+            dir: None,
             apid_map: None,
             raw_uid: None,
             carrier: carrier.to_string(),
@@ -600,6 +940,7 @@ mod tests {
             telemetry_config: None,
             commands_config: None,
             auto_connect: false,
+            poll: Vec::new(),
         }
     }
 

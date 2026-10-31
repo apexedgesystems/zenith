@@ -21,6 +21,16 @@ architecture review; work before that is the v0.0.1 tag.
   asks for the password over the page it was on and resends nothing.
 - `GET`, `POST` and `DELETE /api/auth/session`, and
   `POST /api/auth/session/refresh`. Bearer-token clients are unchanged.
+- Generated target directories can be selected with `dir`, including
+  at runtime for aproto-slip targets. Stream protocols and connect steps
+  require `config.toml`.
+  ([#49](https://github.com/apexedgesystems/zenith/pull/49))
+- Apex targets without pushed telemetry can poll data blocks with
+  `[[targets.poll]]` at up to 50 Hz.
+  ([#49](https://github.com/apexedgesystems/zenith/pull/49))
+- The development config includes the apex rover demo with telemetry
+  and health rules.
+  ([#49](https://github.com/apexedgesystems/zenith/pull/49))
 
 ### Changed
 
@@ -37,6 +47,13 @@ architecture review; work before that is the v0.0.1 tag.
 - A console opened while the server is restarting retries its first
   session read (after 1 s, doubling to 10 s) instead of staying blank.
 - Without credentials the API answers "missing token or session".
+- Command completions show component result names.
+  ([#49](https://github.com/apexedgesystems/zenith/pull/49))
+- Generated telemetry layouts follow their file order.
+  ([#49](https://github.com/apexedgesystems/zenith/pull/49))
+- Console screens suit large displays and distinguish an empty plot or
+  idle connected link from a disconnected target.
+  ([#49](https://github.com/apexedgesystems/zenith/pull/49))
 
 ### Security
 
@@ -55,6 +72,13 @@ architecture review; work before that is the v0.0.1 tag.
 - The image builds from the committed lockfiles (`--locked`, `npm ci`)
   and an allowlisted build context, so nothing from the host can enter
   it.
+- Reconnected target links keep their connected status.
+  ([#49](https://github.com/apexedgesystems/zenith/pull/49))
+- Generated quick commands send their declared payloads.
+  ([#49](https://github.com/apexedgesystems/zenith/pull/49))
+- Command forms encode floating-point fields and refuse unsupported
+  field types. Use Raw Mode for commands the form cannot encode.
+  ([#49](https://github.com/apexedgesystems/zenith/pull/49))
 
 ## v0.2.0 - 2026-09-27
 

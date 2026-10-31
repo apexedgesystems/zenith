@@ -211,7 +211,7 @@ export default function TunablesPage({
   };
 
   return (
-    <div className="max-w-4xl">
+    <div className="max-w-screen-2xl">
       <div className="flex items-center gap-3 mb-5">
         <h1 className="text-xl font-bold">Tunables</h1>
         <select
