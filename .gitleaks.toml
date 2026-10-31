@@ -1,0 +1,55 @@
+# Secret scan rules (make secret-scan; the pull request gate runs it).
+#
+# The default rules of the pinned gitleaks release apply (private keys,
+# JWTs, GitHub and cloud tokens, generic high-entropy keys), plus the
+# credentials zenith's own configuration holds: the [auth] signing secret,
+# written into a config file or into ZENITH_AUTH_SECRET, and argon2
+# password hashes (what zenith --hash-password prints). Exceptions live in
+# this file only; it holds one, the placeholder signing secret in the
+# files that ship it.
+
+title = "zenith"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "zenith-auth-secret"
+description = "A signing secret written into the [auth] secret key"
+# The key as a line of the [auth] table, as a dotted key (auth.secret), each
+# part bare or quoted, or inside an inline table (auth = { secret = ... }),
+# holding a one-line string long enough for zenith to accept (16 or more)
+# that ends the value: the line ends, or a comment, ',', '}' or ';' follows,
+# so a field set in code (auth.secret = "...".into()) is not a match.
+# Multi-line strings are not matched.
+regex = '''(?m)(?:^[ \t]*(?:(?:auth|"auth"|'auth')[ \t]*\.[ \t]*)?|[{,][ \t]*)(?:secret|"secret"|'secret')[ \t]*=[ \t]*["']([^"'\r\n]{16,})["'][ \t\r]*(?:$|[#,};])'''
+secretGroup = 1
+keywords = ["secret"]
+
+# Exact value AND exact file: the placeholder elsewhere, or any other
+# value in these files, is still a finding.
+[[rules.allowlists]]
+description = "The placeholder the shipped configs and the README carry"
+condition = "AND"
+regexTarget = "secret"
+regexes = ['''^change-me-in-production$''']
+paths = [
+  '''^config\.toml$''',
+  '''^deploy/config\.toml$''',
+  '''^config/config\.example\.toml$''',
+  '''^README\.md$''',
+]
+
+[[rules]]
+id = "zenith-auth-secret-env"
+description = "A signing secret written into ZENITH_AUTH_SECRET"
+# A literal value; an interpolation such as ${ZENITH_AUTH_SECRET} is not.
+regex = '''ZENITH_AUTH_SECRET[ \t]*[=:][ \t]*["']?([^"'\s#$][^"'\s#]{15,})'''
+secretGroup = 1
+keywords = ["zenith_auth_secret"]
+
+[[rules]]
+id = "argon2-password-hash"
+description = "An argon2 password hash (PHC string), as [auth] password_hash holds"
+regex = '''\$argon2(?:id|i|d)\$v=[0-9]+\$m=[0-9]+,t=[0-9]+,p=[0-9]+\$[A-Za-z0-9+/]+\$[A-Za-z0-9+/]+'''
+keywords = ["$argon2"]

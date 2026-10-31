@@ -21,6 +21,7 @@ files: |
      docker-compose\.yml|
      config\.toml|
      \.pre-commit-config\.yaml|
+     \.gitleaks\.toml|
      \.gitignore)
   )
 

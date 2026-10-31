@@ -319,10 +319,12 @@ make run
 | `make format-check`  | The same hooks; fails, showing the diff, when any of them changes a file (CI mode)             |
 | `make lint`          | Clippy with `-D warnings`, then ESLint, in Docker                                              |
 | `make smoke-boot`    | Boot the built image with `docker run` (no mounts) and check what it serves (CI runs it)       |
+| `make secret-scan`   | Scan the tree and SECRET_SCAN_RANGE commits for secrets with gitleaks (CI runs it)             |
 
 Builds, tests and lint run inside Docker -- no local Rust or Node
-toolchain required. `make format` runs pre-commit on the host, and
-`make smoke-boot` needs `docker`, `curl` and `jq` there
+toolchain required. `make format` runs pre-commit on the host,
+`make smoke-boot` needs `docker`, `curl` and `jq` there, and
+`make secret-scan` `docker`, `git` and GNU `tar`
 ([docs/TESTING.md](docs/TESTING.md)).
 
 The `make run` target uses `docker compose build` (not raw

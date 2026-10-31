@@ -213,7 +213,7 @@ await user.click(screen.getByRole("button", { name: "Submit" }));
 ## CI
 
 GitHub Actions runs the gate on every pull request to `main`
-(`.github/workflows/ci.yml`):
+(`.github/workflows/ci.yml`). The Test, Lint, Build job:
 
 1. Build dev image (`docker compose build dev`)
 2. Backend tests (`cargo test --lib --locked`)
@@ -224,10 +224,11 @@ GitHub Actions runs the gate on every pull request to `main`
 7. Build production image (`docker compose build zenith`)
 8. Smoke-boot the production image (`make smoke-boot`)
 
-The release workflow smoke-boots each architecture's image the same
-way before pushing it and, on a tag, stops before recording the pushed
-digest unless the pushed image's config is the booted build's
-(`tools/pushed-image-check.sh`).
+The Secret scan job runs beside it: `make secret-scan` over the tree
+and the pull request's commits. The release workflow smoke-boots each
+architecture's image the same way before pushing it and, on a tag,
+stops before recording the pushed digest unless the pushed image's
+config is the booted build's (`tools/pushed-image-check.sh`).
 
 ### Smoke boot
 
@@ -263,4 +264,49 @@ make build                         # docker compose build zenith
 make smoke-boot                    # boots that build on 127.0.0.1:18080
 make smoke-boot SMOKE_PORT=18081   # another loopback port
 make smoke-boot SMOKE_IMAGE=<ref>  # any image in the local store
+```
+
+### Secret scan
+
+`make secret-scan` runs gitleaks, pinned by digest, with the rules in
+`.gitleaks.toml`: the release's default rules (private keys, JWTs,
+GitHub and cloud tokens, generic high-entropy keys) and zenith's own
+credentials:
+
+- the `[auth]` signing secret as a one-line string of 16 characters or
+  more that ends the value, written as `secret = ...` in the `[auth]`
+  table, as the dotted `auth.secret = ...` (each part bare or quoted),
+  or inside `auth = { ... }` (a field set in code, such as
+  `auth.secret = "...".into()`, is left to the default rules);
+- a literal value of `ZENITH_AUTH_SECRET` (after `=` or `:`; an
+  interpolation such as `${ZENITH_AUTH_SECRET}` is not one);
+- an argon2 password hash (PHC string).
+
+A multi-line TOML string is outside these rules (the default generic
+rule still catches a high-entropy value in one), and a YAML block scalar
+is matched by no rule. The rules are built into the pinned release and
+both scans run with no network, so a scan fetches nothing; the pin is
+bumped by hand (dependabot reads no Makefile). It scans the tree as git
+sees it, tracked files plus untracked ones no ignore rule covers, and
+with `SECRET_SCAN_RANGE=<base>..<head>` every commit in that range, its
+diffs read as text whatever `.gitattributes` says; that is how CI scans
+a pull request, so a secret added and taken out again inside the range
+still fails. The range scan reads the repository from inside a container
+and needs a full checkout, not a git worktree: it refuses to run in a
+worktree, and on a range git cannot resolve it stops with git's error,
+both before any scan runs.
+
+Exceptions live in `.gitleaks.toml` only, which holds one: the
+placeholder signing secret `change-me-in-production`, in the four files
+that ship it. Inline `gitleaks:allow` comments are not honored, and the
+scan refuses to run while a `.gitleaksignore` exists anywhere in the
+working tree, since gitleaks would read one as a list of findings to
+drop. Findings print with the secret redacted. A finding on a branch
+that was already pushed means the value is on the server: rotate it,
+then remove it. The scan needs `git`, GNU `tar` and `docker` on the
+host:
+
+```bash
+make secret-scan                                       # the tree
+make secret-scan SECRET_SCAN_RANGE=origin/main..HEAD   # and this branch's commits
 ```
