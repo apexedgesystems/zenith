@@ -860,18 +860,17 @@ mod tests {
         assert_eq!(stop_status(LOAD_FAILED), LOAD_FAILED);
     }
 
-    /// @test For every struct that exports a layout hash in the struct
-    /// dictionaries of config.toml's targets, the fallback recompute
-    /// (the struct's fields expanded to leaves, then dict_leaf_specs)
-    /// equals the exported hash. A nested field inlines its fragment's
-    /// leaves under their own names, once per instance, with no row of
-    /// its own; the shipped dictionaries carry such structs, so the
-    /// rule is exercised, not assumed. The rover demo's dictionaries
-    /// also list some arrays' elements as fields of their own (`a[1]`
-    /// beside the array `a`), a shape the recompute does not take; its
-    /// structs export their hashes, so the fallback does not run for
-    /// them. Such a struct is skipped in that target only, the target
-    /// must still have one, and anywhere else it fails the test.
+    /// @test The fallback recompute (a struct's fields expanded to
+    /// leaves, then dict_leaf_specs) equals the exported layout hash of
+    /// every struct in config.toml's targets that exports one, except
+    /// Rover MCU structs that also list array elements as fields (`a[1]`
+    /// beside the array `a`). A nested field inlines its fragment's
+    /// leaves under their own names at their payload offsets, once per
+    /// instance, with no row of its own, and at least one checked struct
+    /// must have a nested field. Structs without an exported hash are
+    /// not checked. Exported element-view structs are skipped only in
+    /// Rover MCU, which must contain at least one; the same shape in
+    /// any other target fails the test.
     #[test]
     fn dictionary_recompute_matches_exported_layout_hashes() {
         use crate::core::config_manager::{expanded_fields, ComponentDict};
