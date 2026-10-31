@@ -391,7 +391,7 @@
           "type": "uint",
           "offset": 4,
           "size": 1,
-          "value": 0
+          "value": 2
         },
         {
           "name": "reserved1",

@@ -154,7 +154,7 @@ pub struct StructDef {
     pub opcode: Option<String>,
     #[serde(default)]
     pub fields: Vec<FieldDef>,
-    /// Producer-stated v3 layout hash ("0x" hex), exported by the
+    /// Producer-stated layout hash ("0x" hex), exported by the
     /// producing generator for spec-defined structs. When present it
     /// is THE hash the vehicle verifies -- consumers must not
     /// recompute.
@@ -243,6 +243,13 @@ pub fn expanded_fields(dict: &ComponentDict, fields: &[FieldDef], depth: u8) -> 
         }
     }
     out
+}
+
+/// A leaf's own name: the last segment of the path `expanded_fields`
+/// gives a nested leaf (`field[i].leaf`, `field.leaf`); a top-level
+/// field is its own leaf.
+pub fn leaf_name(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
 }
 
 /// All loaded struct dictionaries keyed by component name.
@@ -1435,5 +1442,16 @@ mod nested_tests {
             let e = table(bad).validate().unwrap_err();
             assert!(e.contains(why), "{e}");
         }
+    }
+
+    /// @test leaf_name inverts the path expanded_fields gives a nested
+    /// leaf: an indexed instance, a single instance and two levels all
+    /// reduce to the leaf's own name, and a top-level field keeps its.
+    #[test]
+    fn leaf_name_is_the_last_segment_of_an_expanded_path() {
+        assert_eq!(leaf_name("subscriptions[3].fullUid"), "fullUid");
+        assert_eq!(leaf_name("waitCondition.threshold"), "threshold");
+        assert_eq!(leaf_name("steps[1].waitCondition.threshold"), "threshold");
+        assert_eq!(leaf_name("frequency"), "frequency");
     }
 }

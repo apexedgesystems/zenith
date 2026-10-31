@@ -60,9 +60,15 @@
   },
   "enums": {
     "ComponentType": {
-      "underlying_type": "int",
-      "values": {},
-      "_warning": "Enum 'ComponentType' not found in headers"
+      "underlying_type": "uint8_t",
+      "values": {
+        "CORE": 1,
+        "DRIVER": 5,
+        "EXECUTIVE": 0,
+        "HW_MODEL": 3,
+        "SUPPORT": 4,
+        "SW_MODEL": 2
+      }
     }
   }
 }

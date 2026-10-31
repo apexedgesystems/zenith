@@ -152,7 +152,7 @@ ELF ident) decode correctly with zero configuration.
 | Frontend      | React 19, TypeScript strict, Canvas API                                                    |
 | Storage       | SQLite (WAL mode) with read connection pool (1 writer + N readers)                         |
 | Protocol      | APROTO over TCP + SLIP framing                                                             |
-| Tests         | `cargo test --lib` (190 unit tests) + Vitest with React Testing Library (128 unit tests)   |
+| Tests         | `cargo test --lib` (197 unit tests) + Vitest with React Testing Library (128 unit tests)   |
 | Benches       | criterion + pprof flamegraphs                                                              |
 | Auth          | Console sign-in with server-side sessions; JWT bearer tokens for API clients (default off) |
 | Rate limiting | Per-IP token bucket on POST endpoints (when auth is on)                                    |
@@ -168,13 +168,17 @@ ELF ident) decode correctly with zero configuration.
 | `commands.json`     | `make zenith-target`                  | Per-component command catalog with field types                      |
 | TPRM binaries       | `apex_tprm_compile`                   | Runtime configuration loaded by apex on startup                     |
 
-Uploaded tunable payloads carry the TPRM format A v3 prelude (magic,
-version, size, target uid, layout hash, body CRC), which the vehicle
-verifies before any payload reaches a component. The byte-level
+Uploaded tunable payloads carry the TPRM format A v4 prelude (magic,
+version, reserved bytes, a 64-bit size, target uid, layout hash, body
+CRC), which the vehicle verifies before any payload reaches a
+component. Apex CSF vehicles built from apex_csf 2543279 (2026-09-10)
+or later require it, and earlier ones refuse it. The byte-level
 contract lives in `compat/tprm/` -- a deliberate copy of the
-producing repo's golden vectors; the backend conformance suite fails
-CI on any divergence, and the copy's README documents the refresh
-procedure.
+producing repo's golden vectors, taken from apex_csf 5bda98c; the
+backend conformance suite fails CI on any divergence, and the copy's
+README documents the refresh procedure. The contract and the demo
+target directories under `targets/` were proven against apex_csf
+d8d003c.
 
 ## Refreshing a Target Directory
 
@@ -188,6 +192,10 @@ make apex-data-db && make zenith-target APP=MyApp
 # in zenith
 rm -rf targets/<name> && cp -r <apex>/build/*/zenith_targets/MyApp targets/<name>
 ```
+
+The committed target files are prettier-formatted, so run `make format`
+after the copy; raw generator output fails `make format-check`
+otherwise.
 
 On the next startup zenith re-syncs config-seeded layouts to the new
 file (stale ones removed, changed ones updated) and leaves DB-saved
@@ -304,7 +312,7 @@ make run
 | `make stop`          | Stop the running container                                                                     |
 | `make dev`           | Build + run in foreground (logs to stdout)                                                     |
 | `make test`          | Run **both** backend and frontend test suites                                                  |
-| `make test-backend`  | Backend only: `cargo test --lib` (currently 190 unit tests)                                    |
+| `make test-backend`  | Backend only: `cargo test --lib` (currently 197 unit tests)                                    |
 | `make test-frontend` | Frontend only: `vitest run` (currently 128 unit tests)                                         |
 | `make bench`         | Run criterion benches (`protocol`, `storage`, `decoder`)                                       |
 | `make format`        | Run rustfmt across the backend                                                                 |
@@ -495,7 +503,7 @@ GET    /api/targets/{id}/commands
 # Parameters (TUNABLE_PARAM)
 GET    /api/targets/{id}/params
 GET    /api/targets/{id}/params/{uid}
-POST   /api/targets/{id}/params/{uid}/update     # v3-stamped upload; verify-before-apply on readback-capable targets
+POST   /api/targets/{id}/params/{uid}/update     # v4-stamped upload; verify-before-apply on readback-capable targets
 POST   /api/targets/{id}/params/{uid}/verify     # vehicle-side VERIFY of the staged payload, no apply
 GET    /api/targets/{id}/tprm/staged             # staged-bank digest (declared identity + verdict per file)
 

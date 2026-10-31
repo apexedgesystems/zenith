@@ -11,6 +11,13 @@ architecture review; work before that is the v0.0.1 tag.
 
 ## Unreleased
 
+### Breaking
+
+- TPRM uploads use the v4 prelude and carry payloads beyond 64 KiB.
+  Apex CSF vehicles built before apex_csf 2543279 refuse them; vehicles
+  from that commit on require v4 and refuse zenith 0.2.0's v3 uploads.
+  ([#50](https://github.com/apexedgesystems/zenith/pull/50))
+
 ### Added
 
 - With auth on, the console signs in: a login page, a server-side
@@ -34,6 +41,9 @@ architecture review; work before that is the v0.0.1 tag.
 
 ### Changed
 
+- Demo target directories are regenerated from apex_csf d8d003c;
+  SystemMonitor's 0x0100 command appears as HEALTH_SAMPLE.
+  ([#50](https://github.com/apexedgesystems/zenith/pull/50))
 - The session cookie is Secure by default: serve the console over
   HTTPS (see the README's remote-deployment steps) or set
   `[auth] cookie_secure = false` on a trusted network.
@@ -64,6 +74,16 @@ architecture review; work before that is the v0.0.1 tag.
 
 ### Fixed
 
+- Tunable updates to nested structs carry the layout hash the vehicle
+  verifies when their dictionary exports none.
+  ([#50](https://github.com/apexedgesystems/zenith/pull/50))
+- A staged tunable update the vehicle refuses reads as refused, under
+  the vehicle's reason, in the console and the audit log.
+  ([#50](https://github.com/apexedgesystems/zenith/pull/50))
+- Apex targets without their own health list flag a nonzero
+  `frameOverrunCount`, `watchdogWarningCount` or `resyncDroppedTicks`
+  on the dashboard.
+  ([#50](https://github.com/apexedgesystems/zenith/pull/50))
 - Telemetry socket clients that send keep-alive pings no longer lose
   the stream at their ping timeout; the server answers pings and ends
   a socket when its client closes.
