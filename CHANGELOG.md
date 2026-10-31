@@ -43,6 +43,7 @@ architecture review; work before that is the v0.0.1 tag.
   declared version, list the bundled demo targets, decode their curated
   plots within each target's recorded ceiling of undecodable channels,
   and serve the ops demo's command catalog and the console.
+  ([#53](https://github.com/apexedgesystems/zenith/pull/53))
 
 ### Changed
 
