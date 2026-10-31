@@ -171,7 +171,7 @@ export default function StoragePage() {
   );
 
   return (
-    <div className="max-w-5xl">
+    <div className="max-w-screen-2xl">
       <h1 className="text-xl font-bold mb-4">Storage</h1>
 
       {vitalsQuery.isError && (

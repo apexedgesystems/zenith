@@ -1,0 +1,180 @@
+{
+  "component": "SpecLimits",
+  "component_id": 216,
+  "structs": {
+    "NudgeRequest": {
+      "category": "COMMAND",
+      "opcode": "0x0238",
+      "size": 4,
+      "fields": [
+        {
+          "name": "delta",
+          "type": "float",
+          "offset": 0,
+          "size": 4,
+          "doc": "Added to value; results outside the banded rail reject."
+        }
+      ],
+      "spec_defined": true,
+      "layout_hash": "0xD026B087",
+      "canonical_spec": "delta:float:4:0;|size:4"
+    },
+    "SpecLimitsState": {
+      "category": "STATE",
+      "size": 12,
+      "fields": [
+        {
+          "name": "value",
+          "type": "float",
+          "offset": 0,
+          "size": 4,
+          "doc": "Accumulated nudges, clamped to the banded rail."
+        },
+        {
+          "name": "nudges",
+          "type": "uint",
+          "offset": 4,
+          "size": 4
+        },
+        {
+          "name": "rejects",
+          "type": "uint",
+          "offset": 8,
+          "size": 4
+        }
+      ],
+      "spec_defined": true,
+      "layout_hash": "0x508291FC",
+      "canonical_spec": "value:float:4:0;nudges:uint:4:4;rejects:uint:4:8;|size:12"
+    },
+    "SpecLimitsTunableParams": {
+      "category": "TUNABLE_PARAM",
+      "size": 36,
+      "fields": [
+        {
+          "name": "floorOnly",
+          "type": "float",
+          "offset": 0,
+          "size": 4,
+          "value": 1.0,
+          "doc": "min-only rail.",
+          "constraints": {
+            "min": 0.0
+          }
+        },
+        {
+          "name": "ceilOnly",
+          "type": "float",
+          "offset": 4,
+          "size": 4,
+          "value": 50.0,
+          "doc": "max-only rail.",
+          "constraints": {
+            "max": 100.0
+          }
+        },
+        {
+          "name": "banded",
+          "type": "float",
+          "offset": 8,
+          "size": 4,
+          "value": 5.0,
+          "doc": "min+max rail.",
+          "constraints": {
+            "min": 0.0,
+            "max": 10.0
+          }
+        },
+        {
+          "name": "stepped",
+          "type": "float",
+          "offset": 12,
+          "size": 4,
+          "value": 0.75,
+          "doc": "step rail (granularity 0.25 from 0).",
+          "constraints": {
+            "min": 0.0,
+            "step": 0.25
+          }
+        },
+        {
+          "name": "gainTable",
+          "type": "array",
+          "element_type": "float",
+          "dims": [4],
+          "offset": 16,
+          "size": 16,
+          "value": [0, 0, 0, 0],
+          "doc": "Array rail: every element inherits the same band.",
+          "constraints": {
+            "min": -1.0,
+            "max": 1.0
+          }
+        },
+        {
+          "name": "gainTable[0]",
+          "type": "float",
+          "offset": 16,
+          "size": 4,
+          "value": 0,
+          "doc": "Element 0 of gainTable."
+        },
+        {
+          "name": "gainTable[1]",
+          "type": "float",
+          "offset": 20,
+          "size": 4,
+          "value": 0,
+          "doc": "Element 1 of gainTable."
+        },
+        {
+          "name": "gainTable[2]",
+          "type": "float",
+          "offset": 24,
+          "size": 4,
+          "value": 0,
+          "doc": "Element 2 of gainTable."
+        },
+        {
+          "name": "gainTable[3]",
+          "type": "float",
+          "offset": 28,
+          "size": 4,
+          "value": 0,
+          "doc": "Element 3 of gainTable."
+        },
+        {
+          "name": "mode",
+          "type": "uint",
+          "offset": 32,
+          "size": 1,
+          "value": 3,
+          "doc": "allowed-list rail (odd modes only).",
+          "constraints": {
+            "allowed": [1.0, 3.0, 5.0, 7.0]
+          }
+        },
+        {
+          "name": "reserved",
+          "type": "array",
+          "element_type": "uint",
+          "dims": [3],
+          "offset": 33,
+          "size": 3,
+          "value": [0, 0, 0]
+        }
+      ],
+      "spec_defined": true,
+      "layout_hash": "0xE4F35CF5",
+      "canonical_spec": "floorOnly:float:4:0;ceilOnly:float:4:4;banded:float:4:8;stepped:float:4:12;gainTable:array:16:16;[float:4x4]mode:uint:1:32;reserved:array:3:33;[uint:1x3]|size:36"
+    }
+  },
+  "commands": [
+    {
+      "name": "Nudge",
+      "opcode": "0x0238",
+      "request": "NudgeRequest",
+      "doc": "Nudge the value; out-of-band results reject and count."
+    }
+  ]
+}

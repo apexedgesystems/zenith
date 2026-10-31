@@ -91,6 +91,58 @@ pub struct FieldDef {
     pub enum_ref: Option<String>,
 }
 
+/// The category of a registered data block, as dictionaries name it
+/// (`StructDef::category`) and as a block read asks for it by index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DataCategory {
+    StaticParam,
+    TunableParam,
+    State,
+    Input,
+    Output,
+}
+
+impl DataCategory {
+    /// The category a block read names by index: 0 STATIC_PARAM,
+    /// 1 TUNABLE_PARAM, 2 STATE, 3 INPUT, 4 OUTPUT.
+    pub fn from_index(index: u8) -> Option<Self> {
+        match index {
+            0 => Some(Self::StaticParam),
+            1 => Some(Self::TunableParam),
+            2 => Some(Self::State),
+            3 => Some(Self::Input),
+            4 => Some(Self::Output),
+            _ => None,
+        }
+    }
+
+    /// The category a dictionary struct declares; None for struct
+    /// kinds that are not registered blocks (commands, telemetry
+    /// replies, nested type definitions).
+    pub fn from_dict_name(name: &str) -> Option<Self> {
+        match name {
+            "STATIC_PARAM" => Some(Self::StaticParam),
+            "TUNABLE_PARAM" => Some(Self::TunableParam),
+            "STATE" => Some(Self::State),
+            "INPUT" => Some(Self::Input),
+            "OUTPUT" => Some(Self::Output),
+            _ => None,
+        }
+    }
+
+    /// The name dictionaries give the category (the inverse of
+    /// [`Self::from_dict_name`]), for diagnostics.
+    pub fn dict_name(self) -> &'static str {
+        match self {
+            Self::StaticParam => "STATIC_PARAM",
+            Self::TunableParam => "TUNABLE_PARAM",
+            Self::State => "STATE",
+            Self::Input => "INPUT",
+            Self::Output => "OUTPUT",
+        }
+    }
+}
+
 /// A struct definition with its fields.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StructDef {
@@ -703,7 +755,9 @@ pub struct QuickCommand {
     pub opcode: String,
     #[serde(default)]
     pub desc: String,
-    #[serde(default)]
+    /// Hex payload the button sends. Generators spell the key
+    /// `payloadHex`; both spellings load, and it serves as `payload`.
+    #[serde(default, alias = "payloadHex")]
     pub payload: Option<String>,
 }
 
@@ -1065,6 +1119,49 @@ impl ConnectInit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// @test The five block categories map from a read's index to the
+    /// dictionary name and back; other indexes and struct kinds name no
+    /// category.
+    #[test]
+    fn data_category_names_round_trip() {
+        let names: Vec<&str> = (0..=4)
+            .map(|i| DataCategory::from_index(i).unwrap().dict_name())
+            .collect();
+        assert_eq!(
+            names,
+            ["STATIC_PARAM", "TUNABLE_PARAM", "STATE", "INPUT", "OUTPUT"]
+        );
+        for (i, name) in names.iter().enumerate() {
+            assert_eq!(
+                DataCategory::from_dict_name(name),
+                DataCategory::from_index(i as u8)
+            );
+        }
+        assert_eq!(DataCategory::from_index(5), None);
+        assert_eq!(DataCategory::from_dict_name("COMMAND"), None);
+    }
+
+    /// @test A quick command's payload loads from either key spelling
+    /// (a generator emitting `payloadHex` must not lose it -- a sequence
+    /// start button would silently send an empty payload) and serves
+    /// back to the UI as `payload`.
+    #[test]
+    fn quick_command_payload_accepts_generator_spelling() {
+        let cfg: CommandConfig = serde_json::from_str(
+            r#"{"quickCommands": [
+                {"label": "Seq 7 resume", "fullUid": "0x000500",
+                 "opcode": "0x0510", "payloadHex": "0700"},
+                {"label": "Legacy", "fullUid": "0x000000",
+                 "opcode": "0x0001", "payload": "ab"}
+            ], "components": {}}"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.quick_commands[0].payload.as_deref(), Some("0700"));
+        assert_eq!(cfg.quick_commands[1].payload.as_deref(), Some("ab"));
+        let served = serde_json::to_value(&cfg.quick_commands[0]).unwrap();
+        assert_eq!(served["payload"], "0700");
+    }
 
     /// @test Connect-init validation: a good sequence loads and
     /// decodes to (name, delay, bytes); bad hex, an empty name, an

@@ -1,0 +1,229 @@
+{
+  "layouts": [
+    {
+      "name": "Drive",
+      "plots": [
+        {
+          "title": "Speed & heading",
+          "channels": ["GroundVehicle.speed_m_s", "GroundVehicle.heading_deg"],
+          "height": 200
+        },
+        {
+          "title": "Leg",
+          "channels": [
+            "RoverController.distance_m",
+            "RoverController.cross_track_m",
+            "RoverController.heading_error_deg"
+          ],
+          "height": 200
+        },
+        {
+          "title": "Drive command: board vs host shadow",
+          "channels": [
+            "RoverController.steer_angle_deg",
+            "RoverController.shadow_steer_deg",
+            "RoverController.throttle_frac",
+            "RoverController.shadow_throttle_frac"
+          ],
+          "height": 200
+        },
+        {
+          "title": "Terrain",
+          "channels": [
+            "GroundVehicle.slope_deg",
+            "GroundVehicle.ground_elevation_m",
+            "GroundVehicle.is_slipping",
+            "GroundVehicle.is_off_terrain"
+          ],
+          "height": 200
+        }
+      ]
+    },
+    {
+      "name": "Position",
+      "plots": [
+        {
+          "title": "Lat / lon",
+          "channels": [
+            "GroundVehicle.pos_lat_deg",
+            "GroundVehicle.pos_lon_deg"
+          ],
+          "height": 200
+        },
+        {
+          "title": "Grid position",
+          "channels": [
+            "RoverController.grid_north_m",
+            "RoverController.grid_east_m"
+          ],
+          "height": 200
+        },
+        {
+          "title": "Altitude",
+          "channels": [
+            "GroundVehicle.pos_alt_m",
+            "GroundVehicle.ground_elevation_m"
+          ],
+          "height": 200
+        },
+        {
+          "title": "Slope azimuth",
+          "channels": [
+            "GroundVehicle.slope_azimuth_deg",
+            "GroundVehicle.slope_deg"
+          ],
+          "height": 200
+        }
+      ]
+    },
+    {
+      "name": "Board link",
+      "plots": [
+        {
+          "title": "Link",
+          "channels": [
+            "RoverController.board_link",
+            "RoverController.board_load_pct"
+          ],
+          "height": 200
+        },
+        {
+          "title": "Board tick",
+          "channels": ["RoverController.board_tick"],
+          "height": 200
+        }
+      ]
+    },
+    {
+      "name": "Lidar",
+      "plots": [
+        {
+          "title": "What the board saw",
+          "channels": [
+            "RoverController.lidar_state",
+            "RoverController.lidar_nearest_m",
+            "RoverController.lidar_hit_bits"
+          ],
+          "height": 200
+        },
+        {
+          "title": "Scan number",
+          "channels": ["RoverController.lidar_scan_seq"],
+          "height": 200
+        }
+      ]
+    },
+    {
+      "name": "Lidar rays",
+      "plots": [
+        {
+          "title": "Range per ray (m)",
+          "channels": [
+            "GroundVehicle.lidar_range_m[0]",
+            "GroundVehicle.lidar_range_m[1]",
+            "GroundVehicle.lidar_range_m[2]",
+            "GroundVehicle.lidar_range_m[3]",
+            "GroundVehicle.lidar_range_m[4]",
+            "GroundVehicle.lidar_range_m[5]",
+            "GroundVehicle.lidar_range_m[6]",
+            "GroundVehicle.lidar_range_m[7]"
+          ],
+          "height": 200
+        },
+        {
+          "title": "The picture the rover acts on",
+          "channels": [
+            "GroundVehicle.lidar_state",
+            "GroundVehicle.lidar_nearest_m",
+            "GroundVehicle.lidar_hit_bits"
+          ],
+          "height": 200
+        }
+      ]
+    },
+    {
+      "name": "Default",
+      "plots": [
+        {
+          "title": "GroundVehicle Output",
+          "channels": [
+            "GroundVehicle.timestamp_ns",
+            "GroundVehicle.tick",
+            "GroundVehicle.pos_lat_deg",
+            "GroundVehicle.pos_lon_deg",
+            "GroundVehicle.pos_alt_m",
+            "GroundVehicle.heading_deg",
+            "GroundVehicle.speed_m_s",
+            "GroundVehicle.ground_elevation_m",
+            "GroundVehicle.slope_deg",
+            "GroundVehicle.slope_azimuth_deg",
+            "GroundVehicle.is_slipping",
+            "GroundVehicle.is_off_terrain",
+            "GroundVehicle.lidar_n_rays",
+            "GroundVehicle.board_link",
+            "GroundVehicle.controller_mode",
+            "GroundVehicle.seq_state",
+            "GroundVehicle.active_waypoint",
+            "GroundVehicle.waypoint_total",
+            "GroundVehicle.led_bits",
+            "GroundVehicle.led1_colour",
+            "GroundVehicle.led1_rate",
+            "GroundVehicle.led2_colour",
+            "GroundVehicle.led2_rate",
+            "GroundVehicle.last_cmd_result",
+            "GroundVehicle.last_cmd_opcode_lo",
+            "GroundVehicle.last_cmd_opcode_hi",
+            "GroundVehicle.board_load_pct",
+            "GroundVehicle.board_tick_lo",
+            "GroundVehicle.board_tick_hi",
+            "GroundVehicle.mast_pan_deg",
+            "GroundVehicle.mast_ext_pct",
+            "GroundVehicle.lidar_state",
+            "GroundVehicle.lidar_hit_bits",
+            "GroundVehicle.lidar_nearest_m",
+            "GroundVehicle.lidar_scan_seq"
+          ],
+          "height": 200
+        },
+        {
+          "title": "RoverController Output",
+          "channels": [
+            "RoverController.steer_angle_deg",
+            "RoverController.throttle_frac",
+            "RoverController.valid",
+            "RoverController.mode",
+            "RoverController.arrived",
+            "RoverController.board_link",
+            "RoverController.board_load_pct",
+            "RoverController.lidar_state",
+            "RoverController.board_tick",
+            "RoverController.lidar_hit_bits",
+            "RoverController.lidar_nearest_m",
+            "RoverController.lidar_scan_seq",
+            "RoverController.tick",
+            "RoverController.target_seq",
+            "RoverController.grid_north_m",
+            "RoverController.grid_east_m",
+            "RoverController.distance_m",
+            "RoverController.bearing_deg",
+            "RoverController.heading_error_deg",
+            "RoverController.cross_track_m",
+            "RoverController.shadow_steer_deg",
+            "RoverController.shadow_throttle_frac"
+          ],
+          "height": 200
+        },
+        {
+          "title": "TelemetryManager Output",
+          "channels": [
+            "TelemetryManager.collectCount",
+            "TelemetryManager.packetsSent",
+            "TelemetryManager.sendFailures",
+            "TelemetryManager.activeCount"
+          ],
+          "height": 200
+        }
+      ]
+    }
+  ]
+}

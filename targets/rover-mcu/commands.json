@@ -1,0 +1,609 @@
+{
+  "quickCommands": [
+    {
+      "label": "NOOP",
+      "fullUid": "0x000000",
+      "opcode": "0x0000",
+      "desc": "Connectivity check"
+    },
+    {
+      "label": "Ping",
+      "fullUid": "0x000000",
+      "opcode": "0x0001",
+      "desc": "Echo test"
+    },
+    {
+      "label": "Pause",
+      "fullUid": "0x000000",
+      "opcode": "0x0110",
+      "desc": "Pause execution"
+    },
+    {
+      "label": "Resume",
+      "fullUid": "0x000000",
+      "opcode": "0x0111",
+      "desc": "Resume execution"
+    },
+    {
+      "label": "Sleep",
+      "fullUid": "0x000000",
+      "opcode": "0x0116",
+      "desc": "Enter sleep mode"
+    },
+    {
+      "label": "Wake",
+      "fullUid": "0x000000",
+      "opcode": "0x0117",
+      "desc": "Exit sleep mode"
+    },
+    {
+      "label": "Seq 1: north 10 m",
+      "fullUid": "0x000500",
+      "opcode": "0x0510",
+      "desc": "North 10 m, arrive, HOLD",
+      "payloadHex": "0100"
+    },
+    {
+      "label": "Seq 2: north + east",
+      "fullUid": "0x000500",
+      "opcode": "0x0510",
+      "desc": "North 10 m, east 20 m, lamp 1 green",
+      "payloadHex": "0200"
+    },
+    {
+      "label": "Seq 3: legs + strobe",
+      "fullUid": "0x000500",
+      "opcode": "0x0510",
+      "desc": "As 2, then lamp 1 green at 10 Hz for 5 s",
+      "payloadHex": "0300"
+    },
+    {
+      "label": "Seq 5: 30 m square",
+      "fullUid": "0x000500",
+      "opcode": "0x0510",
+      "desc": "Guarded 30 m square, lamp 1 blue",
+      "payloadHex": "0500"
+    },
+    {
+      "label": "Seq 6: HALT",
+      "fullUid": "0x000500",
+      "opcode": "0x0510",
+      "desc": "Manual halt: lamps red 5 Hz, seq_state 0x15; cancels the running tour",
+      "payloadHex": "0600"
+    },
+    {
+      "label": "Seq 7: resume",
+      "fullUid": "0x000500",
+      "opcode": "0x0510",
+      "desc": "Clear any halt, HOLD, lamps off",
+      "payloadHex": "0700"
+    },
+    {
+      "label": "Seq 9: home",
+      "fullUid": "0x000500",
+      "opcode": "0x0510",
+      "desc": "Drive back to the anchor (0, 0)",
+      "payloadHex": "0900"
+    },
+    {
+      "label": "Cut lidar",
+      "fullUid": "0x000000",
+      "opcode": "0x0114",
+      "desc": "Lock the lidar model: scans stop, the board reports STALE, halt 0x16 within 2 s",
+      "payloadHex": "00e40000"
+    },
+    {
+      "label": "Restore lidar",
+      "fullUid": "0x000000",
+      "opcode": "0x0115",
+      "desc": "Unlock the lidar model; the halt holds until Seq 7",
+      "payloadHex": "00e40000"
+    }
+  ],
+  "components": {
+    "Executive": {
+      "fullUid": "0x000000",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "PING",
+          "opcode": "0x0001",
+          "desc": "Echo payload",
+          "fields": []
+        },
+        {
+          "name": "GET_HEALTH",
+          "opcode": "0x0100",
+          "desc": "Executive health (48B response)",
+          "fields": []
+        },
+        {
+          "name": "EXEC_NOOP",
+          "opcode": "0x0101",
+          "desc": "Executive connectivity check",
+          "fields": []
+        },
+        {
+          "name": "GET_CLOCK_FREQ",
+          "opcode": "0x0102",
+          "desc": "Clock frequency (2B response)",
+          "fields": []
+        },
+        {
+          "name": "GET_RT_MODE",
+          "opcode": "0x0103",
+          "desc": "RT mode (1B response)",
+          "fields": []
+        },
+        {
+          "name": "GET_CLOCK_CYCLES",
+          "opcode": "0x0104",
+          "desc": "Cycle count (8B response)",
+          "fields": []
+        },
+        {
+          "name": "CMD_PAUSE",
+          "opcode": "0x0110",
+          "desc": "Pause execution",
+          "fields": []
+        },
+        {
+          "name": "CMD_RESUME",
+          "opcode": "0x0111",
+          "desc": "Resume execution",
+          "fields": []
+        },
+        {
+          "name": "CMD_SHUTDOWN",
+          "opcode": "0x0112",
+          "desc": "Graceful shutdown",
+          "fields": []
+        },
+        {
+          "name": "CMD_FAST_FORWARD",
+          "opcode": "0x0113",
+          "desc": "Enter fast-forward mode (non-RT)",
+          "fields": []
+        },
+        {
+          "name": "CMD_LOCK_COMPONENT",
+          "opcode": "0x0114",
+          "desc": "Lock component",
+          "fields": [
+            {
+              "name": "fullUid",
+              "type": "uint32",
+              "desc": "Component to lock"
+            }
+          ]
+        },
+        {
+          "name": "CMD_UNLOCK_COMPONENT",
+          "opcode": "0x0115",
+          "desc": "Unlock component",
+          "fields": [
+            {
+              "name": "fullUid",
+              "type": "uint32",
+              "desc": "Component to unlock"
+            }
+          ]
+        },
+        {
+          "name": "CMD_SLEEP",
+          "opcode": "0x0116",
+          "desc": "Enter sleep mode",
+          "fields": []
+        },
+        {
+          "name": "CMD_WAKE",
+          "opcode": "0x0117",
+          "desc": "Exit sleep mode",
+          "fields": []
+        },
+        {
+          "name": "SET_VERBOSITY",
+          "opcode": "0x0121",
+          "desc": "Set log verbosity level",
+          "fields": [
+            {
+              "name": "level",
+              "type": "uint8",
+              "desc": "0=OFF 1=ERROR 2=WARN 3=INFO 4=DEBUG",
+              "default": 3
+            }
+          ]
+        },
+        {
+          "name": "RELOAD_TPRM",
+          "opcode": "0x0125",
+          "desc": "Reload component parameters",
+          "fields": [
+            {
+              "name": "fullUid",
+              "type": "uint32",
+              "desc": "Target component UID"
+            }
+          ]
+        },
+        {
+          "name": "RELOAD_LIBRARY",
+          "opcode": "0x0126",
+          "desc": "Hot-swap shared library",
+          "fields": [
+            {
+              "name": "fullUid",
+              "type": "uint32",
+              "desc": "Target component UID"
+            }
+          ]
+        },
+        {
+          "name": "RELOAD_EXECUTIVE",
+          "opcode": "0x0127",
+          "desc": "Restart via execve (destructive)",
+          "fields": []
+        },
+        {
+          "name": "INSPECT",
+          "opcode": "0x0130",
+          "desc": "Read registered data block",
+          "fields": [
+            {
+              "name": "fullUid",
+              "type": "uint32",
+              "desc": "Component UID"
+            },
+            {
+              "name": "category",
+              "type": "uint8",
+              "desc": "0=STATIC 1=TUNABLE 2=STATE 3=INPUT 4=OUTPUT"
+            },
+            {
+              "name": "offset",
+              "type": "uint16",
+              "desc": "Byte offset",
+              "default": 0
+            },
+            {
+              "name": "length",
+              "type": "uint16",
+              "desc": "Byte count (0=all)",
+              "default": 0
+            }
+          ]
+        },
+        {
+          "name": "READBACK_TPRM",
+          "opcode": "0x0131",
+          "desc": "Readback Tprm",
+          "fields": []
+        },
+        {
+          "name": "VERIFY_TPRM",
+          "opcode": "0x0132",
+          "desc": "Verify Tprm",
+          "fields": []
+        },
+        {
+          "name": "GET_REGISTRY",
+          "opcode": "0x0140",
+          "desc": "Dump component registry (44B/entry)",
+          "fields": []
+        },
+        {
+          "name": "GET_DATA_CATALOG",
+          "opcode": "0x0141",
+          "desc": "Dump data entry catalog (44B/entry)",
+          "fields": []
+        }
+      ]
+    },
+    "Scheduler": {
+      "fullUid": "0x000100",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "GET_HEALTH",
+          "opcode": "0x0100",
+          "desc": "Executive health (48B response)",
+          "fields": []
+        },
+        {
+          "name": "GET_TASK_STATS",
+          "opcode": "0x0101",
+          "desc": "Get Task Stats",
+          "fields": []
+        },
+        {
+          "name": "RUN_TASK_CENSUS",
+          "opcode": "0x0102",
+          "desc": "Run Task Census",
+          "fields": []
+        },
+        {
+          "name": "GET_TASK_CENSUS",
+          "opcode": "0x0103",
+          "desc": "Get Task Census",
+          "fields": []
+        },
+        {
+          "name": "RUN_PREFLIGHT",
+          "opcode": "0x0104",
+          "desc": "Run Preflight",
+          "fields": []
+        },
+        {
+          "name": "GET_PREFLIGHT",
+          "opcode": "0x0105",
+          "desc": "Get Preflight",
+          "fields": []
+        },
+        {
+          "name": "GET_REQUIREMENTS",
+          "opcode": "0x0106",
+          "desc": "Get Requirements",
+          "fields": []
+        }
+      ]
+    },
+    "FileSystem": {
+      "fullUid": "0x000200",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        }
+      ]
+    },
+    "Registry": {
+      "fullUid": "0x000300",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        }
+      ]
+    },
+    "Interface": {
+      "fullUid": "0x000400",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        }
+      ]
+    },
+    "Action": {
+      "fullUid": "0x000500",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        }
+      ]
+    },
+    "GroundVehicle": {
+      "fullUid": "0x00DE00",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "HALT",
+          "opcode": "0x0100",
+          "desc": "Plant-level stop; heading frozen. Stamps MANUAL_HALT (0x15) unless a halt reason is set.",
+          "fields": []
+        },
+        {
+          "name": "RESUME",
+          "opcode": "0x0101",
+          "desc": "Clear a halt and any throttle override.",
+          "fields": []
+        },
+        {
+          "name": "SET_MODE",
+          "opcode": "0x0103",
+          "desc": "Drive mode: 0 HOLD, 1 TRAJECTORY, 2 WAYPOINT. BUSY while a sequence runs.",
+          "fields": [
+            {
+              "name": "mode",
+              "type": "uint8",
+              "desc": ""
+            }
+          ]
+        },
+        {
+          "name": "SET_TARGET_REL",
+          "opcode": "0x0104",
+          "desc": "Target (north, east) metres from the current position. BUSY while a sequence runs.",
+          "fields": [
+            {
+              "name": "a_m",
+              "type": "float",
+              "desc": ""
+            },
+            {
+              "name": "b_m",
+              "type": "float",
+              "desc": ""
+            }
+          ]
+        },
+        {
+          "name": "SET_TARGET_ABS",
+          "opcode": "0x0105",
+          "desc": "Target (north, east) metres from the grid anchor; |value| <= 2000.",
+          "fields": [
+            {
+              "name": "a_m",
+              "type": "float",
+              "desc": ""
+            },
+            {
+              "name": "b_m",
+              "type": "float",
+              "desc": ""
+            }
+          ]
+        },
+        {
+          "name": "SET_LED",
+          "opcode": "0x0106",
+          "desc": "Lamp 1..2; colour 0 off, 1 red, 2 green, 3 blue, 4 yellow, 5 white; rate 0 steady, 1 0.5 Hz, 2 1 Hz, 3 2 Hz, 4 5 Hz, 5 10 Hz.",
+          "fields": [
+            {
+              "name": "lamp",
+              "type": "uint8",
+              "desc": ""
+            },
+            {
+              "name": "colour",
+              "type": "uint8",
+              "desc": ""
+            },
+            {
+              "name": "rate",
+              "type": "uint8",
+              "desc": ""
+            }
+          ]
+        },
+        {
+          "name": "SET_SEQ_STATE",
+          "opcode": "0x0107",
+          "desc": "Sequences bracket themselves with this; 0 idle, a running id with bit 0x10 clear (1..15, 32..47, 64..79, ...), 0x10|reason halt.",
+          "fields": [
+            {
+              "name": "state",
+              "type": "uint8",
+              "desc": ""
+            },
+            {
+              "name": "waypoint_total",
+              "type": "uint8",
+              "desc": ""
+            }
+          ]
+        }
+      ]
+    },
+    "RoverController": {
+      "fullUid": "0x00E200",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        }
+      ]
+    },
+    "RoverBoardLink": {
+      "fullUid": "0x00E300",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        }
+      ]
+    },
+    "RoverLidarModel": {
+      "fullUid": "0x00E400",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        }
+      ]
+    },
+    "CelestialBody": {
+      "fullUid": "0x00DC00",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        }
+      ]
+    },
+    "ShmRingBridge": {
+      "fullUid": "0x00CB00",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        }
+      ]
+    },
+    "TelemetryManager": {
+      "fullUid": "0x00C900",
+      "commands": [
+        {
+          "name": "NOOP",
+          "opcode": "0x0000",
+          "desc": "Connectivity check",
+          "fields": []
+        },
+        {
+          "name": "GET_STATS",
+          "opcode": "0x0100",
+          "desc": "Get Stats",
+          "fields": []
+        },
+        {
+          "name": "ADD_SUBSCRIPTION",
+          "opcode": "0x0200",
+          "desc": "Add Subscription",
+          "fields": []
+        },
+        {
+          "name": "REMOVE_SUBSCRIPTION",
+          "opcode": "0x0201",
+          "desc": "Remove Subscription",
+          "fields": []
+        },
+        {
+          "name": "LIST_SUBSCRIPTIONS",
+          "opcode": "0x0202",
+          "desc": "List Subscriptions",
+          "fields": []
+        },
+        {
+          "name": "CLEAR_ALL",
+          "opcode": "0x0203",
+          "desc": "Clear All",
+          "fields": []
+        }
+      ]
+    }
+  }
+}

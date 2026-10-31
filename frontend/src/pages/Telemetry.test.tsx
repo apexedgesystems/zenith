@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, render } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 
 /* The telemetry page's live stream, driven through a fake WebSocket:
  * a close with the session-end code is not a dropped link and must not
- * start the reconnect loop; any other close is one, and must. Each test
- * loads a fresh module graph, so each gets its own session owner. */
+ * start the reconnect loop; any other close is one, and must. The
+ * status beside the controls reads the link and the stream together.
+ * Each test loads a fresh module graph, so each gets its own session
+ * owner. */
 
 class FakeSocket {
   static opened: FakeSocket[] = [];
@@ -21,25 +23,42 @@ class FakeSocket {
   serverClose(code: number) {
     this.onclose?.({ code } as CloseEvent);
   }
+  /** The server sends one sample on the stream. */
+  serverSend(sample: unknown) {
+    this.onmessage?.({ data: JSON.stringify(sample) } as MessageEvent);
+  }
 }
 
 const json = (v: unknown) => new Response(JSON.stringify(v), { status: 200 });
 let calls: string[] = [];
 let stop: (() => void) | null = null;
+/** The link state the target list reports for target-0; null answers
+ *  the target list read with 404, so the link reads as down. */
+let linkConnected: boolean | null = null;
 
 async function renderPage() {
   vi.resetModules();
   const { session } = await import("../api/session");
   const { DialogProvider } = await import("../components/dialogs");
+  const { QueryClient, QueryClientProvider } = await import(
+    "@tanstack/react-query"
+  );
   const { default: TelemetryPage } = await import("./Telemetry");
+  // The page reads the target list through a query hook; the fake
+  // server answers it from `linkConnected`.
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
   stop = session.start(new EventTarget());
   await act(async () => {
     await vi.advanceTimersByTimeAsync(0); // the session answers: auth off
   });
   render(
-    <DialogProvider>
-      <TelemetryPage selectedTarget="target-0" />
-    </DialogProvider>,
+    <QueryClientProvider client={queryClient}>
+      <DialogProvider>
+        <TelemetryPage selectedTarget="target-0" />
+      </DialogProvider>
+    </QueryClientProvider>,
   );
   await act(async () => {
     await vi.advanceTimersByTimeAsync(0);
@@ -53,6 +72,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   FakeSocket.opened = [];
   calls = [];
+  linkConnected = null;
   vi.stubGlobal("WebSocket", FakeSocket);
   vi.stubGlobal(
     "fetch",
@@ -61,6 +81,19 @@ beforeEach(() => {
       calls.push(`${init?.method ?? "GET"} ${path}`);
       if (path === "/api/auth/session") return json({ auth_enabled: false });
       if (path.endsWith("/telemetry/layouts")) return json({ layouts: [] });
+      if (path === "/api/targets" && linkConnected !== null) {
+        return json({
+          targets: [
+            {
+              id: "target-0",
+              name: "Target",
+              host: "127.0.0.1",
+              port: 9000,
+              connected: linkConnected,
+            },
+          ],
+        });
+      }
       return new Response("not found", { status: 404 });
     }),
   );
@@ -100,5 +133,52 @@ describe("Telemetry page live stream", () => {
       expect(FakeSocket.opened).toHaveLength(before + 1);
       expect(FakeSocket.opened[before].url).toBe(first.url);
     }
+  });
+});
+
+describe("Telemetry page status", () => {
+  const sample = {
+    target_id: "target-0",
+    channel: "A.x",
+    timestamp_ms: 1_000,
+    value: 1.5,
+  };
+
+  it("reads No data while the link is up and no sample has arrived", async () => {
+    linkConnected = true;
+    await renderPage();
+    expect(screen.getByText("No data")).toBeInTheDocument();
+  });
+
+  it("reads Live from the first sample on the stream", async () => {
+    linkConnected = true;
+    await renderPage();
+    expect(screen.getByText("No data")).toBeInTheDocument();
+    await act(async () => {
+      FakeSocket.opened[0].serverSend(sample);
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText("Live")).toBeInTheDocument();
+    expect(screen.queryByText("No data")).not.toBeInTheDocument();
+  });
+
+  it("reads Paused while paused, and Live again on resume", async () => {
+    linkConnected = true;
+    await renderPage();
+    await act(async () => {
+      FakeSocket.opened[0].serverSend(sample);
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Pause" }));
+    expect(screen.getByText("Paused")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Resume" }));
+    expect(screen.getByText("Live")).toBeInTheDocument();
+  });
+
+  it("reads Off while the link is down", async () => {
+    linkConnected = false;
+    await renderPage();
+    expect(screen.getByText("Off")).toBeInTheDocument();
+    expect(screen.queryByText("No data")).not.toBeInTheDocument();
   });
 });

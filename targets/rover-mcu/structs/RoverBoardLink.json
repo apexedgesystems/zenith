@@ -1,0 +1,159 @@
+{
+  "component": "RoverBoardLink",
+  "structs": {
+    "RoverBoardLinkState": {
+      "category": "STATE",
+      "size": 64,
+      "fields": [
+        {
+          "name": "tx_count",
+          "type": "uint",
+          "offset": 0,
+          "size": 8,
+          "value": 0
+        },
+        {
+          "name": "rx_count",
+          "type": "uint",
+          "offset": 8,
+          "size": 8,
+          "value": 0
+        },
+        {
+          "name": "heartbeats",
+          "type": "uint",
+          "offset": 16,
+          "size": 8,
+          "value": 0
+        },
+        {
+          "name": "crc_errors",
+          "type": "uint",
+          "offset": 24,
+          "size": 8,
+          "value": 0
+        },
+        {
+          "name": "seq_gaps",
+          "type": "uint",
+          "offset": 32,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "opens",
+          "type": "uint",
+          "offset": 36,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "board_cycles",
+          "type": "uint",
+          "offset": 40,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "board_steps",
+          "type": "uint",
+          "offset": 44,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "board_overhead_us",
+          "type": "uint",
+          "offset": 48,
+          "size": 4,
+          "value": 0
+        },
+        {
+          "name": "last_rx_seq",
+          "type": "uint",
+          "offset": 52,
+          "size": 2,
+          "value": 0
+        },
+        {
+          "name": "link_state",
+          "type": "uint",
+          "offset": 54,
+          "size": 1,
+          "value": "LINK_NEVER"
+        },
+        {
+          "name": "uart_open",
+          "type": "uint",
+          "offset": 55,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "load_pct",
+          "type": "uint",
+          "offset": 56,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "reserved",
+          "type": "array",
+          "offset": 57,
+          "size": 3,
+          "value": [],
+          "element_type": "uint",
+          "dims": [3]
+        },
+        {
+          "name": "board_restarts",
+          "type": "uint",
+          "offset": 60,
+          "size": 4,
+          "value": 0
+        }
+      ]
+    },
+    "RoverBoardLinkTunables": {
+      "category": "TUNABLE_PARAM",
+      "size": 72,
+      "fields": [
+        {
+          "name": "device_path",
+          "type": "string",
+          "offset": 0,
+          "size": 64,
+          "value": "/', 'd', 'e', 'v', '/', 't', 't', 'y', 'A', 'C', 'M', '0"
+        },
+        {
+          "name": "baud_rate",
+          "type": "uint",
+          "offset": 64,
+          "size": 4,
+          "value": "BAUD_RATE"
+        },
+        {
+          "name": "link_timeout_ms",
+          "type": "uint",
+          "offset": 68,
+          "size": 2,
+          "value": 500
+        },
+        {
+          "name": "enabled",
+          "type": "uint",
+          "offset": 70,
+          "size": 1,
+          "value": 0
+        },
+        {
+          "name": "reserved",
+          "type": "uint",
+          "offset": 71,
+          "size": 1,
+          "value": 0
+        }
+      ]
+    }
+  }
+}

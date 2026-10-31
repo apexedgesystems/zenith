@@ -866,20 +866,42 @@ mod tests {
     /// equals the exported hash. A nested field inlines its fragment's
     /// leaves under their own names, once per instance, with no row of
     /// its own; the shipped dictionaries carry such structs, so the
-    /// rule is exercised, not assumed.
+    /// rule is exercised, not assumed. The rover demo's dictionaries
+    /// also list some arrays' elements as fields of their own (`a[1]`
+    /// beside the array `a`), a shape the recompute does not take; its
+    /// structs export their hashes, so the fallback does not run for
+    /// them. Such a struct is skipped in that target only, the target
+    /// must still have one, and anywhere else it fails the test.
     #[test]
     fn dictionary_recompute_matches_exported_layout_hashes() {
         use crate::core::config_manager::{expanded_fields, ComponentDict};
+        const ELEMENT_VIEWS: [&str; 1] = ["Rover MCU"];
+        let is_view = |leaf: &FieldDef, leaves: &[FieldDef]| {
+            leaf.name
+                .strip_suffix(']')
+                .and_then(|n| n.rsplit_once('['))
+                .is_some_and(|(a, i)| {
+                    i.parse::<usize>().is_ok()
+                        && leaves
+                            .iter()
+                            .any(|f| f.name == a && f.field_type == "array")
+                })
+        };
         let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
         let text = std::fs::read_to_string(repo.join("config.toml")).unwrap();
         let cfg: crate::config::ServerConfig = toml::from_str(&text).unwrap();
         let mut mismatches = Vec::new();
         let mut nested_checked = 0;
-        for dir in cfg.targets.iter().filter_map(|t| t.structs_dir.as_deref()) {
-            let dir = dir
-                .strip_prefix("/data/targets/")
-                .expect("structs_dir under /data/targets");
-            let mut files: Vec<PathBuf> = std::fs::read_dir(repo.join("targets").join(dir))
+        let targets = repo.join("targets");
+        for (t, structs) in cfg
+            .targets
+            .iter()
+            .filter_map(|t| crate::config::repo_structs_path(t, &repo).map(|structs| (t, structs)))
+        {
+            let dir = structs.strip_prefix(&targets).unwrap_or(&structs).display();
+            let views_allowed = ELEMENT_VIEWS.contains(&t.name.as_str());
+            let mut views_skipped = 0;
+            let mut files: Vec<PathBuf> = std::fs::read_dir(&structs)
                 .unwrap()
                 .map(|e| e.unwrap().path())
                 .collect();
@@ -892,6 +914,17 @@ mod tests {
                         continue;
                     };
                     let leaves = expanded_fields(&dict, &sdef.fields, 0);
+                    if leaves.iter().any(|l| is_view(l, &leaves)) {
+                        if views_allowed {
+                            views_skipped += 1;
+                            continue;
+                        }
+                        mismatches.push(format!(
+                            "{dir}/{}: {name} lists array elements as fields",
+                            path.file_name().unwrap().to_string_lossy()
+                        ));
+                        continue;
+                    }
                     let got = layout_hash(dict_leaf_specs(&leaves), sdef.size);
                     if sdef.fields.iter().any(|f| f.field_type == "nested") {
                         nested_checked += 1;
@@ -904,6 +937,11 @@ mod tests {
                     }
                 }
             }
+            assert!(
+                !views_allowed || views_skipped > 0,
+                "{}: no struct lists array elements as fields; drop it from ELEMENT_VIEWS",
+                t.name
+            );
         }
         assert!(
             mismatches.is_empty(),
