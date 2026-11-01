@@ -250,13 +250,13 @@ networking, a port variable, a data volume). It then checks that:
 - `/` serves a page whose module script answers a JavaScript type.
 
 A failed check, or a response of the wrong shape, names the problem
-and prints the container log. The container is removed either way, by
-the id `docker create` writes to a file of the run's own, so a run
-stopped before it read the id still removes its container, and a second
-run on the same port never removes the first's. A signal that
-interrupts `docker create` itself before it has the id, as Ctrl-C in a
-terminal can, may leave the container behind; the next run then refuses
-the name until it is removed.
+and prints the container log. The container is removed either way: the
+run labels it with a random token of its own and removes whatever
+carries that label, never a name, so a run stopped before it read the id
+still removes its container, and a second run on the same port never
+removes the first's. The daemon can finish a create after an interrupted
+client has gone, so when the create had not returned the run looks again
+two seconds later.
 
 It builds nothing and never pulls, so build (or pull) first. By
 default it boots this checkout's compose build, the name `docker

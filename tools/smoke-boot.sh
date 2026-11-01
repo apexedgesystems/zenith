@@ -20,13 +20,13 @@
 #   - GET / serves a page whose module script answers a JavaScript type.
 #
 # A failed check, or a response of the wrong shape, prints FAIL with the
-# problem and the container log. docker create writes the new container's
-# id to a file of this run's own, and the exit trap removes exactly that id,
-# so a run stopped before it read the id still removes its container, and a
-# name another run holds is never touched. A signal that interrupts docker
-# create itself before it has the id (Ctrl-C reaches the whole foreground
-# process group) can leave the container; the next run then refuses the
-# name.
+# problem and the container log. The container carries a label with a
+# random token of this run's own (zenith-smoke-owner), and the exit trap
+# removes every container that carries it, never one by name: a run stopped
+# before it read the id still removes its container, and a name another run
+# holds is never touched. The daemon can finish a create after an
+# interrupted client has gone, so when the create had not returned and no
+# owned container shows yet, the trap looks again two seconds later.
 #
 # Usage:
 #   smoke-boot.sh --image <ref> [--port <port>] [--timeout <seconds>]
@@ -56,6 +56,15 @@ readonly SCRIPT_DIR
 
 # The front door of the bundled config ([server] port).
 readonly CONTAINER_PORT=8080
+
+# The label every container this script creates carries, valued with the
+# run's own random token: cleanup removes what carries it, never a name.
+readonly OWNER_LABEL="zenith-smoke-owner"
+
+# How long cleanup waits before it looks again when a create had not
+# returned: long enough for a create the daemon finishes after its client
+# has gone to land.
+readonly LATE_CREATE_WAIT=2
 
 # The demo targets the image bundles (deploy/config.toml), one per line as
 # id|name|ceiling|commands. Ids are positional in that file and key every
@@ -161,30 +170,49 @@ done
 NAME="zenith-smoke-$PORT"
 BASE_URL="http://127.0.0.1:$PORT"
 CONTAINER_ID=""
-RUN_DIR=""
-ID_FILE=""
+# none: no create yet; pending: create invoked, no id back; done: created.
+CREATE_STATE="none"
 DECLARED_VERSION=""
 BODY=""
 BODY_PATH=""
+
+OWNER_TOKEN=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n') || OWNER_TOKEN=""
+[[ "$OWNER_TOKEN" =~ ^[0-9a-f]{32}$ ]] || {
+  err "could not draw a random owner token from /dev/urandom"
+  exit 1
+}
+readonly OWNER_TOKEN
 
 # ==============================================================================
 # Container
 # ==============================================================================
 
-# Remove the container whose id docker create wrote to this run's id file,
-# then the file. An absent or empty file (no create yet, or a create that
-# failed, on a name another run holds, say) removes nothing.
+# Force-remove every container labelled with this run's token; succeed if
+# there was one.
+remove_owned() {
+  local ids id found=1
+  ids=$(docker ps --all --quiet --no-trunc \
+    --filter "label=$OWNER_LABEL=$OWNER_TOKEN" 2>/dev/null) || ids=""
+  for id in $ids; do
+    if [[ "$id" =~ ^[0-9a-f]{64}$ ]]; then
+      docker rm --force "$id" >/dev/null 2>&1 || true
+      found=0
+    fi
+  done
+  return "$found"
+}
+
+# The EXIT trap: remove what this run owns. A create that had not returned
+# may still land, so when nothing owned shows yet, look again after the
+# wait. INT and TERM are ignored meanwhile, so a second Ctrl-C cannot cut
+# the cleanup short.
 cleanup() {
-  local id=""
-  [[ -n "$ID_FILE" ]] || return 0
-  if [[ -s "$ID_FILE" ]]; then
-    id=$(cat "$ID_FILE" 2>/dev/null) || id=""
+  trap '' INT TERM
+  [[ "$CREATE_STATE" != "none" ]] || return 0
+  if ! remove_owned && [[ "$CREATE_STATE" == "pending" ]]; then
+    sleep "$LATE_CREATE_WAIT"
+    remove_owned || true
   fi
-  if [[ "$id" =~ ^[0-9a-f]{64}$ ]]; then
-    docker rm --force "$id" >/dev/null 2>&1 || true
-  fi
-  rm -f -- "$ID_FILE" || true
-  rmdir -- "$RUN_DIR" 2>/dev/null || true
 }
 
 print_log() {
@@ -213,9 +241,9 @@ read_declared_version() {
   DECLARED_VERSION="${out#version }"
 }
 
-# Create, then start. Only the container this run created is ever removed,
-# by the id docker create writes to the run's id file, so losing the name to
-# a concurrent run removes nothing.
+# Create, then start. Only containers carrying this run's token are ever
+# removed, so losing the name to a concurrent run (its create fails at the
+# conflict) removes nothing.
 start_container() {
   local out
   docker image inspect "$IMAGE" >/dev/null 2>&1 || {
@@ -226,18 +254,15 @@ start_container() {
     err "a container named $NAME already exists; remove it or use another --port"
     exit 1
   fi
-  RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/zenith-smoke.XXXXXXXX") || {
-    err "could not create a directory for the container id file"
-    exit 1
-  }
-  ID_FILE="$RUN_DIR/container-id"
-  out=$(docker create --pull never --cidfile "$ID_FILE" --name "$NAME" \
-    --publish "127.0.0.1:$PORT:$CONTAINER_PORT" "$IMAGE" 2>&1) ||
+  CREATE_STATE="pending"
+  out=$(docker create --pull never --label "$OWNER_LABEL=$OWNER_TOKEN" \
+    --name "$NAME" --publish "127.0.0.1:$PORT:$CONTAINER_PORT" "$IMAGE" 2>&1) ||
     fail "docker create: $out"
-  CONTAINER_ID=$(cat "$ID_FILE" 2>/dev/null) || CONTAINER_ID=""
+  CREATE_STATE="done"
+  CONTAINER_ID=$(tail -n 1 <<<"$out")
   if [[ ! "$CONTAINER_ID" =~ ^[0-9a-f]{64}$ ]]; then
     CONTAINER_ID=""
-    fail "docker create wrote no container id to $ID_FILE: $out"
+    fail "docker create printed no container id: $out"
   fi
   out=$(docker start "$CONTAINER_ID" 2>&1) || fail "docker start: $out"
   log "booted $IMAGE as $NAME on $BASE_URL"
