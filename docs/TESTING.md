@@ -278,26 +278,30 @@ make smoke-boot SMOKE_IMAGE=<ref>  # any image in the local store
 GitHub and cloud tokens, generic high-entropy keys) and zenith's own
 credentials:
 
-- the `[auth]` signing secret as a one-line string of 16 characters or
-  more that ends the value, written as `secret = ...` in the `[auth]`
-  table, as the dotted `auth.secret = ...` (each part bare or quoted),
-  or inside `auth = { ... }` (a field set in code, such as
+- the `[auth]` signing secret as a one-line TOML string of 16
+  characters or more that ends the value, basic (`"..."`, any character
+  but an unescaped `"`, an escape such as `\"` counting as one) or
+  literal (`'...'`, any character but `'`), written as `secret = ...` in
+  the `[auth]` table, as the dotted `auth.secret = ...` (each part bare
+  or quoted), or inside `auth = { ... }` (a field set in code, such as
   `auth.secret = "...".into()`, is left to the default rules);
-- a literal value of `ZENITH_AUTH_SECRET` (after `=` or `:`; an
-  interpolation such as `${ZENITH_AUTH_SECRET}` is not one);
+- a literal value of `ZENITH_AUTH_SECRET` (after `=` or `:`, bare or
+  quoted, a quoted one possibly holding spaces; an interpolation such as
+  `${ZENITH_AUTH_SECRET}` is not one);
 - an argon2 password hash (PHC string).
 
-A multi-line TOML string is outside these rules (the default generic
-rule still catches a high-entropy value in one), and a YAML block scalar
-is matched by no rule. The rules are built into the pinned release and
-both scans run with no network, so a scan fetches nothing; the pin is
-bumped by hand (dependabot reads no Makefile). It scans the tree as git
-sees it, tracked files plus untracked ones no ignore rule covers, and
-with `SECRET_SCAN_RANGE=<base>..<head>` every commit in that range, its
-diffs read as text whatever `.gitattributes` says; that is how CI scans
-a pull request, so a secret added and taken out again inside the range
-still fails. The range scan reads the repository from inside a container
-and needs a full checkout, not a git worktree: it refuses to run in a
+A multi-line TOML string (`"""` or `'''`, even on one line) is outside
+these rules (the default generic rule still catches a high-entropy value
+in one), and a YAML block scalar is matched by no rule. The rules are
+built into the pinned release and both scans run with no network, so a
+scan fetches nothing; the pin is bumped by hand (dependabot reads no
+Makefile). It scans the tree as git sees it, tracked files plus
+untracked ones no ignore rule covers, and with
+`SECRET_SCAN_RANGE=<base>..<head>` every commit in that range, its diffs
+read as text whatever `.gitattributes` says; that is how CI scans a pull
+request, so a secret added and taken out again inside the range still
+fails. The range scan reads the repository from inside a container and
+needs a full checkout, not a git worktree: it refuses to run in a
 worktree, and on a range git cannot resolve it stops with git's error,
 both before any scan runs.
 
