@@ -38,6 +38,9 @@ architecture review; work before that is the v0.0.1 tag.
 - The development config includes the apex rover demo with telemetry
   and health rules.
   ([#49](https://github.com/apexedgesystems/zenith/pull/49))
+- Release images are smoke-tested on each supported architecture before
+  publication.
+  ([#53](https://github.com/apexedgesystems/zenith/pull/53))
 
 ### Changed
 
