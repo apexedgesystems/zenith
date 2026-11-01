@@ -20,8 +20,13 @@
 #   - GET / serves a page whose module script answers a JavaScript type.
 #
 # A failed check, or a response of the wrong shape, prints FAIL with the
-# problem and the container log. The container is created first and removed
-# by its id on every exit, so a name another run holds is never touched.
+# problem and the container log. docker create writes the new container's
+# id to a file of this run's own, and the exit trap removes exactly that id,
+# so a run stopped before it read the id still removes its container, and a
+# name another run holds is never touched. A signal that interrupts docker
+# create itself before it has the id (Ctrl-C reaches the whole foreground
+# process group) can leave the container; the next run then refuses the
+# name.
 #
 # Usage:
 #   smoke-boot.sh --image <ref> [--port <port>] [--timeout <seconds>]
@@ -156,6 +161,8 @@ done
 NAME="zenith-smoke-$PORT"
 BASE_URL="http://127.0.0.1:$PORT"
 CONTAINER_ID=""
+RUN_DIR=""
+ID_FILE=""
 DECLARED_VERSION=""
 BODY=""
 BODY_PATH=""
@@ -164,10 +171,20 @@ BODY_PATH=""
 # Container
 # ==============================================================================
 
+# Remove the container whose id docker create wrote to this run's id file,
+# then the file. An absent or empty file (no create yet, or a create that
+# failed, on a name another run holds, say) removes nothing.
 cleanup() {
-  if [[ -n "$CONTAINER_ID" ]]; then
-    docker rm --force "$CONTAINER_ID" >/dev/null 2>&1 || true
+  local id=""
+  [[ -n "$ID_FILE" ]] || return 0
+  if [[ -s "$ID_FILE" ]]; then
+    id=$(cat "$ID_FILE" 2>/dev/null) || id=""
   fi
+  if [[ "$id" =~ ^[0-9a-f]{64}$ ]]; then
+    docker rm --force "$id" >/dev/null 2>&1 || true
+  fi
+  rm -f -- "$ID_FILE" || true
+  rmdir -- "$RUN_DIR" 2>/dev/null || true
 }
 
 print_log() {
@@ -196,8 +213,9 @@ read_declared_version() {
   DECLARED_VERSION="${out#version }"
 }
 
-# Create, then start: only the container this run created is ever removed,
-# by its id, so losing the name to a concurrent run removes nothing.
+# Create, then start. Only the container this run created is ever removed,
+# by the id docker create writes to the run's id file, so losing the name to
+# a concurrent run removes nothing.
 start_container() {
   local out
   docker image inspect "$IMAGE" >/dev/null 2>&1 || {
@@ -208,13 +226,18 @@ start_container() {
     err "a container named $NAME already exists; remove it or use another --port"
     exit 1
   fi
-  out=$(docker create --pull never --name "$NAME" \
+  RUN_DIR=$(mktemp -d "${TMPDIR:-/tmp}/zenith-smoke.XXXXXXXX") || {
+    err "could not create a directory for the container id file"
+    exit 1
+  }
+  ID_FILE="$RUN_DIR/container-id"
+  out=$(docker create --pull never --cidfile "$ID_FILE" --name "$NAME" \
     --publish "127.0.0.1:$PORT:$CONTAINER_PORT" "$IMAGE" 2>&1) ||
     fail "docker create: $out"
-  CONTAINER_ID=$(tail -n 1 <<<"$out")
+  CONTAINER_ID=$(cat "$ID_FILE" 2>/dev/null) || CONTAINER_ID=""
   if [[ ! "$CONTAINER_ID" =~ ^[0-9a-f]{64}$ ]]; then
     CONTAINER_ID=""
-    fail "docker create printed no container id: $out"
+    fail "docker create wrote no container id to $ID_FILE: $out"
   fi
   out=$(docker start "$CONTAINER_ID" 2>&1) || fail "docker start: $out"
   log "booted $IMAGE as $NAME on $BASE_URL"
