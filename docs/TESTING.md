@@ -250,13 +250,16 @@ networking, a port variable, a data volume). It then checks that:
 - `/` serves a page whose module script answers a JavaScript type.
 
 A failed check, or a response of the wrong shape, names the problem
-and prints the container log. The container is removed either way: the
-run labels it with a random token of its own and removes whatever
-carries that label, never a name, so a run stopped before it read the id
-still removes its container, and a second run on the same port never
-removes the first's. The daemon can finish a create after an interrupted
-client has gone, so when the create had not returned the run looks again
-two seconds later.
+and prints the container log. The run labels its container with a
+random token of its own and, on exit, removes the containers it finds
+carrying that label, by their ids, never a name, so a second run on the
+same port never removes the first's. When the create had not returned
+and the first lookup finds none, it looks once more two seconds later; a
+retry delay, not a deadline for Docker. A create the daemon finishes
+after that last look leaves its labelled container behind, and the next
+run refuses the name: inspect that container and its
+`zenith-smoke-owner` label and remove only its confirmed id before
+reusing the port, or use another port.
 
 It builds nothing and never pulls, so build (or pull) first. By
 default it boots this checkout's compose build, the name `docker

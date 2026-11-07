@@ -22,11 +22,14 @@
 # A failed check, or a response of the wrong shape, prints FAIL with the
 # problem and the container log. The container carries a label with a
 # random token of this run's own (zenith-smoke-owner), and the exit trap
-# removes every container that carries it, never one by name: a run stopped
-# before it read the id still removes its container, and a name another run
-# holds is never touched. The daemon can finish a create after an
-# interrupted client has gone, so when the create had not returned and no
-# owned container shows yet, the trap looks again two seconds later.
+# removes the containers it finds carrying it, by their ids, never one by
+# name, so a name another run holds is never touched. When the create had
+# not returned and the first lookup finds none, the trap waits two seconds
+# and looks once more: a retry delay, not a deadline for Docker. A create
+# the daemon finishes after that last look leaves its labelled container
+# behind, and the next run refuses the name: inspect that container and its
+# owner label and remove only its confirmed id before reusing the port, or
+# pick another port.
 #
 # Usage:
 #   smoke-boot.sh --image <ref> [--port <port>] [--timeout <seconds>]
@@ -58,12 +61,13 @@ readonly SCRIPT_DIR
 readonly CONTAINER_PORT=8080
 
 # The label every container this script creates carries, valued with the
-# run's own random token: cleanup removes what carries it, never a name.
+# run's own random token: cleanup removes the containers it finds carrying
+# it, never a name.
 readonly OWNER_LABEL="zenith-smoke-owner"
 
-# How long cleanup waits before it looks again when a create had not
-# returned: long enough for a create the daemon finishes after its client
-# has gone to land.
+# The delay before cleanup's single second lookup, when a create had not
+# returned. A retry delay, not a deadline for Docker: a create that lands
+# after the second lookup is left behind (see above).
 readonly LATE_CREATE_WAIT=2
 
 # The demo targets the image bundles (deploy/config.toml), one per line as
@@ -202,10 +206,11 @@ remove_owned() {
   return "$found"
 }
 
-# The EXIT trap: remove what this run owns. A create that had not returned
-# may still land, so when nothing owned shows yet, look again after the
-# wait. INT and TERM are ignored meanwhile, so a second Ctrl-C cannot cut
-# the cleanup short.
+# The EXIT trap: remove the containers this run owns that it can find. A
+# create that had not returned may still land, so when nothing owned shows
+# yet, look once more after the wait; one that lands later is left behind
+# (see the header). INT and TERM are ignored meanwhile, so a second Ctrl-C
+# cannot cut the cleanup short.
 cleanup() {
   trap '' INT TERM
   [[ "$CREATE_STATE" != "none" ]] || return 0
