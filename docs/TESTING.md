@@ -281,17 +281,26 @@ make smoke-boot SMOKE_IMAGE=<ref>  # any image in the local store
 GitHub and cloud tokens, generic high-entropy keys) and zenith's own
 credentials:
 
-- the `[auth]` signing secret as a one-line TOML string of 16
-  characters or more that ends the value, basic (`"..."`, any character
-  but an unescaped `"`, an escape such as `\"` counting as one) or
-  literal (`'...'`, any character but `'`), written as `secret = ...` in
-  the `[auth]` table, as the dotted `auth.secret = ...` (each part bare
-  or quoted), or inside `auth = { ... }` (a field set in code, such as
+- the `[auth]` signing secret as a one-line TOML string that ends the
+  value, basic (`"..."`, any character but an unescaped `"`) or literal
+  (`'...'`, any character but `'`), written as `secret = ...` in the
+  `[auth]` table, as the dotted `auth.secret = ...` (each part bare or
+  quoted), or inside `auth = { ... }` (a field set in code, such as
   `auth.secret = "...".into()`, is left to the default rules);
 - a literal value of `ZENITH_AUTH_SECRET` (after `=` or `:`, bare or
   quoted, a quoted one possibly holding spaces; an interpolation such as
   `${ZENITH_AUTH_SECRET}` is not one);
 - an argon2 password hash (PHC string).
+
+Zenith accepts a signing secret of 16 bytes or more (UTF-8, as Rust's
+`String::len` counts them). Both signing-secret rules measure the value
+as written and report it from 16 characters. Written in ASCII, escapes
+included, a value is never shorter than the bytes it stands for (an
+escape such as `\u03b1` is six characters for two bytes), so every such
+value zenith accepts is reported, and some escaped values it would
+refuse are reported too. A value written with literal (unescaped)
+multibyte characters can reach 16 bytes in fewer characters and is
+outside the rules.
 
 A multi-line TOML string (`"""` or `'''`, even on one line) is outside
 these rules (the default generic rule still catches a high-entropy value
@@ -310,13 +319,13 @@ both before any scan runs.
 
 Exceptions live in `.gitleaks.toml` only, which holds one: the
 placeholder signing secret `change-me-in-production`, in the four files
-that ship it. Inline `gitleaks:allow` comments are not honored, and the
-scan refuses to run while a `.gitleaksignore` exists anywhere in the
-working tree, since gitleaks would read one as a list of findings to
-drop. Findings print with the secret redacted. A finding on a branch
-that was already pushed means the value is on the server: rotate it,
-then remove it. The scan needs `git`, GNU `tar` and `docker` on the
-host:
+that ship it (the 16-character floor is written there as an allowlist
+too). Inline `gitleaks:allow` comments are not honored, and the scan
+refuses to run while a `.gitleaksignore` exists anywhere in the working
+tree, since gitleaks would read one as a list of findings to drop.
+Findings print with the secret redacted. A finding on a branch that was
+already pushed means the value is on the server: rotate it, then remove
+it. The scan needs `git`, GNU `tar` and `docker` on the host:
 
 ```bash
 make secret-scan                                       # the tree
