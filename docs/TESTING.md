@@ -304,7 +304,9 @@ outside the rules.
 
 A multi-line TOML string (`"""` or `'''`, even on one line) is outside
 these rules (the default generic rule still catches a high-entropy value
-in one), and a YAML block scalar is matched by no rule. The rules are
+in one), and a YAML block scalar is matched by no rule. A shell ANSI-C
+quoted value, `ZENITH_AUTH_SECRET=$'...'`, is read as an interpolation
+and not reported. The rules are
 built into the pinned release and both scans run with no network, so a
 scan fetches nothing; the pin is bumped by hand (dependabot reads no
 Makefile). It scans the tree as git sees it, tracked files plus
