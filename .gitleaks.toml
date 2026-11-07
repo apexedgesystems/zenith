@@ -1,0 +1,85 @@
+# Secret scan rules (make secret-scan; the pull request gate runs it).
+#
+# The default rules of the pinned gitleaks release apply (private keys,
+# JWTs, GitHub and cloud tokens, generic high-entropy keys), plus the
+# credentials zenith's own configuration holds: the [auth] signing secret,
+# written into a config file or into ZENITH_AUTH_SECRET, and argon2
+# password hashes (what zenith --hash-password prints). Exceptions live in
+# this file only; it holds one, the placeholder signing secret in the
+# files that ship it. The two signing-secret rules also carry their
+# 16-character floor as an allowlist, since one regex cannot both read
+# escapes and count characters as written; the floor drops only values too
+# short for zenith (see below).
+
+title = "zenith"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "zenith-auth-secret"
+description = "A signing secret written into the [auth] secret key"
+# The key as a line of the [auth] table, as a dotted key (auth.secret), each
+# part bare or quoted, or inside an inline table (auth = { secret = ... }),
+# holding a one-line string that ends the value: the line ends, or a
+# comment, ',', '}' or ';' follows, so a field set in code
+# (auth.secret = "...".into()) is not a match. The string is delimited as
+# TOML delimits it: a basic string ("...") holds any character but a line
+# break or an unescaped ", its escapes as TOML writes them (\", \\, \uXXXX
+# and the rest); a literal string ('...') holds any character but a line
+# break or '. Each form captures its content in a group of its own, and
+# with no secretGroup set gitleaks takes the group that matched as the
+# secret, the value both allowlists below read. Multi-line strings (""" or
+# ''') are not matched.
+regex = '''(?m)(?:^[ \t]*(?:(?:auth|"auth"|'auth')[ \t]*\.[ \t]*)?|[{,][ \t]*)(?:secret|"secret"|'secret')[ \t]*=[ \t]*(?:"((?:[^"\\\r\n]|\\(?:u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|[^uU\r\n]))+)"|'([^'\r\n]+)')[ \t\r]*(?:$|[#,};])'''
+keywords = ["secret"]
+
+# The length floor, measured as written. zenith accepts a signing secret of
+# 16 bytes or more (UTF-8, as Rust's String::len counts them), and an
+# escape is never shorter as written than the bytes it stands for, so a
+# value zenith accepts is never dropped here; escaped values it would
+# refuse can still be reported. A value written with literal (unescaped)
+# multibyte characters can reach 16 bytes in fewer than 16 characters and
+# is outside this rule.
+[[rules.allowlists]]
+description = "Under 16 characters as written: shorter than zenith accepts"
+regexTarget = "secret"
+regexes = ['''^.{0,15}$''']
+
+# Exact value AND exact file: the placeholder elsewhere, or any other
+# value in these files, is still a finding.
+[[rules.allowlists]]
+description = "The placeholder the shipped configs and the README carry"
+condition = "AND"
+regexTarget = "secret"
+regexes = ['''^change-me-in-production$''']
+paths = [
+  '''^config\.toml$''',
+  '''^deploy/config\.toml$''',
+  '''^config/config\.example\.toml$''',
+  '''^README\.md$''',
+]
+
+[[rules]]
+id = "zenith-auth-secret-env"
+description = "A signing secret written into ZENITH_AUTH_SECRET"
+# A literal value after '=' or ':', double-quoted (a backslash and the
+# character after it read together), single-quoted, or bare (an unclosed
+# quote too) up to a space, quote or '#'; a quoted value may hold spaces.
+# A value that starts with $, an interpolation such as
+# ${ZENITH_AUTH_SECRET}, is not a literal. As above, gitleaks takes the
+# group that matched as the secret.
+regex = '''ZENITH_AUTH_SECRET[ \t]*[=:][ \t]*(?:"((?:[^"\\\r\n$]|\\[^\r\n])(?:[^"\\\r\n]|\\[^\r\n])*)"|'([^'\r\n$][^'\r\n]*)'|["']?([^"'\s#$][^"'\s#]*))'''
+keywords = ["zenith_auth_secret"]
+
+# The same floor as the [auth] rule's, measured as written.
+[[rules.allowlists]]
+description = "Under 16 characters as written: shorter than zenith accepts"
+regexTarget = "secret"
+regexes = ['''^.{0,15}$''']
+
+[[rules]]
+id = "argon2-password-hash"
+description = "An argon2 password hash (PHC string), as [auth] password_hash holds"
+regex = '''\$argon2(?:id|i|d)\$v=[0-9]+\$m=[0-9]+,t=[0-9]+,p=[0-9]+\$[A-Za-z0-9+/]+\$[A-Za-z0-9+/]+'''
+keywords = ["$argon2"]
