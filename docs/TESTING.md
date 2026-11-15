@@ -293,14 +293,15 @@ credentials:
 - an argon2 password hash (PHC string).
 
 Zenith accepts a signing secret of 16 bytes or more (UTF-8, as Rust's
-`String::len` counts them). Both signing-secret rules measure the value
-as written and report it from 16 characters. Written in ASCII, escapes
-included, a value is never shorter than the bytes it stands for (an
-escape such as `\u03b1` is six characters for two bytes), so every such
-value zenith accepts is reported, and some escaped values it would
-refuse are reported too. A value written with literal (unescaped)
-multibyte characters can reach 16 bytes in fewer characters and is
-outside the rules.
+`String::len` counts them). Both signing-secret rules apply a
+16-character floor to the value as written, and written in ASCII,
+escapes included, a value is never shorter than the bytes it stands for
+(an escape such as `\u03b1` is six characters for two bytes). For
+ASCII-written values, including escapes, this length floor does not
+exclude a value zenith accepts. Shorter decoded values can also meet the
+floor. Gitleaks' inherited filters still apply. A value written with
+literal (unescaped) multibyte characters can reach 16 bytes in fewer
+characters and is outside the rules.
 
 A multi-line TOML string (`"""` or `'''`, even on one line) is outside
 these rules (the default generic rule still catches a high-entropy value
