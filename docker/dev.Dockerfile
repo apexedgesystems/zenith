@@ -11,7 +11,7 @@
 # images sit cached, so the same Dockerfile yields different clippy
 # versions. Bump deliberately (dependabot proposes updates); keep in
 # step with the backend stage in ../Dockerfile.
-FROM rust:1.98-bookworm
+FROM rust:1.99-bookworm
 
 # Install Node.js 26 -- keep in step with the frontend stage in
 # ../Dockerfile (node:26-bookworm-slim): the node that runs tests
