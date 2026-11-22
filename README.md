@@ -156,7 +156,7 @@ ELF ident) decode correctly with zero configuration.
 | Benches       | criterion + pprof flamegraphs                                                              |
 | Auth          | Console sign-in with server-side sessions; JWT bearer tokens for API clients (default off) |
 | Rate limiting | Per-IP token bucket on POST endpoints (when auth is on)                                    |
-| Deploy        | Docker (multi-stage Rust + Node -> Debian slim)                                            |
+| Deploy        | Docker (multi-stage Rust + Node -> trimmed Debian root on scratch)                         |
 
 ## Build Artifacts (from Apex release)
 
@@ -219,8 +219,8 @@ docker run -d --name zenith --network host --read-only \
 # http://localhost:8080
 ```
 
-Or with compose, which adds the health check, the restart policy and
-the capability limits:
+Or with compose, which adds the restart policy and the capability
+limits:
 
 ```bash
 curl -O https://raw.githubusercontent.com/apexedgesystems/zenith/main/deploy/docker-compose.yml
@@ -277,6 +277,17 @@ server writes only `/var/lib/zenith`, where SQLite also keeps its
 temporary files. Under `--read-only` that directory must be a mounted
 volume (without one the container refuses to start); a throwaway run
 can mount `--tmpfs /var/lib/zenith` there instead.
+
+The image checks its own health: `zenith --health-check` asks the front
+door that `/etc/zenith/config.toml` and `ZENITH_PORT` declare, as the
+zenith user and without touching the data directory, so `docker ps`
+shows the container healthy once the server answers. A server started
+with its own `--config` or `--port` is still checked at that port: move
+the port with `ZENITH_PORT`, which both read, or give the container a
+health check of its own. The image carries only what the server and its entrypoint run: `docker exec`
+finds `sh`, coreutils and util-linux, but not apt, bash or wget, nor
+grep, sed, find, diff, gzip or perl, and no file with a setuid or setgid
+bit. dpkg and its database stay, so a scanner sees every package.
 
 To give the server a device node, pass it with `--device` and add the
 group that owns it on the host, by number, with `--group-add`

@@ -16,8 +16,10 @@
 # the cause and the remedy when it is not, and replaces itself with zenith
 # under no-new-privileges: the server runs as PID 1, receives the
 # container's stop signal, and cannot gain privileges, whatever the start
-# mode. The binary's client mode --hash-password never opens the
-# database: it gets the switch to the account and nothing else.
+# mode. The binary's client modes, --hash-password and --health-check (the
+# image's health check), never open the database: they get the switch to
+# the account and nothing else, so a health probe neither reads nor
+# changes the data directory.
 #
 # The hand-over never reaches outside the data directory: chown -R does
 # not follow symbolic links, so a link planted in the directory is handed
@@ -180,12 +182,12 @@ EOF
 # Root phase: hand over the data directory, then drop to the account
 # ==============================================================================
 
-# The binary's client mode never opens the database: it gets the switch
+# The binary's client modes never open the database: they get the switch
 # to the account and nothing else.
 USES_DATA=1
 for arg in "$@"; do
   case $arg in
-  --hash-password) USES_DATA="" ;;
+  --hash-password | --health-check) USES_DATA="" ;;
   esac
 done
 

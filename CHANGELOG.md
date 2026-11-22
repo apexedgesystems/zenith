@@ -27,6 +27,11 @@ architecture review; work before that is the v0.0.1 tag.
   capability set 0.2.0 starts and reports healthy but cannot write its
   database: it runs as root and needs CAP_DAC_OVERRIDE to write files
   uid 10001 owns.
+- The image carries only what zenith runs: no apt, bash or wget, and
+  none of grep, sed, find, diff, gzip or perl; dpkg and its database
+  stay, so a scanner sees every package. Its health check is built in
+  (`zenith --health-check`), so the compose files declare none; a health
+  check that calls wget fails.
 - TPRM uploads use the v4 prelude and carry payloads beyond 64 KiB.
   Apex CSF vehicles built before apex_csf 2543279 refuse them; vehicles
   from that commit on require v4 and refuse zenith 0.2.0's v3 uploads.

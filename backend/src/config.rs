@@ -1,5 +1,6 @@
 //! Server configuration (TOML file parsing).
 
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -552,6 +553,32 @@ impl Default for ServerSection {
             cors_allowed_origins: Vec::new(),
         }
     }
+}
+
+impl ServerSection {
+    /// Where the server listens: `host` and `port`, the port replaced by
+    /// `--port` when one is given. A host that does not parse as an IP
+    /// address listens on every IPv4 interface, so an operator's typo
+    /// cannot make the server invisible.
+    pub fn listen_addr(&self, port: Option<u16>) -> SocketAddr {
+        let ip = self
+            .host
+            .parse()
+            .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        SocketAddr::new(ip, port.unwrap_or(self.port))
+    }
+}
+
+/// The address a client on the same host dials to reach a server
+/// listening on `listen`: the listen address itself, or the loopback of
+/// its family when it is unspecified (every interface).
+pub fn loopback_if_unspecified(listen: SocketAddr) -> SocketAddr {
+    let ip = match listen.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(Ipv4Addr::LOCALHOST),
+        IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ip => ip,
+    };
+    SocketAddr::new(ip, listen.port())
 }
 
 impl Default for AuthSection {
@@ -1181,6 +1208,100 @@ mod tests {
         let e =
             apply_env_overrides(base(), |k| (k == "ZENITH_DB_PATH").then(String::new)).unwrap_err();
         assert!(e.contains("ZENITH_DB_PATH"), "{e}");
+    }
+
+    fn server(host: &str, port: u16) -> ServerSection {
+        ServerSection {
+            host: host.to_string(),
+            port,
+            ..ServerSection::default()
+        }
+    }
+
+    /// @test The server listens on the configured IPv4 host and port,
+    /// and a client on the same host dials that address as it is.
+    #[test]
+    fn listen_addr_takes_an_ipv4_host_and_its_port() {
+        let listen = server("127.0.0.1", 8080).listen_addr(None);
+        assert_eq!(listen, "127.0.0.1:8080".parse::<SocketAddr>().unwrap());
+        assert_eq!(loopback_if_unspecified(listen), listen);
+        let listen = server("192.0.2.7", 9000).listen_addr(None);
+        assert_eq!(loopback_if_unspecified(listen), listen);
+    }
+
+    /// @test An IPv6 host listens as IPv6, and a client dials it in
+    /// the same family.
+    #[test]
+    fn listen_addr_takes_an_ipv6_host() {
+        let listen = server("::1", 8080).listen_addr(None);
+        assert_eq!(listen, "[::1]:8080".parse::<SocketAddr>().unwrap());
+        assert_eq!(loopback_if_unspecified(listen), listen);
+        let listen = server("fd00::5", 8080).listen_addr(None);
+        assert_eq!(listen, "[fd00::5]:8080".parse::<SocketAddr>().unwrap());
+        assert_eq!(loopback_if_unspecified(listen), listen);
+    }
+
+    /// @test An unspecified host listens on every interface of its
+    /// family, and a client on the same host dials that family's
+    /// loopback: 127.0.0.1 for 0.0.0.0 and ::1 for ::, never 127.0.0.1
+    /// for a server that listens on IPv6 only.
+    #[test]
+    fn unspecified_host_is_reached_over_its_familys_loopback() {
+        let listen = server("0.0.0.0", 8080).listen_addr(None);
+        assert_eq!(listen, "0.0.0.0:8080".parse::<SocketAddr>().unwrap());
+        assert_eq!(
+            loopback_if_unspecified(listen),
+            "127.0.0.1:8080".parse::<SocketAddr>().unwrap()
+        );
+        let listen = server("::", 8080).listen_addr(None);
+        assert_eq!(listen, "[::]:8080".parse::<SocketAddr>().unwrap());
+        assert_eq!(
+            loopback_if_unspecified(listen),
+            "[::1]:8080".parse::<SocketAddr>().unwrap()
+        );
+    }
+
+    /// @test A host that is not an IP address (a typo, or a name)
+    /// listens on every IPv4 interface rather than none, and is reached
+    /// over 127.0.0.1.
+    #[test]
+    fn unparseable_host_listens_on_every_ipv4_interface() {
+        for host in ["localhost", "0.0.0.O", "", "10.0.0.300"] {
+            let listen = server(host, 8080).listen_addr(None);
+            assert_eq!(
+                listen,
+                "0.0.0.0:8080".parse::<SocketAddr>().unwrap(),
+                "host {host:?}"
+            );
+            assert_eq!(
+                loopback_if_unspecified(listen),
+                "127.0.0.1:8080".parse::<SocketAddr>().unwrap(),
+                "host {host:?}"
+            );
+        }
+    }
+
+    /// @test --port replaces the configured port (after ZENITH_PORT has
+    /// set it) and leaves the host alone.
+    #[test]
+    fn port_override_replaces_the_configured_port() {
+        let cfg = apply_env_overrides(
+            toml::from_str("[server]\nhost = \"::\"\nport = 8080\n").unwrap(),
+            |k| (k == "ZENITH_PORT").then(|| "9090".to_string()),
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.server.listen_addr(None),
+            "[::]:9090".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(
+            cfg.server.listen_addr(Some(9443)),
+            "[::]:9443".parse::<SocketAddr>().unwrap()
+        );
+        assert_eq!(
+            loopback_if_unspecified(cfg.server.listen_addr(Some(9443))),
+            "[::1]:9443".parse::<SocketAddr>().unwrap()
+        );
     }
 
     #[test]

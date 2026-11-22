@@ -92,14 +92,14 @@ version-check:
 ## environment, under the compose posture with a root-owned tmpfs data
 ## directory and an extra group, and as the account (--user). The image's
 ## working directory must be its data directory; each boot must answer
-## /api/health, with the server as an unprivileged PID 1 (no root
-## identity, no capabilities, no-new-privileges). The first also checks
-## the declared version, that nothing was handed over, the bundled demo
-## targets under their ids, their curated plots within each target's
-## recorded ceiling of undecodable channels, a non-empty command catalog
-## where one is declared, and the console; the second, the extra group and
-## one hand-over of the data directory. CI runs it on every image it
-## builds.
+## /api/health and turn healthy by the image's health check, with the
+## server as an unprivileged PID 1 (no root identity, no capabilities,
+## no-new-privileges). The first also checks the declared version, that
+## nothing was handed over, the bundled demo targets under their ids,
+## their curated plots within each target's recorded ceiling of
+## undecodable channels, a non-empty command catalog where one is
+## declared, and the console; the second, the extra group and one
+## hand-over of the data directory. CI runs it on every image it builds.
 ## SMOKE_IMAGE defaults to this checkout's compose build (docker compose
 ## config --images zenith); SMOKE_PORT and SMOKE_TIMEOUT override the
 ## script's defaults.

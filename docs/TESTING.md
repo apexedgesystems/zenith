@@ -234,10 +234,12 @@ config is the booted build's (`tools/pushed-image-check.sh`).
 
 `make smoke-boot` boots a built image three times, one after another,
 each publishing only the front door on the same loopback port over
-bridge networking, and waits for each until `/api/health` answers.
-Before any boot, the image's working directory must be
-`/var/lib/zenith`, where SQLite keeps its temporary files under a
-read-only root.
+bridge networking. Each boot is waited for until `/api/health` answers
+and Docker reports the container healthy by the image's own health
+check; an unhealthy verdict, or none within the timeout, fails and
+prints the last probes. Before any boot, the image's working directory
+must be `/var/lib/zenith`, where SQLite keeps its temporary files under
+a read-only root.
 
 The first boot runs the image as `docker run <image>` does with no
 mounts and no environment, so the config and demo targets baked into it

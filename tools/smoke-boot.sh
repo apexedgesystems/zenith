@@ -6,8 +6,10 @@
 # networking with only the front door published, on the same loopback
 # port. The bundled targets dial and listen on the container's own
 # loopback, find no peers there, and fail or wait; that is expected. Each
-# boot is waited for, within a bounded wait, until GET /api/health
-# answers. Before any boot, the image's working directory must be the data
+# boot is waited for, within a bounded wait, until GET /api/health answers
+# and Docker reports the container healthy by the image's own health check
+# (an unhealthy verdict, or none by the bound, fails and prints the last
+# probes). Before any boot, the image's working directory must be the data
 # directory /var/lib/zenith: under a read-only root SQLite keeps its
 # temporary files there.
 #
@@ -61,8 +63,8 @@
 #                         (required; make smoke-boot passes the compose build)
 #   --port <port>         Loopback host port for the front door
 #                         (default: 18080)
-#   --timeout <seconds>   Longest wait, per boot, for /api/health
-#                         (default: 60)
+#   --timeout <seconds>   Longest wait, per boot, for /api/health and then
+#                         for Docker's healthy state (default: 60)
 #   --verbose             Print the API responses and, on success, the
 #                         container logs
 #   --help                Show this help
@@ -341,6 +343,43 @@ wait_for_health() {
   done
 }
 
+# The output of the last few health probes Docker recorded, on one line.
+health_log() {
+  docker container inspect --format \
+    '{{if .State.Health}}{{range .State.Health.Log}}[exit {{.ExitCode}}: {{.Output}}] {{end}}{{end}}' \
+    "$CONTAINER_ID" 2>&1 | tr '\n' ' ' | tail -c 800
+}
+
+# Wait for Docker's own verdict, from the image's health check, to read
+# healthy. Unhealthy fails at once; a container that stops, or a verdict
+# still pending at the timeout (a check that never passes stays pending
+# through the image's start period), fails at that point. Each failure
+# prints the last probes' output.
+wait_for_docker_health() {
+  local start=$SECONDS
+  local state
+  while true; do
+    state=$(docker container inspect --format \
+      '{{.State.Status}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' \
+      "$CONTAINER_ID" 2>&1) || fail "container $NAME is gone: $state"
+    case "${state#* }" in
+    healthy)
+      log_ok "docker: healthy by the image's health check, $((SECONDS - start))s after /api/health answered"
+      return 0
+      ;;
+    none) fail "the image declares no health check: Docker cannot report it healthy" ;;
+    unhealthy) fail "Docker reports the container unhealthy; last probes: $(health_log)" ;;
+    esac
+    if [[ "${state%% *}" != "running" ]]; then
+      fail "the container stopped (${state%% *}) before Docker reported it healthy; last probes: $(health_log)"
+    fi
+    if ((SECONDS - start >= TIMEOUT)); then
+      fail "Docker did not report the container healthy within ${TIMEOUT}s of /api/health answering; last probes: $(health_log)"
+    fi
+    sleep 1
+  done
+}
+
 # GET a JSON object into BODY; an HTTP error, or a body that is not a JSON
 # object, fails the smoke.
 fetch_json() {
@@ -560,6 +599,7 @@ check_workdir
 start_container "plain docker run"
 wait_for_health
 check_health
+wait_for_docker_health
 check_posture
 check_handovers 0
 check_targets
@@ -571,6 +611,7 @@ remove_container
 start_container "compose posture, root-owned tmpfs, --group-add $EXTRA_GID" \
   "${COMPOSE_FLAGS[@]}" --tmpfs "$DATA_DIR:mode=0755" --group-add "$EXTRA_GID"
 wait_for_health
+wait_for_docker_health
 check_posture
 check_group "$EXTRA_GID"
 check_handovers 1
@@ -578,6 +619,7 @@ remove_container
 
 start_container "--user $ACCOUNT_IDS" --user "$ACCOUNT_IDS"
 wait_for_health
+wait_for_docker_health
 check_posture
 remove_container
 
