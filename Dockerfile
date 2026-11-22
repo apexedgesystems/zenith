@@ -9,13 +9,18 @@
 #
 # Usage: make run (docker compose build) -- see Makefile. Building with
 # a raw docker build -t zenith produces a tag compose ignores.
+#
+# Each base image is pinned by tag and multi-architecture index digest
+# (the final stage starts from scratch, which is empty and has nothing to
+# pin), so a commit builds from the same base images on any day and host;
+# dependabot proposes each update, a new tag or a rebuilt tag's new digest.
 # ==============================================================================
 
 # ------------------------------------------------------------------------------
 # Stage 1: Rust backend
 # ------------------------------------------------------------------------------
 # Pinned to match docker/dev.Dockerfile -- one toolchain everywhere.
-FROM rust:1.100-bookworm AS backend
+FROM rust:1.100-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea AS backend
 
 WORKDIR /build
 # The committed lockfile is an input of the build: --locked refuses a
@@ -28,7 +33,7 @@ RUN cargo build --release --locked
 # ------------------------------------------------------------------------------
 # Stage 2: React frontend
 # ------------------------------------------------------------------------------
-FROM node:26-bookworm-slim AS frontend
+FROM node:26-bookworm-slim@sha256:5df79989ed685e09f0a98019db4cebfb22fb9df1a53c0161664a011f7ff6b0f1 AS frontend
 
 WORKDIR /build
 # npm ci installs exactly what the lockfile says or fails; no fallback.
@@ -41,7 +46,7 @@ RUN npm run build
 # ------------------------------------------------------------------------------
 # Stage 3: Runtime root
 # ------------------------------------------------------------------------------
-FROM debian:bookworm-slim AS runtime-root
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS runtime-root
 
 # The server runs as the zenith account, uid and gid 10001: fixed numbers,
 # so the host can give it a bind-mounted data directory or a device node
