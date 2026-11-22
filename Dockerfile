@@ -13,7 +13,7 @@
 # Stage 1: Rust backend
 # ------------------------------------------------------------------------------
 # Pinned to match docker/dev.Dockerfile -- one toolchain everywhere.
-FROM rust:1.99-bookworm AS backend
+FROM rust:1.100-bookworm AS backend
 
 WORKDIR /build
 # The committed lockfile is an input of the build: --locked refuses a
