@@ -19,8 +19,9 @@ architecture review; work before that is the v0.0.1 tag.
   CAP_SETGID, plus CAP_CHOWN while a hand-over is pending: `--cap-drop
   ALL` alone stops with a message, and `--user 10001:10001` needs none of
   them. Mounted config files must be readable by uid 10001, and mounted
-  target files and directories readable and searchable by it; a
-  database outside `/var/lib/zenith`, and its directory, must be
+  target files and directories readable and searchable by it: the
+  server refuses to start on a target path it cannot read, naming the
+  path. A database outside `/var/lib/zenith`, and its directory, must be
   writable by it; ports below 1024 cannot be bound on the host network.
   To roll back, run 0.2.0 on a handed-over volume with its own release's
   compose file or Docker's default capabilities. Under this release's
@@ -67,6 +68,11 @@ architecture review; work before that is the v0.0.1 tag.
 
 - The container runs with a read-only root filesystem: the compose files
   set it, and `docker run --read-only` works with the data volume.
+  ([#69](https://github.com/apexedgesystems/zenith/pull/69))
+- A target path the server cannot read (a target directory, the mount
+  above it, or an artifact named in config.toml) stops the boot with a
+  message naming the path and the error; such a target used to load
+  without those definitions, or as "not a directory".
   ([#69](https://github.com/apexedgesystems/zenith/pull/69))
 - Demo target directories are regenerated from apex_csf d8d003c;
   SystemMonitor's 0x0100 command appears as HEALTH_SAMPLE.

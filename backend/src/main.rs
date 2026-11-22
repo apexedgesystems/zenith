@@ -4313,6 +4313,18 @@ async fn main() {
         Arc::new(StructDictionary::default())
     };
 
+    // A target path the server cannot read for want of permission would
+    // otherwise read as absent: refuse, naming the path and the error.
+    if let Some((name, path, e)) = config::unreadable_target_path(&config.targets) {
+        eprintln!(
+            "FATAL: target '{}': cannot read '{}': {}",
+            name,
+            path.display(),
+            e
+        );
+        std::process::exit(1);
+    }
+
     // A mistyped target directory would otherwise produce a silently
     // featureless target: connected, decoding nothing by name.
     if let Some((name, dir)) = config::missing_target_dir(&config.targets) {

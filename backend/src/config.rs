@@ -678,6 +678,94 @@ pub(crate) fn repo_structs_path(
     local.structs_path().map(std::path::PathBuf::from)
 }
 
+/// How the server uses a declared target path: a target directory is
+/// searched for its conventional artifacts, an artifact is read (a
+/// file opened, a directory listed).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PathUse {
+    Search,
+    Read,
+}
+
+impl TargetSection {
+    /// Every path this definition makes the server open, whether or not
+    /// it exists: the target directory, then each artifact at its
+    /// explicit path or, without one, its conventional place in the
+    /// directory.
+    fn declared_paths(&self) -> Vec<(std::path::PathBuf, PathUse)> {
+        let dir = self.dir.as_deref().map(std::path::Path::new);
+        let artifact = |explicit: &Option<String>, name: &str| {
+            explicit
+                .as_deref()
+                .map(std::path::PathBuf::from)
+                .or_else(|| dir.map(|d| d.join(name)))
+        };
+        let mut paths: Vec<_> = dir
+            .map(|d| (d.to_path_buf(), PathUse::Search))
+            .into_iter()
+            .collect();
+        paths.extend(
+            [
+                artifact(&self.manifest, "app_manifest.json"),
+                artifact(&self.structs_dir, "structs"),
+                artifact(&self.telemetry_config, "telemetry.json"),
+                artifact(&self.commands_config, "commands.json"),
+                artifact(&self.connect_init, "on_connect.json"),
+                artifact(&self.records_config, "records.json"),
+            ]
+            .into_iter()
+            .flatten()
+            .map(|path| (path, PathUse::Read)),
+        );
+        paths
+    }
+}
+
+/// What the filesystem answers for one declared path: searching a
+/// directory resolves a name inside it, reading lists a directory or
+/// opens a file.
+fn probe_target_path(path: &std::path::Path, how: PathUse) -> std::io::Result<()> {
+    match how {
+        PathUse::Search => std::fs::metadata(path.join(".")).map(drop),
+        PathUse::Read => match std::fs::metadata(path) {
+            Ok(meta) if meta.is_dir() => std::fs::read_dir(path).map(drop),
+            Ok(_) => std::fs::File::open(path).map(drop),
+            Err(e) => Err(e),
+        },
+    }
+}
+
+/// The first declared target path the server cannot read for want of
+/// permission: the target, the path and the error. Path::exists and
+/// Path::is_dir turn every error into false, so without this check a
+/// permission error reads as absence: a target directory the server
+/// cannot search boots with no definitions and no log line, a mount
+/// root it cannot search reads as "not a directory", and an explicit
+/// artifact it cannot read costs only that artifact, with a warning.
+/// A path that does not exist, or fails for another reason, keeps its
+/// own handling.
+pub fn unreadable_target_path(
+    targets: &[TargetSection],
+) -> Option<(&str, std::path::PathBuf, std::io::Error)> {
+    first_permission_error(targets, probe_target_path)
+}
+
+fn first_permission_error(
+    targets: &[TargetSection],
+    probe: impl Fn(&std::path::Path, PathUse) -> std::io::Result<()>,
+) -> Option<(&str, std::path::PathBuf, std::io::Error)> {
+    targets.iter().find_map(|t| {
+        t.declared_paths()
+            .into_iter()
+            .find_map(|(path, how)| match probe(&path, how) {
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    Some((t.name.as_str(), path, e))
+                }
+                _ => None,
+            })
+    })
+}
+
 /// The first target whose declared directory is not a directory.
 /// A mistyped path would otherwise produce a silently featureless
 /// target -- connected, decoding nothing by name -- so it is a boot
@@ -969,6 +1057,107 @@ mod tests {
         let mixed = [good, bad];
         let found = missing_target_dir(&mixed).unwrap();
         assert_eq!(found.0, "bad");
+    }
+
+    /// @test The paths a definition makes the server open: the target
+    /// directory, searched, then each artifact at its explicit path or,
+    /// without one, its conventional place in the directory, read. An
+    /// explicit path replaces the conventional one; a definition with
+    /// neither opens nothing. Pure: the filesystem is not touched.
+    #[test]
+    fn declared_paths_name_the_directory_and_each_artifact() {
+        let mut t = target("t", "tcp", None);
+        assert!(t.declared_paths().is_empty());
+        t.dir = Some("/data/targets/t".to_string());
+        t.manifest = Some("/elsewhere/manifest.json".to_string());
+        let paths: Vec<(String, PathUse)> = t
+            .declared_paths()
+            .into_iter()
+            .map(|(p, how)| (p.to_string_lossy().into_owned(), how))
+            .collect();
+        let expected: Vec<(String, PathUse)> = [
+            ("/data/targets/t", PathUse::Search),
+            ("/elsewhere/manifest.json", PathUse::Read),
+            ("/data/targets/t/structs", PathUse::Read),
+            ("/data/targets/t/telemetry.json", PathUse::Read),
+            ("/data/targets/t/commands.json", PathUse::Read),
+            ("/data/targets/t/on_connect.json", PathUse::Read),
+            ("/data/targets/t/records.json", PathUse::Read),
+        ]
+        .into_iter()
+        .map(|(p, how)| (p.to_string(), how))
+        .collect();
+        assert_eq!(paths, expected);
+    }
+
+    /// @test A permission error on any declared path refuses, naming the
+    /// target, the path and the error: the target directory (as when it,
+    /// or the mount above it, cannot be searched) or an explicit
+    /// artifact. A missing path, and any other error, refuse nothing:
+    /// the loaders keep handling them. The dev container runs these
+    /// tests as root, which reads every file whatever its mode, so the
+    /// error mapping is tested directly, with the filesystem replaced by
+    /// a probe that answers chosen errors.
+    #[test]
+    fn permission_errors_on_target_paths_refuse_by_name() {
+        use std::io::{Error, ErrorKind};
+        let mut a = target("a", "tcp", None);
+        a.dir = Some("/data/targets/a".to_string());
+        let mut b = target("b", "tcp", None);
+        b.manifest = Some("/data/targets/b/app_manifest.json".to_string());
+        let both = [a, b];
+        let denied_at = |at: &'static str| {
+            move |p: &std::path::Path, _: PathUse| {
+                if p == std::path::Path::new(at) {
+                    Err(Error::from(ErrorKind::PermissionDenied))
+                } else {
+                    Err(Error::from(ErrorKind::NotFound))
+                }
+            }
+        };
+
+        let (name, path, e) = first_permission_error(&both, denied_at("/data/targets/a")).unwrap();
+        assert_eq!((name, path.to_str().unwrap()), ("a", "/data/targets/a"));
+        assert_eq!(e.kind(), ErrorKind::PermissionDenied);
+
+        let (name, path, _) =
+            first_permission_error(&both, denied_at("/data/targets/a/telemetry.json")).unwrap();
+        assert_eq!(
+            (name, path.to_str().unwrap()),
+            ("a", "/data/targets/a/telemetry.json")
+        );
+
+        let (name, path, _) =
+            first_permission_error(&both, denied_at("/data/targets/b/app_manifest.json")).unwrap();
+        assert_eq!(
+            (name, path.to_str().unwrap()),
+            ("b", "/data/targets/b/app_manifest.json")
+        );
+
+        let missing = |_: &std::path::Path, _: PathUse| Err(Error::from(ErrorKind::NotFound));
+        assert!(first_permission_error(&both, missing).is_none());
+        let other = |_: &std::path::Path, _: PathUse| Err(Error::other("not a directory"));
+        assert!(first_permission_error(&both, other).is_none());
+        let fine = |_: &std::path::Path, _: PathUse| Ok(());
+        assert!(first_permission_error(&both, fine).is_none());
+    }
+
+    /// @test On the real filesystem, a readable target tree, absent
+    /// conventional artifacts, a missing directory and a missing
+    /// explicit artifact raise no permission error: they keep their own
+    /// handling (true as root and as any other user).
+    #[test]
+    fn readable_or_missing_target_paths_raise_nothing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join("structs")).unwrap();
+        std::fs::write(tmp.path().join("app_manifest.json"), "{}").unwrap();
+        let mut readable = target("readable", "tcp", None);
+        readable.dir = Some(tmp.path().to_string_lossy().into_owned());
+        let mut absent_dir = target("absent", "tcp", None);
+        absent_dir.dir = Some("/no/such/target/dir".to_string());
+        let mut absent_file = target("absent-file", "tcp", None);
+        absent_file.manifest = Some("/no/such/manifest.json".to_string());
+        assert!(unreadable_target_path(&[readable, absent_dir, absent_file]).is_none());
     }
 
     fn target(name: &str, carrier: &str, listen: Option<u16>) -> TargetSection {
