@@ -45,8 +45,16 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates wget && \
     rm -rf /var/lib/apt/lists/*
 
+# The server runs as the zenith account, uid and gid 10001: fixed numbers,
+# so the host can give it a bind-mounted data directory or a device node
+# by owner or group. Everything else names the account.
+RUN groupadd --gid 10001 zenith && \
+    useradd --no-log-init --uid 10001 --gid zenith --no-create-home \
+        --home-dir /var/lib/zenith --shell /usr/sbin/nologin zenith
+
 COPY --from=backend /build/target/release/zenith /usr/local/bin/zenith
 COPY --from=frontend /build/dist/ /usr/local/share/zenith/static/
+COPY --chmod=0755 deploy/zenith-entrypoint.sh /usr/local/bin/zenith-entrypoint
 
 # The image boots on its own: a default config declaring the bundled
 # demo targets. A mount at /etc/zenith/config.toml replaces the
@@ -54,7 +62,13 @@ COPY --from=frontend /build/dist/ /usr/local/share/zenith/static/
 COPY deploy/config.toml /etc/zenith/config.toml
 COPY targets/ /data/targets/
 
-RUN mkdir -p /var/lib/zenith
+# The data directory belongs to the account, so a fresh named volume
+# mounted here starts out owned by it; the entrypoint hands over any
+# directory someone else owns. The config and the targets get modes of
+# their own, readable by the account whatever the build host's umask
+# left in the checkout.
+RUN install -d -o zenith -g zenith -m 0755 /var/lib/zenith && \
+    chmod -R u=rwX,go=rX /etc/zenith /data/targets
 
 # Working directory sits inside the persistent volume so even a
 # relative storage path in config.toml resolves somewhere durable.
@@ -62,5 +76,7 @@ WORKDIR /var/lib/zenith
 
 EXPOSE 8080
 
-ENTRYPOINT ["zenith"]
+# The entrypoint starts as root only to hand over the data directory,
+# then runs zenith as the account (deploy/zenith-entrypoint.sh).
+ENTRYPOINT ["zenith-entrypoint"]
 CMD ["--config", "/etc/zenith/config.toml"]

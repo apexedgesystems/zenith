@@ -226,7 +226,10 @@ curl -O https://raw.githubusercontent.com/apexedgesystems/zenith/main/deploy/doc
 docker compose up -d
 ```
 
-Pin a version with `ZENITH_IMAGE=ghcr.io/apexedgesystems/zenith:v0.2.0`.
+Pin a release after v0.2.0 with
+`ZENITH_IMAGE=ghcr.io/apexedgesystems/zenith:<tag>`: the file's settings
+are for images that run the server as uid 10001, and v0.2.0, which runs
+as root, goes with its own release's compose file.
 Three settings come from the environment when set: `ZENITH_PORT`
 (the front door, default 8080), `ZENITH_DB_PATH` (default
 `/var/lib/zenith/zenith.db`, inside the persistent volume), and
@@ -250,6 +253,30 @@ The container runs on the host network on purpose: each target's
 definition describes its own transport (what it dials, what it
 listens on) and the transport layer binds exactly that, so no
 per-target port publishing is ever needed.
+
+The server runs as the zenith user, uid and gid 10001, with no
+capabilities. The entrypoint starts as root only to hand
+`/var/lib/zenith` to that user when anyone else owns it (a volume an
+earlier release wrote as root, a fresh bind mount), so an upgrade needs
+no manual step. Under the compose files' capabilities root reads the
+directory as any other user would, so a bind mount holding a directory
+others cannot read (mode 0700, say) cannot be handed over: chown it to
+10001:10001 on the host, or start the container once with Docker's
+default capabilities. Files mounted into the container, such as the
+config and the target directories, must be readable by that user, and
+the directories searchable. Started with `--user 10001:10001` the
+entrypoint skips the hand-over, and the data directory must already be
+writable by that user. A database placed elsewhere (`[storage] path` or
+`ZENITH_DB_PATH`) must be writable by uid 10001 too, and so must its
+directory. With no capabilities, the server cannot bind a port below
+1024 on the host network, for the front door or a target's listen port.
+
+To give the server a device node, pass it with `--device` and add the
+group that owns it on the host, by number, with `--group-add`
+(`ls -n /dev/ttyUSB0`; dialout, 20, on Debian and Ubuntu): the server
+reaches the device only through that group.
+[deploy/docker-compose.yml](deploy/docker-compose.yml) carries the same
+as a commented example.
 
 To run the flight side of the bundled demos yourself, two
 walkthroughs stand up the stock frameworks from scratch and end at
@@ -658,6 +685,12 @@ HTTPS:
    input and after `session_max_hours` in any case (see
    Authentication and Audit).
 
+Run the container as deploy/docker-compose.yml does, with every
+capability dropped but the three the entrypoint uses to hand over the
+data volume: `--cap-drop ALL --cap-add CHOWN --cap-add SETUID
+--cap-add SETGID` with `docker run`. The server itself runs as uid 10001
+and keeps none.
+
 The session cookie is Secure by default, so browsers send it over
 HTTPS only (and over plain HTTP to `localhost`, for local testing). To
 serve plain HTTP on a trusted network instead, set
@@ -697,7 +730,8 @@ changelog section, merge, then tag `vX.Y.Z` on main and push the
 tag. The release workflow checks the tag against the declared
 version and the changelog before any build starts, builds the image
 natively for amd64 and arm64, boots each build with its bundled config
-and checks what it serves (`make smoke-boot`), builds it again with
+and checks what it serves and that the server runs unprivileged
+(`make smoke-boot`), builds it again with
 SBOM and provenance attestations to push it, stops unless the pushed
 image is the booted build (`tools/pushed-image-check.sh`), publishes
 the multi-arch manifest as

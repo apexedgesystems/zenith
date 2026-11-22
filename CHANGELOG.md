@@ -13,6 +13,20 @@ architecture review; work before that is the v0.0.1 tag.
 
 ### Breaking
 
+- The image runs zenith as an unprivileged user (uid 10001) instead of
+  root; its entrypoint hands an existing data volume to that user on
+  first start. Started as root, the container needs CAP_SETUID and
+  CAP_SETGID, plus CAP_CHOWN while a hand-over is pending: `--cap-drop
+  ALL` alone stops with a message, and `--user 10001:10001` needs none of
+  them. Mounted config files must be readable by uid 10001, and mounted
+  target files and directories readable and searchable by it; a
+  database outside `/var/lib/zenith`, and its directory, must be
+  writable by it; ports below 1024 cannot be bound on the host network.
+  To roll back, run 0.2.0 on a handed-over volume with its own release's
+  compose file or Docker's default capabilities. Under this release's
+  capability set 0.2.0 starts and reports healthy but cannot write its
+  database: it runs as root and needs CAP_DAC_OVERRIDE to write files
+  uid 10001 owns.
 - TPRM uploads use the v4 prelude and carry payloads beyond 64 KiB.
   Apex CSF vehicles built before apex_csf 2543279 refuse them; vehicles
   from that commit on require v4 and refuse zenith 0.2.0's v3 uploads.

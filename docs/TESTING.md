@@ -232,14 +232,23 @@ config is the booted build's (`tools/pushed-image-check.sh`).
 
 ### Smoke boot
 
-`make smoke-boot` boots a built image as `docker run <image>` does with
-no mounts and no environment, so the config and demo targets baked into
-it are what boots. It publishes only the front door, on a loopback port
-over bridge networking; the compose deployment differs (host
-networking, a port variable, a data volume). It then checks that:
+`make smoke-boot` boots a built image three times, one after another,
+each publishing only the front door on the same loopback port over
+bridge networking, and waits for each until `/api/health` answers.
+
+The first boot runs the image as `docker run <image>` does with no
+mounts and no environment, so the config and demo targets baked into it
+are what boots. It checks that:
 
 - `/api/health` answers status `ok` with the version the workspace
   `Cargo.toml` declares;
+- the server is the container's PID 1, so the stop signal reaches it,
+  and runs with no root identity (uid, gid and supplementary groups all
+  non-zero), no capabilities and no-new-privileges, as `/proc/1/status`
+  reads inside the container (`docker exec`);
+- the entrypoint handed nothing over: the image's own data directory is
+  already the zenith account's, so a fresh named volume starts out owned
+  by it;
 - `/api/targets` lists the demo targets of `deploy/config.toml`, each
   under its positional id;
 - each of those targets serves curated layouts with plotted channels,
@@ -249,11 +258,22 @@ networking, a port variable, a data volume). It then checks that:
   Apex ops demo) serves a non-empty one;
 - `/` serves a page whose module script answers a JavaScript type.
 
+The second boot runs it as the compose files do (`--cap-drop ALL
+--cap-add CHOWN --cap-add SETUID --cap-add SETGID`),
+with a root-owned tmpfs at `/var/lib/zenith` and `--group-add 20`: the
+same posture, group 20 among the server's groups, and exactly one
+hand-over of the data directory in the container log. The third runs it
+as the account (`--user 10001:10001`), where no-new-privileges rests on
+the entrypoint's last step alone: the same posture. The compose
+deployment still differs in its host networking, port variable and data
+volume.
+
 A failed check, or a response of the wrong shape, names the problem
-and prints the container log. The run labels its container with a
-random token of its own and, on exit, removes the containers it finds
-carrying that label, by their ids, never a name, so a second run on the
-same port never removes the first's. When the create had not returned
+and prints the container log. The run labels its containers with a
+random token of its own, removes each boot's container by its id before
+the next boot, and, on exit, removes the containers it finds carrying
+that label, by their ids, never a name, so a second run on the same
+port never removes the first's. When the create had not returned
 and the first lookup finds none, it looks once more two seconds later; a
 retry delay, not a deadline for Docker. A create the daemon finishes
 after that last look leaves its labelled container behind, and the next

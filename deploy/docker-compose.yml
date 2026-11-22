@@ -3,7 +3,10 @@
 #   docker compose -f deploy/docker-compose.yml up -d
 #
 # ZENITH_IMAGE selects the image (default: the latest release on
-# GHCR); pin a version with ZENITH_IMAGE=ghcr.io/apexedgesystems/zenith:v0.2.0.
+# GHCR); pin a release after v0.2.0 with
+# ZENITH_IMAGE=ghcr.io/apexedgesystems/zenith:<tag>. The settings below are
+# for images that run the server as uid 10001; v0.2.0, which runs as
+# root, goes with its own release's compose file.
 # The image carries a default config and the demo target directories,
 # so it boots as is. To run your own targets, uncomment the mounts
 # below and point them at your config.toml and target directories.
@@ -15,6 +18,11 @@ services:
     # transport layer binds exactly that. Zenith itself serves one
     # port, the HTTP/WebSocket front door.
     network_mode: host
+    # The entrypoint starts as root only to hand the data volume to the
+    # zenith user (uid 10001) and switch to it; these are the capabilities
+    # it uses, and the server keeps none.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID]
     environment:
       ZENITH_PORT: ${ZENITH_PORT:-8080}
       # ZENITH_DB_PATH: /var/lib/zenith/zenith.db
@@ -23,6 +31,14 @@ services:
       - zenith-data:/var/lib/zenith
       # - ./config.toml:/etc/zenith/config.toml:ro
       # - ./targets:/data/targets:ro
+    # To give the server a device node, pass it in and add the group that
+    # owns it on the host, by number (ls -n /dev/ttyUSB0; dialout, 20, on
+    # Debian and Ubuntu): the server runs as uid 10001 and reaches the
+    # device only through that group.
+    # devices:
+    #   - /dev/ttyUSB0:/dev/ttyUSB0
+    # group_add:
+    #   - "20"
     restart: unless-stopped
     healthcheck:
       test:
