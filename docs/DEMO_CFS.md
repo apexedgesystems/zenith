@@ -151,6 +151,11 @@ arrives.
 
 - Housekeeping arrives at 1 Hz per app; the first samples land
   within a second of the arm.
+- Zenith sends the arm step once, when it brings the link up, and the
+  target reads "Listening for the target" until its first datagram
+  arrives. If zenith starts before the bundle, the step reaches
+  nothing and the target stays "Listening for the target" until
+  Disconnect, then Connect, sends it again.
 - Apps the bundle subscribes to TO_LAB but that are not in the
   dictionary spec count as unroutable units in the log, at a low
   rate. Add them to the spec to name them.

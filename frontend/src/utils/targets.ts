@@ -8,7 +8,8 @@ export interface Target {
   host: string;
   port: number;
   connected: boolean;
-  /** A listening carrier bound and waiting for the target to dial in. */
+  /** A listening carrier (tcp-listen or udp) is bound; with `connected`
+   *  false it is waiting for its target to dial in or be heard. */
   listening?: boolean;
   capabilities?: string[];
   /** Dashboard display policy served from this target's config. */

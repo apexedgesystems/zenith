@@ -240,3 +240,37 @@ describe("App session gate", () => {
     expect(screen.queryByRole("button", { name: "Stay signed in" })).toBeNull();
   });
 });
+
+describe("App sidebar link state", () => {
+  it("names each target's link state on its dot, whatever the carrier", async () => {
+    const target = (id: string, connected: boolean, listening: boolean) => ({
+      id,
+      name: id,
+      host: "127.0.0.1",
+      port: 1234,
+      connected,
+      listening,
+    });
+    await renderApp((_method, path) => {
+      if (path.startsWith("/api/auth/")) return json({ auth_enabled: false });
+      if (path === "/api/targets") {
+        return json({
+          targets: [
+            // Heard, its socket still bound: connected wins.
+            target("target-0", true, true),
+            // Bound and waiting: a tcp-listen peer that has not dialed
+            // in, or a UDP target not yet heard.
+            target("target-1", false, true),
+            target("target-2", false, false),
+          ],
+        });
+      }
+      return data(path);
+    });
+    expect(
+      await screen.findByTitle("Listening for the target"),
+    ).toBeInTheDocument();
+    expect(screen.getByTitle("Connected")).toBeInTheDocument();
+    expect(screen.getByTitle("Disconnected")).toBeInTheDocument();
+  });
+});

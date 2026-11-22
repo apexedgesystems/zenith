@@ -136,7 +136,7 @@ ELF ident) decode correctly with zero configuration.
 
 - Live target list with connection state dots (green connected; amber
   listening, for a tcp-listen target waiting for its deployment to
-  dial in; grey down)
+  dial in or a UDP target not yet heard from; grey down)
 - **Per-target storage strip** -- shows samples + bytes per target
 - **Right-click target menu**: Connect / Disconnect, Copy address,
   **Auto-reconnect toggle** (persisted across browser sessions),
@@ -396,8 +396,9 @@ A target's definition fully describes its transport: the protocol
 (`aproto-slip`, `ccsds-spp`, `slip+ccsds-spp`, `tm+ccsds-spp`,
 `tm+ccsds-spp+records`, `raw-slip`), the
 carrier (`tcp` dials host:port and reads the stream; `udp` binds
-`listen_port` for inbound datagrams and sends outbound ones to
-host:port; `tcp-listen` binds `listen_port` on every interface and accepts
+`listen_port` on every interface for inbound datagrams and sends
+outbound ones to host:port, listening until its first datagram, from
+any sender, and connected from then on; `tcp-listen` binds `listen_port` on every interface and accepts
 the target dialing in -- the push-to-ground pattern, with the
 connected state tracking the live session, not the bound listener), and an optional `connect_init`
 sequence -- a generated
@@ -493,7 +494,7 @@ DELETE /api/auth/session                         # Sign out; ends the session, c
 # Targets
 GET    /api/targets
 POST   /api/targets/add                          # Add an aproto-slip target at runtime (dir optional)
-POST   /api/targets/{id}/connect
+POST   /api/targets/{id}/connect                 # Its state as connect returns: connected or listening (already_ if it was up); 502 if down again by then
 POST   /api/targets/{id}/disconnect
 POST   /api/targets/{id}/remove
 POST   /api/targets/{id}/restart                 # Restart executive (deferred ACK before execve)

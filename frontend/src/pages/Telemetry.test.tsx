@@ -35,6 +35,8 @@ let stop: (() => void) | null = null;
 /** The link state the target list reports for target-0; null answers
  *  the target list read with 404, so the link reads as down. */
 let linkConnected: boolean | null = null;
+/** Whether target-0's link is bound and waiting for its target. */
+let linkListening = false;
 
 async function renderPage() {
   vi.resetModules();
@@ -73,6 +75,7 @@ beforeEach(() => {
   FakeSocket.opened = [];
   calls = [];
   linkConnected = null;
+  linkListening = false;
   vi.stubGlobal("WebSocket", FakeSocket);
   vi.stubGlobal(
     "fetch",
@@ -90,6 +93,7 @@ beforeEach(() => {
               host: "127.0.0.1",
               port: 9000,
               connected: linkConnected,
+              listening: linkListening,
             },
           ],
         });
@@ -180,5 +184,15 @@ describe("Telemetry page status", () => {
     await renderPage();
     expect(screen.getByText("Off")).toBeInTheDocument();
     expect(screen.queryByText("No data")).not.toBeInTheDocument();
+  });
+
+  it("reads Listening while the link waits for its target, not Off", async () => {
+    linkConnected = false;
+    linkListening = true;
+    await renderPage();
+    expect(screen.getByText("Listening")).toBeInTheDocument();
+    expect(screen.getByText("Listening for the target")).toBeInTheDocument();
+    expect(screen.queryByText("Off")).not.toBeInTheDocument();
+    expect(screen.queryByText("Not connected")).not.toBeInTheDocument();
   });
 });

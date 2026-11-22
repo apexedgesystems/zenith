@@ -77,6 +77,19 @@ architecture review; work before that is the v0.0.1 tag.
 
 ### Fixed
 
+- A UDP target reads as listening ("Listening for the target") until
+  its first datagram arrives; a TCP target that hangs up at once, and a
+  tcp-listen target disconnected as its peer dials in, read down. Each
+  read connected before. The connect
+  endpoint answers the link's state when connect returns: `connected`
+  or `listening`, `already_connected` or `already_listening` for a link
+  that was up, and 502 only if the link is already down again by then;
+  an arm step that fails after the answer takes the link down after a
+  200, and `/api/targets` has the settled state. A tcp-listen target
+  waiting for its peer answers `listening` / `already_listening` where
+  it answered `connected` / `already_connected`, and boots with
+  `auto_connect: <id> listening`.
+  ([#68](https://github.com/apexedgesystems/zenith/pull/68))
 - Tunable updates to nested structs carry the layout hash the vehicle
   verifies when their dictionary exports none.
   ([#50](https://github.com/apexedgesystems/zenith/pull/50))

@@ -115,6 +115,10 @@ export default function OperationsPage({
     const t = (targetsData ?? []).find((x) => x.id === selectedTarget);
     setConnected(!!t?.connected);
   }, [targetsData, selectedTarget]);
+  // A listening link is bound and waiting for its target: there is
+  // nothing to connect, only a target to be heard.
+  const link = targetsData?.find((t) => t.id === selectedTarget);
+  const listening = !link?.connected && !!link?.listening;
 
   useEffect(() => {
     if (!connected) {
@@ -532,8 +536,9 @@ export default function OperationsPage({
             color: "var(--color-text-muted)",
           }}
         >
-          Target not connected. Connect from the Dashboard or sidebar to issue
-          operations.
+          {listening
+            ? "Listening for the target. Operations appear once the target connects."
+            : "Target not connected. Connect from the Dashboard or sidebar to issue operations."}
         </div>
       </div>
     );

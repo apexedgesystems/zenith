@@ -39,7 +39,9 @@ use crate::core::session::{EndReason, Session, SessionPolicy, SessionStatus, Ses
 use crate::core::telemetry::{self, TelemetrySample};
 use crate::core::telemetry_socket::{self, StreamEnd};
 use crate::core::tprm;
-use crate::core::transport::{unsupported_op, Protocol, ProtocolLink, PushTelemetryPacket};
+use crate::core::transport::{
+    connect_answer, unsupported_op, ConnectAnswer, Protocol, ProtocolLink, PushTelemetryPacket,
+};
 use crate::storage::telemetry_db::{DbError, TelemetryDb};
 
 /* ----------------------------- CLI ----------------------------- */
@@ -74,7 +76,8 @@ struct TargetState {
     /// hold for the duration of an upload.
     connected: Arc<std::sync::atomic::AtomicBool>,
     /// Lock-free view of the link's listening flag: a listening
-    /// carrier bound and waiting for its peer (false for dial-out).
+    /// carrier bound, waiting for its peer or serving it; `connected`
+    /// says which (false for dial-out).
     listening: Arc<std::sync::atomic::AtomicBool>,
     /// Pipeline counters shared by the router, DB writer, WebSocket
     /// subscribers, and the client's command accounting.
@@ -153,8 +156,9 @@ struct TargetInfo {
     host: String,
     port: u16,
     connected: bool,
-    /// A listening carrier bound and waiting for the target to dial
-    /// in: up from the operator's side, no peer yet.
+    /// A listening carrier (tcp-listen or udp) is bound: true while it
+    /// waits for its target and after the target dials in or is heard;
+    /// `connected` says which. False for links that dial out.
     listening: bool,
     /// Command-surface capabilities the target's dictionaries declare
     /// (e.g. "readback"). Empty for older dictionary sets.
@@ -600,14 +604,21 @@ async fn target_client(
     Ok((target.client.clone(), st.db.clone()))
 }
 
-/// Connect a target's client and attach its telemetry router.
-/// Returns Ok(true) on a fresh connect, Ok(false) if already connected.
+/// Connect a target's client and attach its telemetry router when the
+/// call brings the link up. The answer is `connect_answer`'s, from the
+/// link's state word before the call and what the call left: the
+/// link's state when connect returns, so it is true when given, and a
+/// 502 only if the link is already down again by then. An arm step
+/// that fails after the answer takes the link down after a 200;
+/// /api/targets has the settled state.
 ///
-/// The connected check and the TCP connect run under the client mutex
-/// (not the state guard), which gives the same TOCTOU protection the
-/// old hold-the-write-lock version had: a concurrent connect serializes
-/// on the mutex and sees is_connected() == true.
-async fn do_connect_target(state: &AppState, id: &str) -> Result<bool, (StatusCode, String)> {
+/// The state check and the connect run under the client mutex (not
+/// the state guard): a concurrent connect serializes on the mutex and
+/// finds the link already up.
+async fn do_connect_target(
+    state: &AppState,
+    id: &str,
+) -> Result<ConnectAnswer, (StatusCode, String)> {
     let (client, host, port) = {
         let st = state.read().await;
         let target = st
@@ -621,17 +632,24 @@ async fn do_connect_target(state: &AppState, id: &str) -> Result<bool, (StatusCo
         )
     };
 
-    {
+    let answer = {
         let mut cli = client.lock().await;
-        // Already serving: a live session, or a listener waiting for
-        // one. Either way there is nothing to bring up and no router
-        // to replace.
-        if cli.is_connected() || cli.is_listening() {
-            return Ok(false);
-        }
-        cli.connect(&host, port)
-            .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Connect failed: {}", e)))?;
+        // Up from our side (a live session, or a listener waiting for
+        // one): nothing to bring up and no router to replace, and the
+        // state stays what it was.
+        let state_before = cli.state_word();
+        let after = match state_before {
+            Some(_) => Ok(state_before),
+            None => cli
+                .connect(&host, port)
+                .await
+                .map(|()| cli.state_word())
+                .map_err(|e| e.to_string()),
+        };
+        connect_answer(state_before, after)
+    };
+    if !matches!(answer, ConnectAnswer::BroughtUp(_)) {
+        return Ok(answer);
     }
 
     // Attach the telemetry router under a short write guard. Replacing
@@ -661,7 +679,7 @@ async fn do_connect_target(state: &AppState, id: &str) -> Result<bool, (StatusCo
             target.push_tlm_tx.clone(),
         );
     }
-    Ok(true)
+    Ok(answer)
 }
 
 async fn list_targets(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -716,37 +734,29 @@ async fn connect_target(
         None => format!("{}:{}", host, port),
     };
 
-    match do_connect_target(&state, &id).await {
-        Ok(false) => Ok(Json(
-            serde_json::json!({"status": "already_connected", "target": id}),
-        )),
-        Ok(true) => {
-            record_audit(
-                &db_for_audit,
-                &actor.0,
-                "connect_target",
-                Some(&id),
-                Some(&details),
-                "ok",
-                Some(&ip_str),
-            );
-            Ok(Json(
-                serde_json::json!({"status": "connected", "target": id}),
-            ))
+    // A link found up was not touched, so nothing is audited for it.
+    let outcome = match do_connect_target(&state, &id).await {
+        Ok(ConnectAnswer::Already(status)) => {
+            return Ok(Json(serde_json::json!({"status": status, "target": id})));
         }
-        Err((code, err_msg)) => {
-            record_audit(
-                &db_for_audit,
-                &actor.0,
-                "connect_target",
-                Some(&id),
-                Some(&details),
-                &format!("err: {}", err_msg),
-                Some(&ip_str),
-            );
-            Err((code, err_msg))
-        }
-    }
+        Ok(ConnectAnswer::BroughtUp(status)) => Ok(status),
+        Ok(ConnectAnswer::Failed(err_msg)) => Err((StatusCode::BAD_GATEWAY, err_msg)),
+        Err(e) => Err(e),
+    };
+    let audit_status = match &outcome {
+        Ok(_) => "ok".to_string(),
+        Err((_, err_msg)) => format!("err: {}", err_msg),
+    };
+    record_audit(
+        &db_for_audit,
+        &actor.0,
+        "connect_target",
+        Some(&id),
+        Some(&details),
+        &audit_status,
+        Some(&ip_str),
+    );
+    outcome.map(|status| Json(serde_json::json!({"status": status, "target": id})))
 }
 
 async fn disconnect_target(
@@ -4722,9 +4732,11 @@ async fn main() {
                     // a slow target must not hold the state write guard
                     // (5 s TCP timeout each) while the API serves requests.
                     match do_connect_target(&state_for_autoconnect, &id).await {
-                        Ok(true) => tracing::info!("auto_connect: {} connected", id),
-                        Ok(false) => {}
-                        Err((_, e)) => {
+                        Ok(ConnectAnswer::BroughtUp(status)) => {
+                            tracing::info!("auto_connect: {} {}", id, status)
+                        }
+                        Ok(ConnectAnswer::Already(_)) => {}
+                        Ok(ConnectAnswer::Failed(e)) | Err((_, e)) => {
                             tracing::warn!("auto_connect: {} failed: {}", id, e);
                         }
                     }
@@ -4791,8 +4803,10 @@ async fn main() {
             for h in target._poll_handles.drain(..) {
                 h.abort();
             }
+            // Up from our side, peer or no peer: a listening link's
+            // socket and tasks end here too.
             let mut cli = target.client.lock().await;
-            if cli.is_connected() {
+            if cli.state_word().is_some() {
                 cli.disconnect();
                 tracing::info!("Disconnected target {} during shutdown", id);
             }

@@ -383,8 +383,9 @@ function Shell() {
       const now = Date.now();
       for (const t of liveTargets) {
         if (!ar[t.id]) continue;
-        // A listening link is up from our side; the peer dials in
-        // when it is ready, and a connect call would only bounce it.
+        // A listening link is up from our side and waits for its peer
+        // to dial in or start sending; a connect call would find it
+        // up and change nothing.
         if (t.connected || t.listening) continue;
         if (inflight.has(t.id)) continue;
         const lastTry = cooldown.get(t.id) || 0;
@@ -627,7 +628,7 @@ function Shell() {
                       t.connected
                         ? "Connected"
                         : t.listening
-                          ? "Listening for the target to dial in"
+                          ? "Listening for the target"
                           : "Disconnected"
                     }
                   />
