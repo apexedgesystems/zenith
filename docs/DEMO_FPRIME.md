@@ -121,7 +121,7 @@ with the published image there is nothing to write.
 Start zenith first, so it is listening:
 
 ```bash
-docker run -d --name zenith --network host -v zenith-data:/var/lib/zenith \
+docker run -d --name zenith --network host --read-only -v zenith-data:/var/lib/zenith \
   ghcr.io/apexedgesystems/zenith:latest
 ```
 

@@ -235,6 +235,9 @@ config is the booted build's (`tools/pushed-image-check.sh`).
 `make smoke-boot` boots a built image three times, one after another,
 each publishing only the front door on the same loopback port over
 bridge networking, and waits for each until `/api/health` answers.
+Before any boot, the image's working directory must be
+`/var/lib/zenith`, where SQLite keeps its temporary files under a
+read-only root.
 
 The first boot runs the image as `docker run <image>` does with no
 mounts and no environment, so the config and demo targets baked into it
@@ -258,8 +261,8 @@ are what boots. It checks that:
   Apex ops demo) serves a non-empty one;
 - `/` serves a page whose module script answers a JavaScript type.
 
-The second boot runs it as the compose files do (`--cap-drop ALL
---cap-add CHOWN --cap-add SETUID --cap-add SETGID`),
+The second boot runs it as the compose files do (`--read-only
+--cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID`),
 with a root-owned tmpfs at `/var/lib/zenith` and `--group-add 20`: the
 same posture, group 20 among the server's groups, and exactly one
 hand-over of the data directory in the container log. The third runs it

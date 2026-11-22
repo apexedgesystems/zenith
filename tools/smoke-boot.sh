@@ -7,7 +7,9 @@
 # port. The bundled targets dial and listen on the container's own
 # loopback, find no peers there, and fail or wait; that is expected. Each
 # boot is waited for, within a bounded wait, until GET /api/health
-# answers.
+# answers. Before any boot, the image's working directory must be the data
+# directory /var/lib/zenith: under a read-only root SQLite keeps its
+# temporary files there.
 #
 # First, as `docker run <image>` does with no mounts and no environment,
 # so the config and target directories baked into it are what boots. It
@@ -29,8 +31,8 @@
 #     non-empty one (quick commands or components);
 #   - GET / serves a page whose module script answers a JavaScript type.
 #
-# Second, as the compose files run it (every capability dropped but
-# CHOWN, SETUID and SETGID), with a root-owned tmpfs at
+# Second, as the compose files run it (a read-only root, every capability
+# dropped but CHOWN, SETUID and SETGID), with a root-owned tmpfs at
 # /var/lib/zenith and one extra group (--group-add): the same posture,
 # the extra group among the server's groups, and exactly one hand-over of
 # the data directory in the container log. Third, as the account itself
@@ -85,10 +87,10 @@ readonly CONTAINER_PORT=8080
 readonly DATA_DIR="/var/lib/zenith"
 readonly ACCOUNT_IDS="10001:10001"
 
-# The compose files' posture (every capability dropped but the three the
-# entrypoint uses) and the extra group the second boot adds: dialout's
-# number on Debian, the documented device example.
-readonly -a COMPOSE_FLAGS=(--cap-drop ALL
+# The compose files' posture (a read-only root, every capability dropped
+# but the three the entrypoint uses) and the extra group the second boot
+# adds: dialout's number on Debian, the documented device example.
+readonly -a COMPOSE_FLAGS=(--read-only --cap-drop ALL
   --cap-add CHOWN --cap-add SETUID --cap-add SETGID)
 readonly EXTRA_GID=20
 
@@ -378,6 +380,18 @@ read_status() {
 # Checks
 # ==============================================================================
 
+# Under a read-only root SQLite keeps its temporary files in the working
+# directory, so the image's must be the data directory, the one writable
+# place.
+check_workdir() {
+  local workdir
+  workdir=$(docker image inspect --format '{{.Config.WorkingDir}}' "$IMAGE" 2>&1) ||
+    fail "docker image inspect $IMAGE: $workdir"
+  [[ "$workdir" == "$DATA_DIR" ]] ||
+    fail "the image's working directory is '$workdir', not $DATA_DIR: under a read-only root SQLite keeps its temporary files in the working directory, and only $DATA_DIR is writable"
+  log_ok "image: working directory $DATA_DIR"
+}
+
 check_health() {
   local status writable version
   fetch_json /api/health
@@ -541,6 +555,7 @@ docker image inspect "$IMAGE" >/dev/null 2>&1 || {
   exit 1
 }
 read_declared_version
+check_workdir
 
 start_container "plain docker run"
 wait_for_health

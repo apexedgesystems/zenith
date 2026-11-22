@@ -71,7 +71,10 @@ RUN install -d -o zenith -g zenith -m 0755 /var/lib/zenith && \
     chmod -R u=rwX,go=rX /etc/zenith /data/targets
 
 # Working directory sits inside the persistent volume so even a
-# relative storage path in config.toml resolves somewhere durable.
+# relative storage path in config.toml resolves somewhere durable, and
+# so SQLite's temporary files land there under a read-only root: SQLite
+# falls back to the working directory when /var/tmp and /tmp are not
+# writable.
 WORKDIR /var/lib/zenith
 
 EXPOSE 8080

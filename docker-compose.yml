@@ -14,6 +14,9 @@ services:
     # it uses, and the server keeps none.
     cap_drop: [ALL]
     cap_add: [CHOWN, SETUID, SETGID]
+    # The root filesystem is read-only: the server writes only the data
+    # volume below, where SQLite also keeps its temporary files.
+    read_only: true
     volumes:
       - zenith-data:/var/lib/zenith
       - ./config.toml:/etc/zenith/config.toml:ro

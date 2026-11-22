@@ -58,6 +58,8 @@ architecture review; work before that is the v0.0.1 tag.
 
 ### Changed
 
+- The container runs with a read-only root filesystem: the compose files
+  set it, and `docker run --read-only` works with the data volume.
 - Demo target directories are regenerated from apex_csf d8d003c;
   SystemMonitor's 0x0100 command appears as HEALTH_SAMPLE.
   ([#50](https://github.com/apexedgesystems/zenith/pull/50))

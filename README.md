@@ -213,13 +213,14 @@ Nothing to build. The image carries a default config and the demo
 target directories for all three frameworks, so it boots as is:
 
 ```bash
-docker run -d --name zenith --network host \
+docker run -d --name zenith --network host --read-only \
   -v zenith-data:/var/lib/zenith \
   ghcr.io/apexedgesystems/zenith:latest
 # http://localhost:8080
 ```
 
-Or with compose, which adds the health check and restart policy:
+Or with compose, which adds the health check, the restart policy and
+the capability limits:
 
 ```bash
 curl -O https://raw.githubusercontent.com/apexedgesystems/zenith/main/deploy/docker-compose.yml
@@ -242,7 +243,7 @@ section below is the reference; the bundled default is
 target directories:
 
 ```bash
-docker run -d --name zenith --network host \
+docker run -d --name zenith --network host --read-only \
   -v zenith-data:/var/lib/zenith \
   -v "$PWD/config.toml:/etc/zenith/config.toml:ro" \
   -v "$PWD/targets:/data/targets:ro" \
@@ -270,6 +271,12 @@ writable by that user. A database placed elsewhere (`[storage] path` or
 `ZENITH_DB_PATH`) must be writable by uid 10001 too, and so must its
 directory. With no capabilities, the server cannot bind a port below
 1024 on the host network, for the front door or a target's listen port.
+
+The root filesystem can be read-only, as these examples run it: the
+server writes only `/var/lib/zenith`, where SQLite also keeps its
+temporary files. Under `--read-only` that directory must be a mounted
+volume (without one the container refuses to start); a throwaway run
+can mount `--tmpfs /var/lib/zenith` there instead.
 
 To give the server a device node, pass it with `--device` and add the
 group that owns it on the host, by number, with `--group-add`
@@ -685,11 +692,11 @@ HTTPS:
    input and after `session_max_hours` in any case (see
    Authentication and Audit).
 
-Run the container as deploy/docker-compose.yml does, with every
-capability dropped but the three the entrypoint uses to hand over the
-data volume: `--cap-drop ALL --cap-add CHOWN --cap-add SETUID
---cap-add SETGID` with `docker run`. The server itself runs as uid 10001
-and keeps none.
+Run the container as deploy/docker-compose.yml does: a read-only root
+filesystem, and every capability dropped but the three the entrypoint
+uses to hand over the data volume (`--read-only --cap-drop ALL
+--cap-add CHOWN --cap-add SETUID --cap-add SETGID` with `docker run`).
+The server itself runs as uid 10001 and keeps no capability.
 
 The session cookie is Secure by default, so browsers send it over
 HTTPS only (and over plain HTTP to `localhost`, for local testing). To
