@@ -55,7 +55,10 @@ FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d
 # The image then keeps only what it runs: the server's libraries, the
 # entrypoint's sh, coreutils and setpriv (util-linux), what those depend
 # on, and dpkg with its database, so a scanner still sees every package
-# left. The rest of the base is purged. dpkg refuses to remove a package
+# left. Four more stay that nothing here runs: base-files, whose
+# os-release tells a scanner which system this is, base-passwd, and the
+# two packages those need (mawk and libdebconfclient0). The rest of the
+# base is purged. dpkg refuses to remove a package
 # that a kept one declares a dependency on, and that is all it guards: a
 # need no package declares is the smoke's to find (tools/smoke-boot.sh
 # boots the image and runs its server, entrypoint and health check). The

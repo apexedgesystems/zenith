@@ -27,11 +27,13 @@ architecture review; work before that is the v0.0.1 tag.
   capability set 0.2.0 starts and reports healthy but cannot write its
   database: it runs as root and needs CAP_DAC_OVERRIDE to write files
   uid 10001 owns.
+  ([#69](https://github.com/apexedgesystems/zenith/pull/69))
 - The image carries only what zenith runs: no apt, bash or wget, and
   none of grep, sed, find, diff, gzip or perl; dpkg and its database
   stay, so a scanner sees every package. Its health check is built in
   (`zenith --health-check`), so the compose files declare none; a health
   check that calls wget fails.
+  ([#69](https://github.com/apexedgesystems/zenith/pull/69))
 - TPRM uploads use the v4 prelude and carry payloads beyond 64 KiB.
   Apex CSF vehicles built before apex_csf 2543279 refuse them; vehicles
   from that commit on require v4 and refuse zenith 0.2.0's v3 uploads.
@@ -65,6 +67,7 @@ architecture review; work before that is the v0.0.1 tag.
 
 - The container runs with a read-only root filesystem: the compose files
   set it, and `docker run --read-only` works with the data volume.
+  ([#69](https://github.com/apexedgesystems/zenith/pull/69))
 - Demo target directories are regenerated from apex_csf d8d003c;
   SystemMonitor's 0x0100 command appears as HEALTH_SAMPLE.
   ([#50](https://github.com/apexedgesystems/zenith/pull/50))
