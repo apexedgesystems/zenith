@@ -90,6 +90,10 @@ architecture review; work before that is the v0.0.1 tag.
   it answered `connected` / `already_connected`, and boots with
   `auto_connect: <id> listening`.
   ([#68](https://github.com/apexedgesystems/zenith/pull/68))
+- A shutdown that starts while a target's connect is still dialing, or
+  its upload is running, keeps the API answering while it waits for
+  that link, instead of stalling every request until the link frees.
+  ([#68](https://github.com/apexedgesystems/zenith/pull/68))
 - Tunable updates to nested structs carry the layout hash the vehicle
   verifies when their dictionary exports none.
   ([#50](https://github.com/apexedgesystems/zenith/pull/50))

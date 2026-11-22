@@ -4794,18 +4794,30 @@ async fn main() {
             _ = terminate => tracing::info!("Received SIGTERM, shutting down"),
         }
 
-        // Disconnect all targets to flush telemetry and close connections
-        let mut st = shutdown_state.write().await;
-        for (id, target) in st.targets.iter_mut() {
-            if let Some(h) = target._router_handle.take() {
-                h.abort();
-            }
-            for h in target._poll_handles.drain(..) {
-                h.abort();
-            }
+        // Disconnect all targets to flush telemetry and close connections.
+        // The write guard covers only what needs it (stopping the routers
+        // and polls, collecting each link); it is dropped before waiting
+        // on any link mutex, which a connect in its dial or an upload can
+        // hold for seconds while every request needs the state's guard.
+        let links: Vec<(String, Arc<Mutex<ProtocolLink>>)> = {
+            let mut st = shutdown_state.write().await;
+            st.targets
+                .iter_mut()
+                .map(|(id, target)| {
+                    if let Some(h) = target._router_handle.take() {
+                        h.abort();
+                    }
+                    for h in target._poll_handles.drain(..) {
+                        h.abort();
+                    }
+                    (id.clone(), target.client.clone())
+                })
+                .collect()
+        };
+        for (id, client) in links {
             // Up from our side, peer or no peer: a listening link's
             // socket and tasks end here too.
-            let mut cli = target.client.lock().await;
+            let mut cli = client.lock().await;
             if cli.state_word().is_some() {
                 cli.disconnect();
                 tracing::info!("Disconnected target {} during shutdown", id);
