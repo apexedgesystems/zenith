@@ -150,8 +150,8 @@ EXPOSE 8080
 # config and ZENITH_PORT declare, and the entrypoint runs the check as the
 # account without touching the data directory. The server reads its whole
 # database before it serves, so startup grows with the database: 24 to
-# 30 s for 1.1 GB on an idle amd64 host, 44.5 s for the same database
-# under heavy load, and the bundled config lets it grow to 2 GiB. Failed
+# 30 s for 1.1 GB in the recorded amd64 runs, once 44.5 s under higher
+# load, and the bundled config lets it grow to 2 GiB. Failed
 # checks therefore count only after 180 s; a healthy server is reported
 # healthy at its first passing check, so the long period delays only the
 # verdict on a server that never answers.

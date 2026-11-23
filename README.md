@@ -281,13 +281,15 @@ can mount `--tmpfs /var/lib/zenith` there instead.
 The image checks its own health: `zenith --health-check` asks the front
 door that `/etc/zenith/config.toml` and `ZENITH_PORT` declare, as the
 zenith user and without touching the data directory, so `docker ps`
-shows the container healthy once the server answers. A server started
-with its own `--config` or `--port` is still checked at that port: move
-the port with `ZENITH_PORT`, which both read, or give the container a
-health check of its own. The image carries only what the server and its entrypoint run: `docker exec`
-finds `sh`, coreutils and util-linux, but not apt, bash or wget, nor
-grep, sed, find, diff, gzip or perl, and no file with a setuid or setgid
-bit. dpkg and its database stay, so a scanner sees every package.
+shows the container healthy once the server answers. The image's health
+check does not inherit the server's `--config` or `--port` arguments. To
+change the port, set `ZENITH_PORT` for both; if the server uses a
+different config or listen address, supply a matching container health
+check. The image carries only what the server and its entrypoint run:
+`docker exec` finds `sh`, coreutils and util-linux, but not apt, bash or
+wget, nor grep, sed, find, diff, gzip or perl, and no file with a setuid
+or setgid bit. dpkg and its database stay, so a scanner sees every
+package.
 
 To give the server a device node, pass it with `--device` and add the
 group that owns it on the host, by number, with `--group-add`
@@ -350,21 +352,21 @@ make run
 
 ## Build, Test, Bench
 
-| Command              | Purpose                                                                                        |
-| -------------------- | ---------------------------------------------------------------------------------------------- |
-| `make run`           | Build production Docker image and start the container                                          |
-| `make run-clean`     | Same but with `--no-cache` -- use when frontend source changed and Docker layer cache is stale |
-| `make stop`          | Stop the running container                                                                     |
-| `make dev`           | Build + run in foreground (logs to stdout)                                                     |
-| `make test`          | Run **both** backend and frontend test suites                                                  |
-| `make test-backend`  | Backend only: `cargo test --lib` (currently 197 unit tests)                                    |
-| `make test-frontend` | Frontend only: `vitest run` (currently 128 unit tests)                                         |
-| `make bench`         | Run criterion benches (`protocol`, `storage`, `decoder`)                                       |
-| `make format`        | Run every pre-commit hook over the repo; the formatters fix in place                           |
-| `make format-check`  | The same hooks; fails, showing the diff, when any of them changes a file (CI mode)             |
-| `make lint`          | Clippy with `-D warnings`, then ESLint, in Docker                                              |
-| `make smoke-boot`    | Boot the built image with `docker run` (no mounts) and check what it serves (CI runs it)       |
-| `make secret-scan`   | Scan the tree and SECRET_SCAN_RANGE commits for secrets with gitleaks (CI runs it)             |
+| Command              | Purpose                                                                                                         |
+| -------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `make run`           | Build production Docker image and start the container                                                           |
+| `make run-clean`     | Same but with `--no-cache` -- use when frontend source changed and Docker layer cache is stale                  |
+| `make stop`          | Stop the running container                                                                                      |
+| `make dev`           | Build + run in foreground (logs to stdout)                                                                      |
+| `make test`          | Run **both** backend and frontend test suites                                                                   |
+| `make test-backend`  | Backend only: `cargo test --lib` (currently 197 unit tests)                                                     |
+| `make test-frontend` | Frontend only: `vitest run` (currently 128 unit tests)                                                          |
+| `make bench`         | Run criterion benches (`protocol`, `storage`, `decoder`)                                                        |
+| `make format`        | Run every pre-commit hook over the repo; the formatters fix in place                                            |
+| `make format-check`  | The same hooks; fails, showing the diff, when any of them changes a file (CI mode)                              |
+| `make lint`          | Clippy with `-D warnings`, then ESLint, in Docker                                                               |
+| `make smoke-boot`    | Boot the built image in three launch modes and check health, privilege posture and bundled content (CI runs it) |
+| `make secret-scan`   | Scan the tree and SECRET_SCAN_RANGE commits for secrets with gitleaks (CI runs it)                              |
 
 Builds, tests and lint run inside Docker -- no local Rust or Node
 toolchain required. `make format` runs pre-commit on the host,

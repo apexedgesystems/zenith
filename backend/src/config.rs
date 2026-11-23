@@ -609,48 +609,110 @@ impl Default for StorageSection {
     }
 }
 
+/// A target's definition artifacts. Each has a field naming its path
+/// and a conventional name inside the target directory; the struct
+/// dictionaries are a directory of files, every other artifact is one
+/// file.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Artifact {
+    Manifest,
+    Structs,
+    Telemetry,
+    Commands,
+    ConnectInit,
+    Records,
+}
+
+impl Artifact {
+    const ALL: [Artifact; 6] = [
+        Artifact::Manifest,
+        Artifact::Structs,
+        Artifact::Telemetry,
+        Artifact::Commands,
+        Artifact::ConnectInit,
+        Artifact::Records,
+    ];
+
+    /// Its name inside the target directory.
+    fn conventional_name(self) -> &'static str {
+        match self {
+            Artifact::Manifest => "app_manifest.json",
+            Artifact::Structs => "structs",
+            Artifact::Telemetry => "telemetry.json",
+            Artifact::Commands => "commands.json",
+            Artifact::ConnectInit => "on_connect.json",
+            Artifact::Records => "records.json",
+        }
+    }
+}
+
+/// Where a definition puts an artifact: the path its field names, or
+/// its conventional place in the target directory.
+#[derive(Debug, Clone, PartialEq)]
+enum Declared {
+    Explicit(String),
+    Conventional(std::path::PathBuf),
+}
+
 impl TargetSection {
-    /// A conventional artifact inside the target directory, when the
-    /// directory is declared and the artifact is actually there. A
+    fn explicit_path(&self, artifact: Artifact) -> Option<&String> {
+        match artifact {
+            Artifact::Manifest => self.manifest.as_ref(),
+            Artifact::Structs => self.structs_dir.as_ref(),
+            Artifact::Telemetry => self.telemetry_config.as_ref(),
+            Artifact::Commands => self.commands_config.as_ref(),
+            Artifact::ConnectInit => self.connect_init.as_ref(),
+            Artifact::Records => self.records_config.as_ref(),
+        }
+    }
+
+    /// Where this definition puts an artifact, whether or not anything
+    /// is there: its explicit path when the field is set, else its
+    /// conventional place when a target directory is declared. The
+    /// accessors below and the boot preflight both resolve through it.
+    fn declared(&self, artifact: Artifact) -> Option<Declared> {
+        match self.explicit_path(artifact) {
+            Some(path) => Some(Declared::Explicit(path.clone())),
+            None => self.dir.as_ref().map(|dir| {
+                Declared::Conventional(std::path::Path::new(dir).join(artifact.conventional_name()))
+            }),
+        }
+    }
+
+    /// The path the loader opens: an explicit path as declared, a
+    /// conventional one only when the artifact is actually there. A
     /// bundle without commands.json simply has no command catalog.
-    fn in_dir(&self, name: &str) -> Option<String> {
-        let dir = self.dir.as_ref()?;
-        let path = std::path::Path::new(dir).join(name);
-        path.exists().then(|| path.to_string_lossy().into_owned())
+    fn artifact_path(&self, artifact: Artifact) -> Option<String> {
+        match self.declared(artifact)? {
+            Declared::Explicit(path) => Some(path),
+            Declared::Conventional(path) => {
+                path.exists().then(|| path.to_string_lossy().into_owned())
+            }
+        }
     }
 
     pub fn manifest_path(&self) -> Option<String> {
-        self.manifest
-            .clone()
-            .or_else(|| self.in_dir("app_manifest.json"))
+        self.artifact_path(Artifact::Manifest)
     }
 
     pub fn structs_path(&self) -> Option<String> {
-        self.structs_dir.clone().or_else(|| self.in_dir("structs"))
+        self.artifact_path(Artifact::Structs)
     }
 
     pub fn telemetry_path(&self) -> Option<String> {
-        self.telemetry_config
-            .clone()
-            .or_else(|| self.in_dir("telemetry.json"))
+        self.artifact_path(Artifact::Telemetry)
     }
 
     pub fn commands_path(&self) -> Option<String> {
-        self.commands_config
-            .clone()
-            .or_else(|| self.in_dir("commands.json"))
+        self.artifact_path(Artifact::Commands)
     }
 
     pub fn connect_init_path(&self) -> Option<String> {
-        self.connect_init
-            .clone()
-            .or_else(|| self.in_dir("on_connect.json"))
+        self.artifact_path(Artifact::ConnectInit)
     }
 
     pub fn records_path(&self) -> Option<String> {
-        self.records_config
-            .clone()
-            .or_else(|| self.in_dir("records.json"))
+        self.artifact_path(Artifact::Records)
     }
 }
 
@@ -679,71 +741,63 @@ pub(crate) fn repo_structs_path(
 }
 
 /// How the server uses a declared target path: a target directory is
-/// searched for its conventional artifacts, an artifact is read (a
-/// file opened, a directory listed).
+/// searched for its conventional artifacts; the struct directory is
+/// listed and searched, since its loader lists it and opens each file
+/// in it; every other artifact is a file, opened.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum PathUse {
     Search,
+    List,
     Read,
 }
 
 impl TargetSection {
     /// Every path this definition makes the server open, whether or not
-    /// it exists: the target directory, then each artifact at its
-    /// explicit path or, without one, its conventional place in the
-    /// directory.
+    /// it exists: the target directory, then each artifact where it is
+    /// declared (`declared`, the accessors' own resolution).
     fn declared_paths(&self) -> Vec<(std::path::PathBuf, PathUse)> {
-        let dir = self.dir.as_deref().map(std::path::Path::new);
-        let artifact = |explicit: &Option<String>, name: &str| {
-            explicit
-                .as_deref()
-                .map(std::path::PathBuf::from)
-                .or_else(|| dir.map(|d| d.join(name)))
-        };
-        let mut paths: Vec<_> = dir
-            .map(|d| (d.to_path_buf(), PathUse::Search))
-            .into_iter()
+        let mut paths: Vec<_> = self
+            .dir
+            .iter()
+            .map(|dir| (std::path::PathBuf::from(dir), PathUse::Search))
             .collect();
-        paths.extend(
-            [
-                artifact(&self.manifest, "app_manifest.json"),
-                artifact(&self.structs_dir, "structs"),
-                artifact(&self.telemetry_config, "telemetry.json"),
-                artifact(&self.commands_config, "commands.json"),
-                artifact(&self.connect_init, "on_connect.json"),
-                artifact(&self.records_config, "records.json"),
-            ]
-            .into_iter()
-            .flatten()
-            .map(|path| (path, PathUse::Read)),
-        );
+        paths.extend(Artifact::ALL.into_iter().filter_map(|artifact| {
+            let path = match self.declared(artifact)? {
+                Declared::Explicit(path) => std::path::PathBuf::from(path),
+                Declared::Conventional(path) => path,
+            };
+            let how = match artifact {
+                Artifact::Structs => PathUse::List,
+                _ => PathUse::Read,
+            };
+            Some((path, how))
+        }));
         paths
     }
 }
 
-/// What the filesystem answers for one declared path: searching a
-/// directory resolves a name inside it, reading lists a directory or
-/// opens a file.
+/// What the filesystem answers for one declared path, under the
+/// server's own identity: searching resolves a name inside the
+/// directory, listing reads its entries and then searches it, reading
+/// opens the file.
 fn probe_target_path(path: &std::path::Path, how: PathUse) -> std::io::Result<()> {
+    let search = || std::fs::metadata(path.join(".")).map(drop);
     match how {
-        PathUse::Search => std::fs::metadata(path.join(".")).map(drop),
-        PathUse::Read => match std::fs::metadata(path) {
-            Ok(meta) if meta.is_dir() => std::fs::read_dir(path).map(drop),
-            Ok(_) => std::fs::File::open(path).map(drop),
-            Err(e) => Err(e),
-        },
+        PathUse::Search => search(),
+        PathUse::List => std::fs::read_dir(path).map(drop).and_then(|()| search()),
+        PathUse::Read => std::fs::File::open(path).map(drop),
     }
 }
 
-/// The first declared target path the server cannot read for want of
+/// The first declared target path the server cannot use for want of
 /// permission: the target, the path and the error. Path::exists and
 /// Path::is_dir turn every error into false, so without this check a
 /// permission error reads as absence: a target directory the server
 /// cannot search boots with no definitions and no log line, a mount
-/// root it cannot search reads as "not a directory", and an explicit
-/// artifact it cannot read costs only that artifact, with a warning.
-/// A path that does not exist, or fails for another reason, keeps its
-/// own handling.
+/// root it cannot search reads as "not a directory", and an artifact it
+/// cannot read, or a struct directory it can list but not search, costs
+/// only those definitions, with a warning. A path that does not exist,
+/// or fails for another reason, keeps its own handling.
 pub fn unreadable_target_path(
     targets: &[TargetSection],
 ) -> Option<(&str, std::path::PathBuf, std::io::Error)> {
@@ -1078,7 +1132,7 @@ mod tests {
         let expected: Vec<(String, PathUse)> = [
             ("/data/targets/t", PathUse::Search),
             ("/elsewhere/manifest.json", PathUse::Read),
-            ("/data/targets/t/structs", PathUse::Read),
+            ("/data/targets/t/structs", PathUse::List),
             ("/data/targets/t/telemetry.json", PathUse::Read),
             ("/data/targets/t/commands.json", PathUse::Read),
             ("/data/targets/t/on_connect.json", PathUse::Read),
@@ -1088,6 +1142,84 @@ mod tests {
         .map(|(p, how)| (p.to_string(), how))
         .collect();
         assert_eq!(paths, expected);
+    }
+
+    /// @test Each of the six artifacts resolves in one place: its
+    /// explicit field when set, else its conventional name inside the
+    /// target directory (app_manifest.json, structs, telemetry.json,
+    /// commands.json, on_connect.json, records.json), else nowhere. Pure.
+    #[test]
+    fn declared_artifacts_prefer_the_explicit_path_then_the_convention() {
+        let expected = [
+            (Artifact::Manifest, "app_manifest.json"),
+            (Artifact::Structs, "structs"),
+            (Artifact::Telemetry, "telemetry.json"),
+            (Artifact::Commands, "commands.json"),
+            (Artifact::ConnectInit, "on_connect.json"),
+            (Artifact::Records, "records.json"),
+        ];
+        assert_eq!(Artifact::ALL.len(), expected.len());
+        let bare = target("bare", "tcp", None);
+        let mut in_dir = target("in-dir", "tcp", None);
+        in_dir.dir = Some("/data/targets/t".to_string());
+        for (artifact, name) in expected {
+            assert_eq!(artifact.conventional_name(), name);
+            assert_eq!(bare.declared(artifact), None, "{name}: no dir, no field");
+            assert_eq!(
+                in_dir.declared(artifact),
+                Some(Declared::Conventional(
+                    std::path::Path::new("/data/targets/t").join(name)
+                )),
+                "{name}: the convention"
+            );
+            let mut explicit = in_dir.clone();
+            let path = format!("/elsewhere/{name}");
+            match artifact {
+                Artifact::Manifest => explicit.manifest = Some(path.clone()),
+                Artifact::Structs => explicit.structs_dir = Some(path.clone()),
+                Artifact::Telemetry => explicit.telemetry_config = Some(path.clone()),
+                Artifact::Commands => explicit.commands_config = Some(path.clone()),
+                Artifact::ConnectInit => explicit.connect_init = Some(path.clone()),
+                Artifact::Records => explicit.records_config = Some(path.clone()),
+            }
+            assert_eq!(
+                explicit.declared(artifact),
+                Some(Declared::Explicit(path)),
+                "{name}: the explicit field wins"
+            );
+        }
+    }
+
+    /// @test Missing paths: the accessors drop a conventional artifact
+    /// that is not there and keep an explicit path as declared, absent
+    /// or not (its loader reports it); the preflight raises nothing for
+    /// either, since absence is not a permission error.
+    #[test]
+    fn absent_artifacts_keep_their_handling() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("telemetry.json"), "{}").unwrap();
+        let mut t = target("t", "tcp", None);
+        t.dir = Some(tmp.path().to_string_lossy().into_owned());
+        t.records_config = Some("/no/such/records.json".to_string());
+        assert_eq!(
+            t.telemetry_path(),
+            Some(
+                tmp.path()
+                    .join("telemetry.json")
+                    .to_string_lossy()
+                    .into_owned()
+            )
+        );
+        assert_eq!(t.manifest_path(), None, "absent conventional artifact");
+        assert_eq!(t.structs_path(), None);
+        assert_eq!(t.commands_path(), None);
+        assert_eq!(t.connect_init_path(), None);
+        assert_eq!(
+            t.records_path(),
+            Some("/no/such/records.json".to_string()),
+            "an explicit path is kept, absent or not"
+        );
+        assert!(unreadable_target_path(&[t]).is_none());
     }
 
     /// @test A permission error on any declared path refuses, naming the
@@ -1140,6 +1272,87 @@ mod tests {
         assert!(first_permission_error(&both, other).is_none());
         let fine = |_: &std::path::Path, _: PathUse| Ok(());
         assert!(first_permission_error(&both, fine).is_none());
+    }
+
+    /// @test Real permissions under an unprivileged identity: a struct
+    /// directory the server can list but not search refuses, naming
+    /// it, while a readable one passes. The dev container runs tests as
+    /// root, which bypasses permission bits, so there the test runs
+    /// itself again as uid and gid 65534 (std's Command uid and gid, from
+    /// a copy of the test binary in a directory that uid can reach), with
+    /// the directory owned by root at mode 0744, as the review found it;
+    /// the child prints a marker the parent requires. Run as any other
+    /// user, it probes in place, the directory at mode 0644, which its
+    /// owner too can list but not search.
+    #[test]
+    fn unsearchable_struct_directory_refuses_under_real_permissions() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        use std::os::unix::process::CommandExt;
+        const ROLE: &str = "ZENITH_TEST_UNPRIVILEGED_PROBE";
+        const NAME: &str =
+            "config::tests::unsearchable_struct_directory_refuses_under_real_permissions";
+        let chmod = |path: &std::path::Path, mode: u32| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap()
+        };
+        let probe = |root: &std::path::Path| {
+            let structs = |name: &str| {
+                let mut t = target(name, "tcp", None);
+                t.structs_dir = Some(root.join(name).to_string_lossy().into_owned());
+                t
+            };
+            assert!(
+                std::fs::read_dir(root.join("unsearchable")).is_ok(),
+                "it lists"
+            );
+            assert!(
+                std::fs::File::open(root.join("unsearchable/c.json")).is_err(),
+                "its file cannot be opened"
+            );
+            let unsearchable = [structs("unsearchable")];
+            let (name, path, e) = unreadable_target_path(&unsearchable).unwrap();
+            assert_eq!((name, path), ("unsearchable", root.join("unsearchable")));
+            assert_eq!(e.kind(), std::io::ErrorKind::PermissionDenied);
+            assert!(unreadable_target_path(&[structs("readable")]).is_none());
+        };
+        let uid = std::fs::metadata("/proc/self").unwrap().uid();
+
+        if let Ok(root) = std::env::var(ROLE) {
+            probe(std::path::Path::new(&root));
+            println!("UNPRIVILEGED-PROBE-RAN uid={uid}");
+            return;
+        }
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        chmod(root, 0o755);
+        for name in ["unsearchable", "readable"] {
+            std::fs::create_dir(root.join(name)).unwrap();
+            std::fs::write(root.join(name).join("c.json"), "{}").unwrap();
+        }
+        chmod(&root.join("readable"), 0o755);
+        if uid != 0 {
+            chmod(&root.join("unsearchable"), 0o644);
+            probe(root);
+            chmod(&root.join("unsearchable"), 0o755);
+            return;
+        }
+        chmod(&root.join("unsearchable"), 0o744);
+        let bin = root.join("test-binary");
+        std::fs::copy(std::env::current_exe().unwrap(), &bin).unwrap();
+        chmod(&bin, 0o755);
+        let out = std::process::Command::new(&bin)
+            .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+            .env(ROLE, root)
+            .current_dir(root)
+            .uid(65534)
+            .gid(65534)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && stdout.contains("UNPRIVILEGED-PROBE-RAN uid=65534"),
+            "the probe as uid 65534 did not pass:\n{stdout}\n{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
 
     /// @test On the real filesystem, a readable target tree, absent
