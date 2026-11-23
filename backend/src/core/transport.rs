@@ -243,24 +243,32 @@ pub enum ConnectAnswer {
     /// 502 with this message: the connect failed, or the link was
     /// already down again when it returned.
     Failed(String),
+    /// 503: shutdown has begun. The call was not admitted, or the
+    /// connect it made completed after shutdown began and the caller
+    /// tears down what it brought up.
+    Refused,
 }
 
 /// Decide a connect call's answer from the link's state word when the
-/// call took the link (`before`) and what the call left (`after`): the
-/// connect's error, or the link's state word at the moment it returned.
-/// A link that was up from our side is not connected again, so its
-/// `after` is its unchanged state and the answer is `already_` that
-/// state. Otherwise the answer is the link's state when connect
-/// returns, true when given, and 502 only if the link is already down
-/// again by then. An arm step that fails after the answer takes the
-/// link down after a 200; the status endpoints carry the settled state.
+/// call took the link (`before`), what the call left (`after`): the
+/// connect's error, or the link's state word at the moment it returned,
+/// and whether shutdown had begun by then (`stopping`). A link that was
+/// up from our side is not connected again, so its `after` is its
+/// unchanged state and the answer is `already_` that state. A connect
+/// that completed after shutdown began is refused, whatever it left.
+/// Otherwise the answer is the link's state when connect returns, true
+/// when given, and 502 only if the link is already down again by then.
+/// An arm step that fails after the answer takes the link down after a
+/// 200; the status endpoints carry the settled state.
 pub fn connect_answer(
     before: Option<StateWord>,
     after: Result<Option<StateWord>, String>,
+    stopping: bool,
 ) -> ConnectAnswer {
     match (before, after) {
         (Some(StateWord::Connected), _) => ConnectAnswer::Already("already_connected"),
         (Some(StateWord::Listening), _) => ConnectAnswer::Already("already_listening"),
+        (None, _) if stopping => ConnectAnswer::Refused,
         (None, Ok(Some(StateWord::Connected))) => ConnectAnswer::BroughtUp("connected"),
         (None, Ok(Some(StateWord::Listening))) => ConnectAnswer::BroughtUp("listening"),
         (None, Ok(None)) => {
@@ -361,34 +369,55 @@ mod tests {
         use ConnectAnswer::{Already, BroughtUp, Failed};
         use StateWord::{Connected, Listening};
         assert_eq!(
-            connect_answer(Some(Connected), Ok(Some(Connected))),
+            connect_answer(Some(Connected), Ok(Some(Connected)), false),
             Already("already_connected")
         );
         assert_eq!(
-            connect_answer(Some(Listening), Ok(Some(Listening))),
+            connect_answer(Some(Listening), Ok(Some(Listening)), false),
             Already("already_listening")
         );
         assert_eq!(
-            connect_answer(Some(Listening), Ok(None)),
+            connect_answer(Some(Listening), Ok(None), false),
             Already("already_listening"),
             "a link found up is not connected again"
         );
         assert_eq!(
-            connect_answer(None, Ok(Some(Connected))),
+            connect_answer(None, Ok(Some(Connected)), false),
             BroughtUp("connected")
         );
         assert_eq!(
-            connect_answer(None, Ok(Some(Listening))),
+            connect_answer(None, Ok(Some(Listening)), false),
             BroughtUp("listening")
         );
         assert_eq!(
-            connect_answer(None, Ok(None)),
+            connect_answer(None, Ok(None), false),
             Failed("Connect failed: the link went down during bring-up".to_string()),
             "down again when connect returned"
         );
         assert_eq!(
-            connect_answer(None, Err("connection refused".to_string())),
+            connect_answer(None, Err("connection refused".to_string()), false),
             Failed("Connect failed: connection refused".to_string())
+        );
+    }
+
+    /// @test A connect that completed after shutdown began is refused,
+    /// whatever it left: brought up, down again, or failed. A link that
+    /// was already up answers as before; nothing was done to it.
+    #[test]
+    fn connect_answer_refuses_a_connect_shutdown_crossed() {
+        use ConnectAnswer::{Already, Refused};
+        use StateWord::{Connected, Listening};
+        assert_eq!(connect_answer(None, Ok(Some(Connected)), true), Refused);
+        assert_eq!(connect_answer(None, Ok(Some(Listening)), true), Refused);
+        assert_eq!(connect_answer(None, Ok(None), true), Refused);
+        assert_eq!(
+            connect_answer(None, Err("connection timed out".to_string()), true),
+            Refused
+        );
+        assert_eq!(
+            connect_answer(Some(Listening), Ok(Some(Listening)), true),
+            Already("already_listening"),
+            "a link found up was not touched"
         );
     }
 

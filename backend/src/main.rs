@@ -118,6 +118,10 @@ struct SharedState {
     /// Browser sessions. The store has its own lock: callers clone the
     /// Arc under a short guard and use it after dropping the guard.
     sessions: Arc<SessionStore>,
+    /// Set by the shutdown snapshot, under the write guard: from then
+    /// on no connect is admitted, and a connect that completes is torn
+    /// down instead of registering a router or polls.
+    stopping: bool,
 }
 
 /// Storage pressure measured by the maintenance loop: the configured
@@ -610,11 +614,16 @@ async fn target_client(
 /// link's state when connect returns, so it is true when given, and a
 /// 502 only if the link is already down again by then. An arm step
 /// that fails after the answer takes the link down after a 200;
-/// /api/targets has the settled state.
+/// /api/targets has the settled state. Once shutdown has begun, no
+/// connect is admitted, and one that completes afterwards is torn down
+/// and refused (503) instead of registering a router or polls.
 ///
 /// The state check and the connect run under the client mutex (not
 /// the state guard): a concurrent connect serializes on the mutex and
-/// finds the link already up.
+/// finds the link already up. The completion is decided under the
+/// state's write guard, which the shutdown snapshot takes too, with the
+/// link still held; the link is held while the guard is awaited, never
+/// the reverse, so reads stay responsive.
 async fn do_connect_target(
     state: &AppState,
     id: &str,
@@ -625,6 +634,9 @@ async fn do_connect_target(
             .targets
             .get(id)
             .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
+        if st.stopping {
+            return Ok(ConnectAnswer::Refused);
+        }
         (
             target.client.clone(),
             target.config.host.clone(),
@@ -632,52 +644,60 @@ async fn do_connect_target(
         )
     };
 
-    let answer = {
-        let mut cli = client.lock().await;
-        // Up from our side (a live session, or a listener waiting for
-        // one): nothing to bring up and no router to replace, and the
-        // state stays what it was.
-        let state_before = cli.state_word();
-        let after = match state_before {
-            Some(_) => Ok(state_before),
-            None => cli
-                .connect(&host, port)
-                .await
-                .map(|()| cli.state_word())
-                .map_err(|e| e.to_string()),
-        };
-        connect_answer(state_before, after)
-    };
-    if !matches!(answer, ConnectAnswer::BroughtUp(_)) {
-        return Ok(answer);
+    let mut cli = client.lock().await;
+    // Up from our side (a live session, or a listener waiting for one):
+    // nothing to bring up and no router to replace, and the state stays
+    // what it was.
+    let state_before = cli.state_word();
+    if state_before.is_some() {
+        return Ok(connect_answer(state_before, Ok(state_before), false));
     }
+    let after = cli
+        .connect(&host, port)
+        .await
+        .map(|()| cli.state_word())
+        .map_err(|e| e.to_string());
 
-    // Attach the telemetry router under a short write guard. Replacing
-    // the handle aborts any previous router so a reconnect can't leave
-    // two subscribers decoding the same push stream.
+    // Either this lands before the shutdown snapshot, which then stops
+    // the router and polls attached here and disconnects the link, or it
+    // sees shutdown begun and leaves nothing behind.
     let mut st = state.write().await;
-    if let Some(target) = st.targets.get_mut(id) {
-        let push_rx = target.push_tlm_tx.subscribe();
-        let handle = telemetry::spawn_router(
-            id.to_string(),
-            push_rx,
-            target.sample_tx.clone(),
-            target.struct_dicts.clone(),
-            target.manifest.clone(),
-            target.record_table.clone(),
-            target.metrics.clone(),
-        );
-        if let Some(old) = target._router_handle.replace(handle) {
-            old.abort();
+    let answer = connect_answer(state_before, after, st.stopping);
+    match answer {
+        ConnectAnswer::Refused => {
+            if cli.state_word().is_some() {
+                cli.disconnect();
+            }
         }
-        for h in target._poll_handles.drain(..) {
-            h.abort();
+        ConnectAnswer::BroughtUp(_) => {
+            // Replacing the handle aborts any previous router so a
+            // reconnect can't leave two subscribers decoding the same
+            // push stream.
+            if let Some(target) = st.targets.get_mut(id) {
+                let push_rx = target.push_tlm_tx.subscribe();
+                let handle = telemetry::spawn_router(
+                    id.to_string(),
+                    push_rx,
+                    target.sample_tx.clone(),
+                    target.struct_dicts.clone(),
+                    target.manifest.clone(),
+                    target.record_table.clone(),
+                    target.metrics.clone(),
+                );
+                if let Some(old) = target._router_handle.replace(handle) {
+                    old.abort();
+                }
+                for h in target._poll_handles.drain(..) {
+                    h.abort();
+                }
+                target._poll_handles = crate::core::poll::spawn_polls(
+                    &target.config.poll,
+                    target.client.clone(),
+                    target.push_tlm_tx.clone(),
+                );
+            }
         }
-        target._poll_handles = crate::core::poll::spawn_polls(
-            &target.config.poll,
-            target.client.clone(),
-            target.push_tlm_tx.clone(),
-        );
+        _ => {}
     }
     Ok(answer)
 }
@@ -741,6 +761,9 @@ async fn connect_target(
         }
         Ok(ConnectAnswer::BroughtUp(status)) => Ok(status),
         Ok(ConnectAnswer::Failed(err_msg)) => Err((StatusCode::BAD_GATEWAY, err_msg)),
+        Ok(ConnectAnswer::Refused) => {
+            Err((StatusCode::SERVICE_UNAVAILABLE, "shutting down".to_string()))
+        }
         Err(e) => Err(e),
     };
     let audit_status = match &outcome {
@@ -4706,6 +4729,7 @@ async fn main() {
         rate_limiter: Arc::new(RateLimiter::default()),
         storage_vitals,
         sessions,
+        stopping: false,
     }));
 
     // Honor `auto_connect = true` on each target. We dispatch the
@@ -4736,6 +4760,9 @@ async fn main() {
                             tracing::info!("auto_connect: {} {}", id, status)
                         }
                         Ok(ConnectAnswer::Already(_)) => {}
+                        Ok(ConnectAnswer::Refused) => {
+                            tracing::warn!("auto_connect: {} refused: shutting down", id);
+                        }
                         Ok(ConnectAnswer::Failed(e)) | Err((_, e)) => {
                             tracing::warn!("auto_connect: {} failed: {}", id, e);
                         }
@@ -4795,12 +4822,15 @@ async fn main() {
         }
 
         // Disconnect all targets to flush telemetry and close connections.
-        // The write guard covers only what needs it (stopping the routers
-        // and polls, collecting each link); it is dropped before waiting
-        // on any link mutex, which a connect in its dial or an upload can
-        // hold for seconds while every request needs the state's guard.
+        // The write guard covers only what needs it (closing connect
+        // admission, stopping the routers and polls, collecting each
+        // link); it is dropped before waiting on any link mutex, which a
+        // connect in its dial or an upload can hold for seconds while
+        // every request needs the state's guard. A connect that completes
+        // after this sees `stopping` and tears its link down.
         let links: Vec<(String, Arc<Mutex<ProtocolLink>>)> = {
             let mut st = shutdown_state.write().await;
+            st.stopping = true;
             st.targets
                 .iter_mut()
                 .map(|(id, target)| {
