@@ -13,6 +13,28 @@ architecture review; work before that is the v0.0.1 tag.
 
 ### Breaking
 
+- The image runs zenith as an unprivileged user (uid 10001) instead of
+  root; its entrypoint hands an existing data volume to that user on
+  first start. Started as root, the container needs CAP_SETUID and
+  CAP_SETGID, plus CAP_CHOWN while a hand-over is pending: `--cap-drop
+  ALL` alone stops with a message, and `--user 10001:10001` needs none of
+  them. Mounted config files must be readable by uid 10001, and mounted
+  target files and directories readable and searchable by it: the
+  server refuses to start on a target path it cannot read, naming the
+  path. A database outside `/var/lib/zenith`, and its directory, must be
+  writable by it; ports below 1024 cannot be bound on the host network.
+  To roll back, run 0.2.0 on a handed-over volume with its own release's
+  compose file or Docker's default capabilities. Under this release's
+  capability set 0.2.0 starts and reports healthy but cannot write its
+  database: it runs as root and needs CAP_DAC_OVERRIDE to write files
+  uid 10001 owns.
+  ([#69](https://github.com/apexedgesystems/zenith/pull/69))
+- The image carries only what zenith runs: no apt, bash or wget, and
+  none of grep, sed, find, diff, gzip or perl; dpkg and its database
+  stay, so a scanner sees every package. Its health check is built in
+  (`zenith --health-check`), so the compose files declare none; a health
+  check that calls wget fails.
+  ([#69](https://github.com/apexedgesystems/zenith/pull/69))
 - TPRM uploads use the v4 prelude and carry payloads beyond 64 KiB.
   Apex CSF vehicles built before apex_csf 2543279 refuse them; vehicles
   from that commit on require v4 and refuse zenith 0.2.0's v3 uploads.
@@ -44,6 +66,14 @@ architecture review; work before that is the v0.0.1 tag.
 
 ### Changed
 
+- The container runs with a read-only root filesystem: the compose files
+  set it, and `docker run --read-only` works with the data volume.
+  ([#69](https://github.com/apexedgesystems/zenith/pull/69))
+- A target path the server cannot read (a target directory, the mount
+  above it, or an artifact named in config.toml) stops the boot with a
+  message naming the path and the error; such a target used to load
+  without those definitions, or as "not a directory".
+  ([#69](https://github.com/apexedgesystems/zenith/pull/69))
 - Demo target directories are regenerated from apex_csf d8d003c;
   SystemMonitor's 0x0100 command appears as HEALTH_SAMPLE.
   ([#50](https://github.com/apexedgesystems/zenith/pull/50))

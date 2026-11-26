@@ -152,11 +152,11 @@ ELF ident) decode correctly with zero configuration.
 | Frontend      | React 19, TypeScript strict, Canvas API                                                    |
 | Storage       | SQLite (WAL mode) with read connection pool (1 writer + N readers)                         |
 | Protocol      | APROTO over TCP + SLIP framing                                                             |
-| Tests         | `cargo test --lib` (197 unit tests) + Vitest with React Testing Library (128 unit tests)   |
+| Tests         | `cargo test --lib` (208 unit tests) + Vitest with React Testing Library (128 unit tests)   |
 | Benches       | criterion + pprof flamegraphs                                                              |
 | Auth          | Console sign-in with server-side sessions; JWT bearer tokens for API clients (default off) |
 | Rate limiting | Per-IP token bucket on POST endpoints (when auth is on)                                    |
-| Deploy        | Docker (multi-stage Rust + Node -> Debian slim)                                            |
+| Deploy        | Docker (multi-stage Rust + Node -> trimmed Debian root on scratch)                         |
 
 ## Build Artifacts (from Apex release)
 
@@ -213,20 +213,24 @@ Nothing to build. The image carries a default config and the demo
 target directories for all three frameworks, so it boots as is:
 
 ```bash
-docker run -d --name zenith --network host \
+docker run -d --name zenith --network host --read-only \
   -v zenith-data:/var/lib/zenith \
   ghcr.io/apexedgesystems/zenith:latest
 # http://localhost:8080
 ```
 
-Or with compose, which adds the health check and restart policy:
+Or with compose, which adds the restart policy and the capability
+limits:
 
 ```bash
 curl -O https://raw.githubusercontent.com/apexedgesystems/zenith/main/deploy/docker-compose.yml
 docker compose up -d
 ```
 
-Pin a version with `ZENITH_IMAGE=ghcr.io/apexedgesystems/zenith:v0.2.0`.
+Pin a release after v0.2.0 with
+`ZENITH_IMAGE=ghcr.io/apexedgesystems/zenith:<tag>`: the file's settings
+are for images that run the server as uid 10001, and v0.2.0, which runs
+as root, goes with its own release's compose file.
 Three settings come from the environment when set: `ZENITH_PORT`
 (the front door, default 8080), `ZENITH_DB_PATH` (default
 `/var/lib/zenith/zenith.db`, inside the persistent volume), and
@@ -239,7 +243,7 @@ section below is the reference; the bundled default is
 target directories:
 
 ```bash
-docker run -d --name zenith --network host \
+docker run -d --name zenith --network host --read-only \
   -v zenith-data:/var/lib/zenith \
   -v "$PWD/config.toml:/etc/zenith/config.toml:ro" \
   -v "$PWD/targets:/data/targets:ro" \
@@ -250,6 +254,49 @@ The container runs on the host network on purpose: each target's
 definition describes its own transport (what it dials, what it
 listens on) and the transport layer binds exactly that, so no
 per-target port publishing is ever needed.
+
+The server runs as the zenith user, uid and gid 10001, with no
+capabilities. The entrypoint starts as root only to hand
+`/var/lib/zenith` to that user when anyone else owns it (a volume an
+earlier release wrote as root, a fresh bind mount), so an upgrade needs
+no manual step. Under the compose files' capabilities root reads the
+directory as any other user would, so a bind mount holding a directory
+others cannot read (mode 0700, say) cannot be handed over: chown it to
+10001:10001 on the host, or start the container once with Docker's
+default capabilities. Files mounted into the container, such as the
+config and the target directories, must be readable by that user, and
+the directories searchable. Started with `--user 10001:10001` the
+entrypoint skips the hand-over, and the data directory must already be
+writable by that user. A database placed elsewhere (`[storage] path` or
+`ZENITH_DB_PATH`) must be writable by uid 10001 too, and so must its
+directory. With no capabilities, the server cannot bind a port below
+1024 on the host network, for the front door or a target's listen port.
+
+The root filesystem can be read-only, as these examples run it: the
+server writes only `/var/lib/zenith`, where SQLite also keeps its
+temporary files. Under `--read-only` that directory must be a mounted
+volume (without one the container refuses to start); a throwaway run
+can mount `--tmpfs /var/lib/zenith` there instead.
+
+The image checks its own health: `zenith --health-check` asks the front
+door that `/etc/zenith/config.toml` and `ZENITH_PORT` declare, as the
+zenith user and without touching the data directory, so `docker ps`
+shows the container healthy once the server answers. The image's health
+check does not inherit the server's `--config` or `--port` arguments. To
+change the port, set `ZENITH_PORT` for both; if the server uses a
+different config or listen address, supply a matching container health
+check. The image carries only what the server and its entrypoint run:
+`docker exec` finds `sh`, coreutils and util-linux, but not apt, bash or
+wget, nor grep, sed, find, diff, gzip or perl, and no file with a setuid
+or setgid bit. dpkg and its database stay, so a scanner sees every
+package.
+
+To give the server a device node, pass it with `--device` and add the
+group that owns it on the host, by number, with `--group-add`
+(`ls -n /dev/ttyUSB0`; dialout, 20, on Debian and Ubuntu): the server
+reaches the device only through that group.
+[deploy/docker-compose.yml](deploy/docker-compose.yml) carries the same
+as a commented example.
 
 To run the flight side of the bundled demos yourself, two
 walkthroughs stand up the stock frameworks from scratch and end at
@@ -305,21 +352,21 @@ make run
 
 ## Build, Test, Bench
 
-| Command              | Purpose                                                                                        |
-| -------------------- | ---------------------------------------------------------------------------------------------- |
-| `make run`           | Build production Docker image and start the container                                          |
-| `make run-clean`     | Same but with `--no-cache` -- use when frontend source changed and Docker layer cache is stale |
-| `make stop`          | Stop the running container                                                                     |
-| `make dev`           | Build + run in foreground (logs to stdout)                                                     |
-| `make test`          | Run **both** backend and frontend test suites                                                  |
-| `make test-backend`  | Backend only: `cargo test --lib` (currently 197 unit tests)                                    |
-| `make test-frontend` | Frontend only: `vitest run` (currently 128 unit tests)                                         |
-| `make bench`         | Run criterion benches (`protocol`, `storage`, `decoder`)                                       |
-| `make format`        | Run every pre-commit hook over the repo; the formatters fix in place                           |
-| `make format-check`  | The same hooks; fails, showing the diff, when any of them changes a file (CI mode)             |
-| `make lint`          | Clippy with `-D warnings`, then ESLint, in Docker                                              |
-| `make smoke-boot`    | Boot the built image with `docker run` (no mounts) and check what it serves (CI runs it)       |
-| `make secret-scan`   | Scan the tree and SECRET_SCAN_RANGE commits for secrets with gitleaks (CI runs it)             |
+| Command              | Purpose                                                                                                         |
+| -------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `make run`           | Build production Docker image and start the container                                                           |
+| `make run-clean`     | Same but with `--no-cache` -- use when frontend source changed and Docker layer cache is stale                  |
+| `make stop`          | Stop the running container                                                                                      |
+| `make dev`           | Build + run in foreground (logs to stdout)                                                                      |
+| `make test`          | Run **both** backend and frontend test suites                                                                   |
+| `make test-backend`  | Backend only: `cargo test --lib` (currently 208 unit tests)                                                     |
+| `make test-frontend` | Frontend only: `vitest run` (currently 128 unit tests)                                                          |
+| `make bench`         | Run criterion benches (`protocol`, `storage`, `decoder`)                                                        |
+| `make format`        | Run every pre-commit hook over the repo; the formatters fix in place                                            |
+| `make format-check`  | The same hooks; fails, showing the diff, when any of them changes a file (CI mode)                              |
+| `make lint`          | Clippy with `-D warnings`, then ESLint, in Docker                                                               |
+| `make smoke-boot`    | Boot the built image in three launch modes and check health, privilege posture and bundled content (CI runs it) |
+| `make secret-scan`   | Scan the tree and SECRET_SCAN_RANGE commits for secrets with gitleaks (CI runs it)                              |
 
 Builds, tests and lint run inside Docker -- no local Rust or Node
 toolchain required. `make format` runs pre-commit on the host,
@@ -658,6 +705,12 @@ HTTPS:
    input and after `session_max_hours` in any case (see
    Authentication and Audit).
 
+Run the container as deploy/docker-compose.yml does: a read-only root
+filesystem, and every capability dropped but the three the entrypoint
+uses to hand over the data volume (`--read-only --cap-drop ALL
+--cap-add CHOWN --cap-add SETUID --cap-add SETGID` with `docker run`).
+The server itself runs as uid 10001 and keeps no capability.
+
 The session cookie is Secure by default, so browsers send it over
 HTTPS only (and over plain HTTP to `localhost`, for local testing). To
 serve plain HTTP on a trusted network instead, set
@@ -697,7 +750,8 @@ changelog section, merge, then tag `vX.Y.Z` on main and push the
 tag. The release workflow checks the tag against the declared
 version and the changelog before any build starts, builds the image
 natively for amd64 and arm64, boots each build with its bundled config
-and checks what it serves (`make smoke-boot`), builds it again with
+and checks what it serves and that the server runs unprivileged
+(`make smoke-boot`), builds it again with
 SBOM and provenance attestations to push it, stops unless the pushed
 image is the booted build (`tools/pushed-image-check.sh`), publishes
 the multi-arch manifest as

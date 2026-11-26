@@ -122,10 +122,12 @@ jobs:
 
       # The image is booted before anything is pushed. A push by digest
       # with attestations cannot also load the image into the runner's
-      # daemon, so this build loads it first. The push build below reuses
-      # this build's cached steps only while the Dockerfile's FROM tags
-      # resolve to the same images; on a tag, the step after the push
-      # checks that the pushed image is this build.
+      # daemon, so this build loads it first. The push build below runs
+      # the same Dockerfile again and reuses this build's cached steps
+      # when its inputs, base images included, resolve as they did here;
+      # on a tag, the step after the push compares the pushed image's
+      # config with this build's, so a release stops if the two builds
+      # differ for any reason.
       - name: Build the image for the smoke boot
         id: smoke_build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7

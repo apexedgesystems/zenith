@@ -9,9 +9,10 @@
 # Pinned toolchain: local `make lint` must mean exactly what CI means.
 # A floating tag skews by pull date -- CI builds fresh while local
 # images sit cached, so the same Dockerfile yields different clippy
-# versions. Bump deliberately (dependabot proposes updates); keep in
+# versions. The tag and its index digest are one pin (dependabot
+# proposes updates: a new tag, or a rebuilt tag's digest); keep it in
 # step with the backend stage in ../Dockerfile.
-FROM rust:1.100-bookworm
+FROM rust:1.100-bookworm@sha256:ade39a710ef85f3506cffcfec3e8a24ba090badef1dff2fb798f71d878833fea
 
 # Install Node.js 26 -- keep in step with the frontend stage in
 # ../Dockerfile (node:26-bookworm-slim): the node that runs tests
