@@ -616,7 +616,9 @@ async fn target_client(
 /// that fails after the answer takes the link down after a 200;
 /// /api/targets has the settled state. Once shutdown has begun, no
 /// connect is admitted, and one that completes afterwards is torn down
-/// and refused (503) instead of registering a router or polls.
+/// and refused (503) instead of registering a router or polls. A
+/// caller that waited for the link checks again once it holds it,
+/// so it never begins bring-up after shutdown began.
 ///
 /// The state check and the connect run under the client mutex (not
 /// the state guard): a concurrent connect serializes on the mutex and
@@ -645,6 +647,13 @@ async fn do_connect_target(
     };
 
     let mut cli = client.lock().await;
+    // A caller that waited here for the link, behind another connect,
+    // passed the entry check before shutdown may have begun: look
+    // again, under a short guard released before any bring-up.
+    let stopping = state.read().await.stopping;
+    if stopping {
+        return Ok(ConnectAnswer::Refused);
+    }
     // Up from our side (a live session, or a listener waiting for one):
     // nothing to bring up and no router to replace, and the state stays
     // what it was.
