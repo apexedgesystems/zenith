@@ -57,6 +57,57 @@ struct Cli {
     /// config.toml's [auth] password_hash, and exit.
     #[arg(long)]
     hash_password: bool,
+    /// Ask the server this config describes whether it serves: GET
+    /// /api/health from its front door, exit 0 on HTTP 200 and 1
+    /// otherwise (the container image's health check).
+    #[arg(long, conflicts_with = "hash_password")]
+    health_check: bool,
+}
+
+/// The `--health-check` exit code. The front door is the server's own
+/// listen address (`ServerSection::listen_addr`, from the config after
+/// ZENITH_PORT and from `--port`), dialled over the loopback of its
+/// family when it is unspecified; connect, write and read each give up
+/// after two seconds.
+fn health_check(cli: &Cli) -> i32 {
+    use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let config = match config::load(&cli.config) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("health check: config refused: {}", e);
+            return 1;
+        }
+    };
+    let addr = config::loopback_if_unspecified(config.server.listen_addr(cli.port));
+    let limit = Duration::from_secs(2);
+    let status_line = TcpStream::connect_timeout(&addr, limit).and_then(|mut stream| {
+        stream.set_read_timeout(Some(limit))?;
+        stream.set_write_timeout(Some(limit))?;
+        stream.write_all(
+            b"GET /api/health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+        )?;
+        let mut line = String::new();
+        BufReader::new(stream.take(1024)).read_line(&mut line)?;
+        Ok(line)
+    });
+    match status_line {
+        Ok(line) if line.starts_with("HTTP/1.") && line.split(' ').nth(1) == Some("200") => 0,
+        Ok(line) => {
+            eprintln!("health check: {} answered {:?}", addr, line.trim_end());
+            1
+        }
+        Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+            eprintln!("health check: {} gave no answer within {:?}", addr, limit);
+            1
+        }
+        Err(e) => {
+            eprintln!("health check: {}: {}", addr, e);
+            1
+        }
+    }
 }
 
 /// Authenticated principal for audit attribution, inserted by the auth
@@ -233,8 +284,9 @@ fn to_cmd_response(resp: crate::protocol::aproto::AckResponse) -> CommandRespons
 /// connection state with last-sample age. status is "degraded" only
 /// when the DB probe fails -- a disconnected target is operator data,
 /// not instance sickness (targets are legitimately offline in normal
-/// operation). Always 200 so the compose healthcheck validates the
-/// server is serving; the body carries the verdict.
+/// operation). Always 200, so the image's health check (`zenith
+/// --health-check`) passes while the server serves; the body carries the
+/// verdict.
 async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -4258,6 +4310,10 @@ async fn main() {
         }
     }
 
+    if cli.health_check {
+        std::process::exit(health_check(&cli));
+    }
+
     // A config that cannot be read or parsed refuses boot. The
     // alternative, a default server with no targets and auth off,
     // answers health checks and looks fine while serving nothing.
@@ -4280,16 +4336,9 @@ async fn main() {
         std::process::exit(1);
     }
 
-    let port = cli.port.unwrap_or(config.server.port);
-    // Honor the configured bind host instead of hardcoding 0.0.0.0.
-    // Falls back to 0.0.0.0 if the host string fails to parse so an
-    // operator typo can't accidentally make the server invisible.
-    let bind_ip: std::net::IpAddr = config
-        .server
-        .host
-        .parse()
-        .unwrap_or_else(|_| std::net::IpAddr::from([0, 0, 0, 0]));
-    let addr = SocketAddr::from((bind_ip, port));
+    // The configured bind host and port, --port over the port; the
+    // health check dials the same address (ServerSection::listen_addr).
+    let addr = config.server.listen_addr(cli.port);
 
     // Load global struct dictionaries (fallback for targets without their own)
     let global_dicts = if let Some(ref dir) = config.storage.structs_dir {
@@ -4305,6 +4354,18 @@ async fn main() {
         tracing::info!("No structs_dir configured, struct dictionaries not loaded");
         Arc::new(StructDictionary::default())
     };
+
+    // A target path the server cannot read for want of permission would
+    // otherwise read as absent: refuse, naming the path and the error.
+    if let Some((name, path, e)) = config::unreadable_target_path(&config.targets) {
+        eprintln!(
+            "FATAL: target '{}': cannot read '{}': {}",
+            name,
+            path.display(),
+            e
+        );
+        std::process::exit(1);
+    }
 
     // A mistyped target directory would otherwise produce a silently
     // featureless target: connected, decoding nothing by name.

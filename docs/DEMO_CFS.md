@@ -136,7 +136,7 @@ It logs "Awaiting enable command": a stock cFS is silent until the
 ground asks. Then zenith:
 
 ```bash
-docker run -d --name zenith --network host -v zenith-data:/var/lib/zenith \
+docker run -d --name zenith --network host --read-only -v zenith-data:/var/lib/zenith \
   ghcr.io/apexedgesystems/zenith:latest
 ```
 
