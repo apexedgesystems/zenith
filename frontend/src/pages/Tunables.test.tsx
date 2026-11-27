@@ -245,39 +245,58 @@ function wideHex(iWide: string, uWide: string): string {
   return bytesToHex(new Uint8Array(view.buffer));
 }
 
-/** Serve one component whose block reads, as JSON text, with `iWide`
- *  and `uWide` as the strings the server gives 8-byte integers in. */
-function serveWide(iWide: string, uWide: string): FetchStub {
-  const block =
-    `{"fullUid":"0x00C000","component":"Matrix","struct_name":"MatrixTprm",` +
-    `"fields":{"iWide":"${iWide}","uWide":"${uWide}","iWord":-70000},` +
-    `"raw_hex":"${wideHex(iWide, uWide)}","raw_length":20}`;
+/** Serve one component, uid 00C000: its block reads as the JSON text
+ *  `block`, and the struct route answers `structs`, or never when it is
+ *  null (the field types have not arrived). */
+function serveBlock(
+  component: string,
+  block: string,
+  structs: object | null,
+): FetchStub {
   return stubFetch(({ method, path }) => {
     if (method === "POST") return json({ status: 0, uploaded_bytes: 20 });
     if (path === "/api/targets/t1/registry") {
       return json({
         components: [
-          { fullUid: "0x00C000", name: "Matrix #0", reachable: true },
+          { fullUid: "0x00C000", name: `${component} #0`, reachable: true },
         ],
       });
     }
     if (path === "/api/targets/t1/params/00C000") return new Response(block);
-    if (path === "/api/targets/t1/structs/Matrix") {
-      return json({
-        structs: {
-          MatrixTprm: {
-            category: "TUNABLE_PARAM",
-            fields: [
-              { name: "iWide", type: "int", offset: 0, size: 8 },
-              { name: "uWide", type: "uint", offset: 8, size: 8 },
-              { name: "iWord", type: "int", offset: 16, size: 4 },
-            ],
-          },
-        },
-      });
+    if (path === `/api/targets/t1/structs/${component}`) {
+      return structs ? json(structs) : new Promise<Response>(() => {});
     }
     return undefined;
   });
+}
+
+const MATRIX_STRUCTS = {
+  structs: {
+    MatrixTprm: {
+      category: "TUNABLE_PARAM",
+      fields: [
+        { name: "iWide", type: "int", offset: 0, size: 8 },
+        { name: "uWide", type: "uint", offset: 8, size: 8 },
+        { name: "iWord", type: "int", offset: 16, size: 4 },
+      ],
+    },
+  },
+};
+
+/** Serve the block of an int64, a uint64 and an int32, with `iWide`
+ *  and `uWide` as the strings the server gives 8-byte integers in. */
+function serveWide(
+  iWide: string,
+  uWide: string,
+  structs: object | null = MATRIX_STRUCTS,
+): FetchStub {
+  return serveBlock(
+    "Matrix",
+    `{"fullUid":"0x00C000","component":"Matrix","struct_name":"MatrixTprm",` +
+      `"fields":{"iWide":"${iWide}","uWide":"${uWide}","iWord":-70000},` +
+      `"raw_hex":"${wideHex(iWide, uWide)}","raw_length":20}`,
+    structs,
+  );
 }
 
 /** Open the page on that block and wait for its field types. */
@@ -425,6 +444,164 @@ describe("Tunables 8-byte integers", () => {
       `{"fields":{"clockFrequencyHz":100,` +
         `"shutdownAtCycle":"18446744073709551615"},` +
         `"raw_hex":"64000000000000000000"}`,
+    );
+  });
+});
+
+/* A field whose type the form does not know: any field before the
+ * struct read answers, a nested leaf (the read expands a nested field
+ * into its leaves, the struct gives the field), a variable-length
+ * block's field. A typed integer past 2^53 goes as the text typed, as
+ * a number it would arrive rounded; anything else as before. */
+describe("Tunables fields of unknown type", () => {
+  const apply = () =>
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+  it.each([
+    "9007199254740993",
+    "-9007199254740993",
+    "9007199254740993.0",
+    "9.007199254740993e15",
+  ])(
+    "applies %s typed before the field types arrive as that text",
+    async (typed) => {
+      const server = serveWide(I0, U0, null);
+      renderWithQuery(<TunablesPage selectedTarget="t1" />);
+      await screen.findByDisplayValue(I0);
+      expect(screen.queryByText("int64")).toBeNull();
+      typeInto("iWide", typed);
+      apply();
+      await waitFor(() => expect(posted(server)).toHaveLength(1));
+      expect(posted(server)[0]).toBe(wideBody(typed, U0, wideHex(I0, U0)));
+    },
+  );
+
+  it("applies a typed 9007199254740993 to a nested leaf as that text", async () => {
+    const server = serveBlock(
+      "Rig",
+      `{"fullUid":"0x00C000","component":"Rig","struct_name":"RigTprm",` +
+        `"fields":{"rate":10,"limits.lo":"-8000000000"},` +
+        `"raw_hex":"0a0000b02923feffffff","raw_length":10}`,
+      {
+        structs: {
+          RigTprm: {
+            category: "TUNABLE_PARAM",
+            fields: [
+              { name: "rate", type: "uint", offset: 0, size: 2 },
+              {
+                name: "limits",
+                type: "nested",
+                struct: "RigLimits",
+                offset: 2,
+                size: 8,
+              },
+            ],
+          },
+          RigLimits: {
+            category: "STRUCT",
+            fields: [{ name: "lo", type: "int", offset: 0, size: 8 }],
+          },
+        },
+      },
+    );
+    renderWithQuery(<TunablesPage selectedTarget="t1" />);
+    await screen.findByText("uint16");
+    fireEvent.change(screen.getByDisplayValue("-8000000000"), {
+      target: { value: "9007199254740993" },
+    });
+    apply();
+    await waitFor(() => expect(posted(server)).toHaveLength(1));
+    expect(posted(server)[0]).toBe(
+      `{"fields":{"rate":10,"limits.lo":"9007199254740993"},` +
+        `"raw_hex":"0a0000b02923feffffff"}`,
+    );
+  });
+
+  /** Serve a variable-length block: a header count and one entry of a
+   *  slot and an 8-byte integer. */
+  const serveVarLen = () =>
+    serveBlock(
+      "Sched",
+      `{"fullUid":"0x00C000","component":"Sched",` +
+        `"struct_name":"SchedHeader + SchedEntry[]","variable_length":true,` +
+        `"fields":{"header":{"count":1},` +
+        `"entries":[{"slot":3,"wide":"-8000000000"}]},` +
+        `"raw_hex":"010300b02923feffffff","raw_length":10}`,
+      { structs: {} },
+    );
+
+  it("applies a typed 9007199254740993 to a variable-length block's entry as that text", async () => {
+    const server = serveVarLen();
+    renderWithQuery(<TunablesPage selectedTarget="t1" />);
+    fireEvent.change(await screen.findByDisplayValue("-8000000000"), {
+      target: { value: "9007199254740993" },
+    });
+    apply();
+    await waitFor(() => expect(posted(server)).toHaveLength(1));
+    expect(posted(server)[0]).toBe(
+      `{"fields":{"count":1},` +
+        `"entries":[{"slot":3,"wide":"9007199254740993"}],` +
+        `"variable_length":true,"raw_hex":"010300b02923feffffff"}`,
+    );
+  });
+
+  it("still applies a typed 1.5 or 42 as a number before the field types arrive", async () => {
+    const server = serveWide(I0, U0, null);
+    renderWithQuery(<TunablesPage selectedTarget="t1" />);
+    await screen.findByDisplayValue(I0);
+    fireEvent.change(screen.getByDisplayValue("-70000"), {
+      target: { value: "1.5" },
+    });
+    typeInto("uWide", "42");
+    apply();
+    await waitFor(() => expect(posted(server)).toHaveLength(1));
+    expect(posted(server)[0]).toBe(
+      `{"fields":{"iWide":"${I0}","uWide":42,"iWord":1.5},` +
+        `"raw_hex":"${wideHex(I0, U0)}"}`,
+    );
+  });
+
+  it("still applies a typed 42 or 1.5 to a variable-length block as a number", async () => {
+    const server = serveVarLen();
+    renderWithQuery(<TunablesPage selectedTarget="t1" />);
+    fireEvent.change(await screen.findByDisplayValue("1"), {
+      target: { value: "42" },
+    });
+    fireEvent.change(screen.getByDisplayValue("3"), {
+      target: { value: "1.5" },
+    });
+    apply();
+    await waitFor(() => expect(posted(server)).toHaveLength(1));
+    expect(posted(server)[0]).toBe(
+      `{"fields":{"count":42},` +
+        `"entries":[{"slot":1.5,"wide":"-8000000000"}],` +
+        `"variable_length":true,"raw_hex":"010300b02923feffffff"}`,
+    );
+  });
+
+  it("converts a value typed into a field known to be a float to a number, past 2^53 too", async () => {
+    const server = serveBlock(
+      "Gauge",
+      `{"fullUid":"0x00C000","component":"Gauge","struct_name":"GaugeTprm",` +
+        `"fields":{"ratio":0.5},"raw_hex":"0000003f","raw_length":4}`,
+      {
+        structs: {
+          GaugeTprm: {
+            category: "TUNABLE_PARAM",
+            fields: [{ name: "ratio", type: "float", offset: 0, size: 4 }],
+          },
+        },
+      },
+    );
+    renderWithQuery(<TunablesPage selectedTarget="t1" />);
+    await screen.findByText("float32");
+    fireEvent.change(screen.getByDisplayValue("0.5"), {
+      target: { value: "9007199254740993" },
+    });
+    apply();
+    await waitFor(() => expect(posted(server)).toHaveLength(1));
+    expect(posted(server)[0]).toBe(
+      `{"fields":{"ratio":9007199254740992},"raw_hex":"0000003f"}`,
     );
   });
 });

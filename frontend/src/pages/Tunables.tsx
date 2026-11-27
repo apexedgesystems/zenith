@@ -55,6 +55,26 @@ function isWideInteger(fi: FieldInfo | undefined): fi is FieldInfo {
   return fi?.size === 8 && (fi.type === "int" || fi.type === "uint");
 }
 
+/** A value typed into a field the form knows not to be an 8-byte
+ *  integer: the number it reads as, else the text. */
+function typedNumber(text: string): number | string {
+  const n = parseFloat(text);
+  return isNaN(n) ? text : n;
+}
+
+/** A value typed into a field whose type the form does not know: a
+ *  nested leaf, a variable-length block's field, or any field before
+ *  the struct read answers. As typedNumber, except that a value reading
+ *  as an integer past 2^53, which a double cannot hold exactly, goes as
+ *  the text typed, trimmed: as a number it would arrive rounded. The
+ *  server reads that text exactly for an 8-byte integer and refuses it,
+ *  naming the field, for a field that takes no string. */
+function untypedValue(text: string): number | string {
+  const n = parseFloat(text);
+  if (Number.isInteger(n) && !Number.isSafeInteger(n)) return text.trim();
+  return isNaN(n) ? text : n;
+}
+
 /* ----------------------------- Page ----------------------------- */
 
 export default function TunablesPage({
@@ -184,7 +204,8 @@ export default function TunablesPage({
    *  first typed value that cannot be sent. A field not typed into goes
    *  as read. A typed 8-byte integer goes as the decimal string of a
    *  whole number in its range, never through a double; any other typed
-   *  value goes as a number when it reads as one, else as typed. */
+   *  value as typedNumber, or untypedValue when the field's type is not
+   *  known. */
   const appliedFields = (
     read: Record<string, number | string>,
   ): { fields: Record<string, number | string> } | { refusal: string } => {
@@ -203,8 +224,7 @@ export default function TunablesPage({
         }
         fields[name] = n.toString();
       } else {
-        const n = parseFloat(text);
-        fields[name] = isNaN(n) ? text : n;
+        fields[name] = fi ? typedNumber(text) : untypedValue(text);
       }
     }
     return { fields };
@@ -575,14 +595,13 @@ export default function TunablesPage({
                         step="any"
                         value={value}
                         onChange={(e) => {
-                          const numVal = parseFloat(e.target.value);
                           setParams({
                             ...params,
                             fields: {
                               ...params.fields,
                               header: {
                                 ...params.fields.header,
-                                [name]: isNaN(numVal) ? e.target.value : numVal,
+                                [name]: untypedValue(e.target.value),
                               },
                             },
                           });
@@ -672,10 +691,7 @@ export default function TunablesPage({
                             step="any"
                             value={col === "fullUid" ? Number(val) : val}
                             onChange={(e) => {
-                              const numVal = parseFloat(e.target.value);
-                              const newVal = isNaN(numVal)
-                                ? e.target.value
-                                : numVal;
+                              const newVal = untypedValue(e.target.value);
                               setParams({
                                 ...params,
                                 fields: {
