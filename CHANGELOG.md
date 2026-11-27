@@ -19,10 +19,12 @@ architecture review; work before that is the v0.0.1 tag.
   digits as hex. Add the prefix to a hex value: `"D000"` is now refused
   with 400, and an all-digit string changes meaning (`"1000"` is now
   1000, not 0x1000). The console already sends `0x` strings.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - API clients: a socket ticket from `POST /api/auth/ws-ticket` opens the
   telemetry socket and nothing else. On another route's `?ticket=`, or
   sent as `Authorization: Bearer`, it is now refused with 401; send the
   bearer token there instead.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - Operators: values the console used to coerce are refused, naming the
   field, and nothing is sent. Command forms refuse a blank field, an
   integer that is not a whole decimal or `0x` number or does not fit its
@@ -32,6 +34,7 @@ architecture review; work before that is the v0.0.1 tag.
   than 0 or 1, and a float32 beyond its range (written as infinity).
   Enter a value the field holds; Raw Mode still sends a payload as
   typed in hex.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - The image runs zenith as an unprivileged user (uid 10001) instead of
   root; its entrypoint hands an existing data volume to that user on
   first start. Started as root, the container needs CAP_SETUID and
@@ -86,6 +89,7 @@ architecture review; work before that is the v0.0.1 tag.
   retention_hours` (other than 0) ends at or before `[storage.tiers]
   mid_horizon_hours`: telemetry is deleted before it reaches the coarse
   tier, which stays empty. The warning names both values.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 
 ### Changed
 
@@ -133,53 +137,72 @@ architecture review; work before that is the v0.0.1 tag.
 - `[storage] retention_hours = 0` keeps telemetry forever, as
   `audit_retention_days = 0` keeps the audit log, instead of deleting
   all of it every minute.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - Tunables reads int64 and bool fields as numbers instead of hex, and
   reads and writes a big-endian dictionary's fields in that byte order.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - Tunables applies a block holding arrays, strings or other fields it
   shows as hex: each field takes back the hex form it was read as, so an
   unedited block is written back byte for byte instead of the update
   being refused. A float that is not finite also reads as hex.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - `zenith --hash-password` hashes the password as typed, edge spaces
   included, as sign-in compares it; only the line ending is removed.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - An upload is checked as an RTS sequence only when it goes into a
   directory named `rts`, not whenever its path contains `rts/`
   (`parts/`), and the refusal reads without a run of spaces.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - Downsampling and the bearer-token login are audited: downsampling
   with the rows it converted, the login as a console sign-in is.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - Shutdown waits, up to 5 s, for each target's sample writer to write
   the samples it holds, instead of exiting with them unwritten.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - A trim with `count: 0` deletes nothing instead of a quarter of the
   target's samples.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - History queries over a window holding more samples than their limit
   return the newest ones, so a chart of a long window reaches the
   present instead of stopping at the limit's oldest samples. History
   and CSV export rows come in time order; CSV exports list the oldest
   row first.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - Tiered history no longer holds two points at one timestamp for a
   channel: a tier pass leaves the bucket its cutoff falls in for a
   later pass instead of writing it twice.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - After a dropped TM frame, a packet spanning three or more frames no
   longer yields bogus telemetry or swallows the next real packet:
   decoding resumes at the next frame in which a packet starts.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - A SLIP peer can no longer grow a frame past the 64 KiB bound with
   escaped bytes, and escaped bytes outside a frame are dropped.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - Socket tickets and bearer tokens are refused once expired, without
   the 60-second grace that let a 30-second ticket work for 90 seconds.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - An audit log request whose offset lies past the end returns no rows
   instead of the first page.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - The Telemetry page reads Live only while samples arrive and the link
   is up: a link reported down, or a stream silent for 10 s, shows Off,
   Listening or No data instead.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - Tunables shows and applies only the selected component's values: a
   slow read of the component left behind no longer replaces them, and
   Apply writes to the component the values were read from.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - The chart's hover readout shows no value for a channel before its
   first sample or after its last, instead of extrapolating one.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - Dashboard health cards for individual components load: the console
   asks for them with the uid and opcode in the hex form the command
   route reads.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - A library swap whose file cannot be read is logged as failed on the
   Operations page instead of staying pending.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - UDP targets show listening until first contact, and TCP targets no
   longer falsely remain connected after an immediate hangup or a
   disconnect racing an incoming session. Clients of the connect
