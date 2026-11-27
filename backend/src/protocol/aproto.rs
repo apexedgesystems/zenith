@@ -14,11 +14,8 @@
 //!
 //! This module is the canonical Rust mirror of apex's `AprotoTypes.hpp`.
 //! Many constants below are part of the apex protocol surface but not
-//! currently consumed by zenith -- the module-level `allow(dead_code)`
-//! keeps the full protocol definition compiled for documentation and
-//! future use.
-
-#![allow(dead_code)]
+//! currently consumed by zenith; the library exports them all, so the
+//! full protocol definition stays in one place.
 
 use serde::Serialize;
 

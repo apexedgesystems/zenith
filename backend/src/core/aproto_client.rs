@@ -370,9 +370,7 @@ impl AprotoClient {
     /// Override the ACK/command timeout (applies to connections made
     /// after the call; the writer task captures it at connect time).
     /// The server binary uses the 5 s default; the fake-target tests
-    /// shorten it. allow(dead_code) because the bin target compiles
-    /// this module too and does not call it.
-    #[allow(dead_code)]
+    /// shorten it.
     pub fn set_command_timeout(&mut self, timeout: Duration) {
         self.command_timeout = timeout;
     }

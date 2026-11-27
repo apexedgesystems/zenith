@@ -279,14 +279,11 @@ impl TelemetryDecoder {
 
     /// Decode a push telemetry packet into named samples; a refused
     /// packet (see [`Self::decode_checked`]) yields none. The router
-    /// calls `decode_checked` to count refusals; allow(dead_code)
-    /// because the bin target compiles this module too and calls only
-    /// that.
+    /// calls `decode_checked` to count refusals.
     ///
     /// `target_id` is taken as `&Arc<str>` so the caller can hand us
     /// a stable reference; the Arc is cloned into each emitted
     /// sample (no allocation).
-    #[allow(dead_code)]
     pub fn decode(
         &self,
         target_id: &Arc<str>,

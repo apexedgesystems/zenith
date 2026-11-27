@@ -349,9 +349,8 @@ fn bench_decoder_construction(c: &mut Criterion) {
 
     group.bench_function("build_3_components", |b| {
         b.iter(|| {
-            // We can't construct TelemetryDecoder directly (private),
-            // so this measures the spawn_router setup cost approximately
-            // by recreating the same work via the public API path.
+            // The setup spawn_router pays once per connect: building the
+            // decoder's lookup tables from the dictionaries.
             let _ = black_box(zenith::core::telemetry::TelemetryDecoder::new(
                 &dict, &uid_refs,
             ));

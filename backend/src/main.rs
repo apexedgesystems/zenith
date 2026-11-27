@@ -172,7 +172,6 @@ struct TargetState {
 }
 
 struct SharedState {
-    #[allow(dead_code)]
     config: ServerConfig,
     targets: HashMap<String, TargetState>,
     db: Arc<TelemetryDb>,
@@ -348,11 +347,6 @@ async fn server_version() -> Json<serde_json::Value> {
     }))
 }
 
-/// Snapshot a target's client handle and the audit DB under a short
-/// read guard. Callers do target I/O only AFTER this returns: tokio's
-/// RwLock is writer-preferring, so a guard held across an APROTO round
-/// trip (worst case a multi-thousand-RTT file upload) parks the next
-/// writer and stalls every request behind it.
 /// Build the link a target's declared protocol asks for.
 fn build_link(
     protocol: Protocol,
@@ -661,6 +655,11 @@ fn path_uid(uid: &str) -> Result<u32, (StatusCode, String)> {
         .map_err(|_| (StatusCode::BAD_REQUEST, format!("Invalid fullUid: {}", uid)))
 }
 
+/// Snapshot a target's client handle and the audit DB under a short
+/// read guard. Callers do target I/O only AFTER this returns: tokio's
+/// RwLock is writer-preferring, so a guard held across an APROTO round
+/// trip (worst case a multi-thousand-RTT file upload) parks the next
+/// writer and stalls every request behind it.
 async fn target_client(
     state: &AppState,
     id: &str,
@@ -2691,7 +2690,7 @@ async fn telemetry_csv(
     drop(st);
 
     // Query AND row formatting both belong on the blocking pool: at
-    // the 100k-row limit the string build alone is milliseconds.
+    // the 200k-row limit the string build alone is milliseconds.
     let limit = query.clamped_limit();
     let target = id.clone();
     let csv = db_blocking(db, move |db| {
@@ -3900,7 +3899,8 @@ fn record_audit(
 /// when auth is disabled in config (the default for development).
 ///
 /// Whitelisted paths bypass auth: `/api/auth/login` (otherwise nobody could
-/// log in) and `/api/health` (used by load balancers and `make health`).
+/// log in) and `/api/health` (used by load balancers and the image's
+/// health check, `zenith --health-check`).
 /// Signing in and out at `/api/auth/session` need no live credential.
 async fn auth_middleware(
     State(state): State<AppState>,
@@ -4025,10 +4025,11 @@ fn opens_telemetry_socket(path: &str) -> bool {
 
 /* ----------------------------- Rate Limiting ----------------------------- */
 
-/// A simple per-IP token bucket for command-emitting endpoints. Not a
-/// production-grade solution -- the in-memory map grows unbounded if
-/// many distinct IPs hit the server -- but adequate for the MVP.
-/// Replace with `tower_governor` for production deployment.
+/// A per-IP token bucket for every POST under /api while auth is on: a
+/// burst of RATE_LIMIT_BURST, refilled at RATE_LIMIT_PER_SEC. Once the
+/// map holds 4096 addresses, each check first evicts the buckets idle
+/// long enough to be full again, so it outgrows that only while more
+/// addresses than that are active at once.
 #[derive(Default)]
 struct RateLimiter {
     buckets: tokio::sync::Mutex<HashMap<std::net::IpAddr, TokenBucket>>,
@@ -4227,7 +4228,7 @@ fn build_router(state: AppState, cors_origins: &[String], upload_max_mb: u32) ->
         ))
         .layer(cors)
         // Span carries method + path only: query strings are excluded
-        // deliberately (WebSocket auth falls back to a ?token= query
+        // deliberately (a socket ticket rides the ?ticket= query
         // parameter, which must never reach the request logs).
         .layer(TraceLayer::new_for_http().make_span_with(
             |req: &axum::http::Request<axum::body::Body>| {

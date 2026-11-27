@@ -59,9 +59,7 @@ pub fn parse_header(b: &[u8]) -> Option<SppHeader> {
 }
 
 /// Pack a telemetry packet (version 0, unsegmented). The fake-target
-/// tests and any future command path share this one packer; compiled
-/// for the full surface although the server binary does not call it.
-#[allow(dead_code)]
+/// tests and any future command path share this one packer.
 pub fn pack(apid: u16, seq_count: u16, payload: &[u8]) -> Vec<u8> {
     let apid = apid & 0x07FF;
     let seq = seq_count & 0x3FFF;
