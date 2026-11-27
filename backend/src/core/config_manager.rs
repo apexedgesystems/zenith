@@ -1368,6 +1368,177 @@ mod nested_tests {
         assert_eq!(names, vec![("outer.mid.deepest", "nested")]);
     }
 
+    /// @test Parameter decode over a synthetic dictionary. A fixed block
+    /// decodes each field by its declared (type, size), little-endian --
+    /// unsigned, signed and float widths, both float spellings -- with a
+    /// nested field read as its fragment's leaves, a type no numeric arm
+    /// reads as hex, and a field past the data left out. A header +
+    /// entries block of 1 + 2N bytes decodes as the header whose count
+    /// field equals N, then its N entries; a length no (header, entry)
+    /// pair explains, or another category, decodes as nothing.
+    #[test]
+    fn parameter_blocks_decode_by_the_dictionary() {
+        let mut pair_ref = f("pair", "nested", 46, 4);
+        pair_ref.struct_ref = Some("Pair".to_string());
+        let tunable = |size: usize, fields: Vec<FieldDef>| StructDef {
+            category: "TUNABLE_PARAM".to_string(),
+            size,
+            opcode: None,
+            fields,
+            layout_hash: None,
+            canonical_spec: None,
+            packed: None,
+        };
+        let pair = StructDef {
+            category: "STRUCT".to_string(),
+            ..tunable(4, vec![f("lo", "uint", 0, 2), f("hi", "uint", 2, 2)])
+        };
+        let gain = tunable(
+            54,
+            vec![
+                f("u8", "uint", 0, 1),
+                f("u16", "uint", 1, 2),
+                f("u32", "uint", 3, 4),
+                f("u64", "uint", 7, 8),
+                f("i8", "int", 15, 1),
+                f("i16", "int", 16, 2),
+                f("i32", "int", 18, 4),
+                f("f32", "float", 22, 4),
+                f("f64", "float", 26, 8),
+                f("d64", "double", 34, 8),
+                f("tag", "string", 42, 4),
+                pair_ref,
+                f("late", "uint", 50, 4),
+            ],
+        );
+        let comp = |name: &str, structs: Vec<(&str, StructDef)>| ComponentDict {
+            component: name.to_string(),
+            byte_order: None,
+            structs: structs
+                .into_iter()
+                .map(|(n, s)| (n.to_string(), s))
+                .collect(),
+            enums: HashMap::new(),
+            capabilities: Vec::new(),
+        };
+        let dicts = StructDictionary {
+            components: HashMap::from([
+                (
+                    "Gain".to_string(),
+                    comp("Gain", vec![("Gains", gain), ("Pair", pair)]),
+                ),
+                (
+                    "Ctl".to_string(),
+                    comp(
+                        "Ctl",
+                        vec![
+                            ("Header", tunable(1, vec![f("count", "uint", 0, 1)])),
+                            ("Entry", tunable(2, vec![f("a", "uint", 0, 2)])),
+                        ],
+                    ),
+                ),
+            ]),
+        };
+
+        let mut data = vec![200u8];
+        data.extend_from_slice(&0x1234u16.to_le_bytes());
+        data.extend_from_slice(&70_000u32.to_le_bytes());
+        data.extend_from_slice(&(1u64 << 40).to_le_bytes());
+        data.extend_from_slice(&(-5i8).to_le_bytes());
+        data.extend_from_slice(&(-300i16).to_le_bytes());
+        data.extend_from_slice(&(-70_000i32).to_le_bytes());
+        data.extend_from_slice(&1.5f32.to_le_bytes());
+        data.extend_from_slice(&(-0.25f64).to_le_bytes());
+        data.extend_from_slice(&2.0f64.to_le_bytes());
+        data.extend_from_slice(b"abcd");
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&2u16.to_le_bytes());
+        // 50 bytes: `late` (50..54) lies past the data.
+        assert_eq!(data.len(), 50);
+        assert_eq!(
+            dicts.decode_payload("Gain", "Gains", &data),
+            Some(serde_json::json!({
+                "u8": 200, "u16": 0x1234, "u32": 70_000, "u64": 1u64 << 40,
+                "i8": -5, "i16": -300, "i32": -70_000,
+                "f32": 1.5, "f64": -0.25, "d64": 2.0,
+                "tag": "61626364", "pair.lo": 1, "pair.hi": 2,
+            }))
+        );
+        assert_eq!(dicts.decode_payload("Gain", "Nope", &data), None);
+
+        let table = [3u8, 1, 0, 2, 0, 3, 1];
+        assert_eq!(
+            dicts.decode_variable_length_for("TUNABLE_PARAM", &table, Some("Ctl")),
+            Some((
+                "Ctl".to_string(),
+                "Header".to_string(),
+                "Entry".to_string(),
+                serde_json::json!({
+                    "header": {"count": 3},
+                    "entries": [{"a": 1}, {"a": 2}, {"a": 259}],
+                })
+            ))
+        );
+        assert_eq!(
+            dicts.decode_variable_length_for("TUNABLE_PARAM", &[2, 1, 0, 9], Some("Ctl")),
+            None,
+            "1 + 2N fits no 4-byte block"
+        );
+        assert_eq!(
+            dicts.decode_variable_length_for("STATE", &table, Some("Ctl")),
+            None
+        );
+    }
+
+    /// @test A record table refuses each malformed definition by name,
+    /// so a broken table fails at load instead of decoding values under
+    /// the wrong channel: an id width other than 2 or 4, an id field
+    /// past the header, no records, a record id declared twice, a
+    /// record with no channel name or zero size, and a record APID that
+    /// is not a number. The well-formed table loads.
+    #[test]
+    fn record_table_refuses_each_malformed_definition() {
+        let table = |id_size: usize, id_offset: usize, apid: &str, records: &str| {
+            serde_json::from_str::<RecordTable>(&format!(
+                r#"{{"record_apid": "{apid}", "id_offset": {id_offset}, "id_size": {id_size},
+                     "header_size": 6, "records": [{records}]}}"#
+            ))
+            .unwrap()
+        };
+        let record = |channel: &str, size: usize| {
+            format!(r#"{{"id": 1, "channel": "{channel}", "type": "uint", "size": {size}}}"#)
+        };
+        let one = record("a.b", 4);
+        assert!(table(4, 2, "0x001", &one).validate().is_ok());
+        for (bad, why) in [
+            (table(3, 2, "0x001", &one), "id_size 3 is not 2 or 4"),
+            (
+                table(4, 3, "0x001", &one),
+                "id field (3+4) does not fit in the 6-byte header",
+            ),
+            (table(4, 2, "0x001", ""), "no records declared"),
+            (
+                table(4, 2, "0x001", &format!("{one}, {one}")),
+                "record id 1 declared twice",
+            ),
+            (
+                table(4, 2, "0x001", &record(" ", 4)),
+                "record id 1 has no channel name",
+            ),
+            (
+                table(4, 2, "0x001", &record("a.b", 0)),
+                "channel 'a.b' has zero size",
+            ),
+            (
+                table(4, 2, "tlm", &one),
+                "record_apid 'tlm' is not a number",
+            ),
+        ] {
+            let e = bad.validate().unwrap_err();
+            assert!(e.contains(why), "{e}");
+        }
+    }
+
     /// @test A byte_order stamp is evidence, so only the two
     /// generator spellings load: a record table or struct dictionary
     /// with any other value is refused by name instead of decoding

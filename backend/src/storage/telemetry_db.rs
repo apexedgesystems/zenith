@@ -2723,6 +2723,152 @@ mod tests {
         assert!(recent.iter().all(|s| s.envelope.is_none()));
     }
 
+    /// @test A database a v0.2.0 server wrote, whose layouts table has no
+    /// position column, opens: the column is added in place, the saved
+    /// layout and its plot read back whole, and the next config seed
+    /// orders by the new column.
+    #[test]
+    fn layouts_table_without_position_opens_with_its_layouts() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("v020.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            // The v0.2.0 layout tables, as that release created them.
+            conn.execute_batch(
+                "CREATE TABLE telemetry_layouts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    target_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'user',
+                    grid TEXT NOT NULL DEFAULT '1x1',
+                    time_window_s INTEGER DEFAULT 30,
+                    created_at INTEGER NOT NULL,
+                    UNIQUE(target_id, name)
+                );
+                CREATE TABLE telemetry_plots (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    layout_id INTEGER NOT NULL REFERENCES telemetry_layouts(id) ON DELETE CASCADE,
+                    title TEXT NOT NULL,
+                    channels TEXT NOT NULL,
+                    height INTEGER NOT NULL DEFAULT 180,
+                    position_row INTEGER NOT NULL DEFAULT 0,
+                    position_col INTEGER NOT NULL DEFAULT 0,
+                    y_min REAL,
+                    y_max REAL,
+                    y_label TEXT,
+                    thresholds TEXT
+                );
+                INSERT INTO telemetry_layouts (target_id, name, source, grid, time_window_s, created_at)
+                    VALUES ('target-0', 'Ops', 'user', '2x1', 60, 1);
+                INSERT INTO telemetry_plots (layout_id, title, channels, height, position_row, position_col, y_min)
+                    VALUES (1, 'Rates', '[\"A.x\",\"A.y\"]', 200, 0, 0, -1.0);",
+            )
+            .unwrap();
+        }
+
+        let db = TelemetryDb::open(&path).unwrap();
+        let layouts = db.get_layouts("target-0").unwrap();
+        assert_eq!(layouts.len(), 1);
+        let ops = &layouts[0];
+        assert_eq!(
+            (
+                ops.name.as_str(),
+                ops.source.as_str(),
+                ops.grid.as_str(),
+                ops.time_window_s
+            ),
+            ("Ops", "user", "2x1", 60)
+        );
+        assert_eq!(ops.plots.len(), 1);
+        assert_eq!(ops.plots[0].title, "Rates");
+        assert_eq!(ops.plots[0].channels, vec!["A.x", "A.y"]);
+        assert_eq!((ops.plots[0].height, ops.plots[0].y_min), (200, Some(-1.0)));
+
+        db.seed_layouts(
+            "target-0",
+            &telemetry_config(&[("Second", &["B.z"]), ("First", &["B.w"])]),
+        )
+        .unwrap();
+        let names: Vec<String> = db
+            .get_layouts("target-0")
+            .unwrap()
+            .into_iter()
+            .map(|l| l.name)
+            .collect();
+        assert_eq!(names, ["Ops", "Second", "First"], "file order, by position");
+    }
+
+    /// @test Retention prune deletes the telemetry older than now minus
+    /// the retention window, and the latest values older than it, and
+    /// keeps everything newer: under a one-hour window a channel last
+    /// heard two hours ago is gone from both tables, while a channel
+    /// heard ten minutes ago loses only its two-hour-old sample.
+    #[test]
+    fn prune_deletes_what_is_older_than_the_retention_window() {
+        const MIN: u64 = 60_000;
+        let (_dir, db) = open_temp_db();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        let t: Arc<str> = Arc::from("t1");
+        let gone: Arc<str> = Arc::from("Old.x");
+        let live: Arc<str> = Arc::from("New.y");
+        db.insert_batch(&[
+            sample(&t, &gone, now - 180 * MIN, 1.0),
+            sample(&t, &gone, now - 120 * MIN, 2.0),
+            sample(&t, &live, now - 120 * MIN, 3.0),
+            sample(&t, &live, now - 10 * MIN, 4.0),
+        ])
+        .unwrap();
+
+        assert_eq!(db.prune(60 * MIN).unwrap(), 3);
+        let window = |ch: &str| {
+            db.query_range("t1", Some(ch), 0, now, 10)
+                .unwrap()
+                .into_iter()
+                .map(|s| (s.timestamp_ms, s.value))
+                .collect::<Vec<_>>()
+        };
+        assert!(window("Old.x").is_empty());
+        assert_eq!(window("New.y"), [(now - 10 * MIN, 4.0)]);
+        let latest: Vec<(String, u64)> = db
+            .query_latest("t1")
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.channel.to_string(), s.timestamp_ms))
+            .collect();
+        assert_eq!(latest, [("New.y".to_string(), now - 10 * MIN)]);
+    }
+
+    /// @test The tier pass buckets each channel on its own: two channels
+    /// sampled over the same second get one envelope bucket each, with
+    /// their own mean, min, max and count -- the channels' spreads are
+    /// never merged.
+    #[test]
+    fn tier_pass_keeps_each_channel_in_its_own_buckets() {
+        let (_dir, db) = open_temp_db();
+        let t: Arc<str> = Arc::from("t1");
+        let x: Arc<str> = Arc::from("X");
+        let y: Arc<str> = Arc::from("Y");
+        let mut samples: Vec<TelemetrySample> = (0..10u64)
+            .map(|i| sample(&t, &x, i * 100, i as f64))
+            .collect();
+        samples.extend((0..5u64).map(|i| sample(&t, &y, i * 200, 100.0 + i as f64)));
+        db.insert_batch(&samples).unwrap();
+
+        let pass = db.tier_pass(MID_TIER, 1_000, 1_000, u64::MAX).unwrap();
+        assert_eq!((pass.source_rows, pass.bucket_rows), (15, 2));
+        let bucket = |ch: &str| {
+            let rows = db.query_range("t1", Some(ch), 0, 1_000, 10).unwrap();
+            assert_eq!(rows.len(), 1, "{ch}: one bucket");
+            let env = rows[0].envelope.unwrap();
+            (rows[0].value, env.min, env.max, env.count)
+        };
+        assert_eq!(bucket("X"), (4.5, 0.0, 9.0, 10));
+        assert_eq!(bucket("Y"), (102.0, 100.0, 104.0, 5));
+    }
+
     /// @test Preference round trip: set, read back, overwrite,
     /// list within (scope, kind), delete -- with scopes isolated.
     #[test]

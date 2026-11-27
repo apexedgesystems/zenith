@@ -238,22 +238,61 @@ mod tests {
         assert_eq!(validate_token(&ticket, SECRET, true).unwrap(), "ops");
     }
 
-    /// @test Tokens without required claims are rejected (a token
-    /// signed correctly but missing sub).
+    /// @test A token signed with the right secret is still refused when
+    /// it lacks a required claim -- no sub, or no exp (a token that
+    /// would never expire) -- or when it was signed with any algorithm
+    /// but HS256, including an unsigned "none" token; the same claims
+    /// signed HS256 pass.
     #[test]
-    fn missing_sub_rejected() {
-        let token = jsonwebtoken::encode(
-            &jsonwebtoken::Header::default(),
-            &serde_json::json!({ "exp": now() + 1000 }),
-            &jsonwebtoken::EncodingKey::from_secret(SECRET.as_bytes()),
-        )
-        .unwrap();
-        assert!(validate_token(&token, SECRET, false).is_err());
+    fn tokens_missing_a_claim_or_signed_otherwise_are_refused() {
+        use base64::Engine;
+        use jsonwebtoken::{Algorithm, EncodingKey, Header};
+        let sign = |alg: Algorithm, claims: serde_json::Value| {
+            jsonwebtoken::encode(
+                &Header::new(alg),
+                &claims,
+                &EncodingKey::from_secret(SECRET.as_bytes()),
+            )
+            .unwrap()
+        };
+        let full = serde_json::json!({ "sub": "ops", "exp": now() + 1000 });
+        assert_eq!(
+            validate_token(&sign(Algorithm::HS256, full.clone()), SECRET, false).unwrap(),
+            "ops"
+        );
+
+        let b64 = |v: serde_json::Value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string())
+        };
+        let unsigned = format!(
+            "{}.{}.",
+            b64(serde_json::json!({ "alg": "none", "typ": "JWT" })),
+            b64(full.clone())
+        );
+        for (token, why) in [
+            (
+                sign(Algorithm::HS256, serde_json::json!({ "exp": now() + 1000 })),
+                "no sub",
+            ),
+            (
+                sign(Algorithm::HS256, serde_json::json!({ "sub": "ops" })),
+                "no exp",
+            ),
+            (sign(Algorithm::HS384, full.clone()), "HS384"),
+            (sign(Algorithm::HS512, full.clone()), "HS512"),
+            (unsigned, "alg none"),
+        ] {
+            assert!(
+                validate_token(&token, SECRET, false).is_err(),
+                "{why}: accepted"
+            );
+        }
     }
 
     /// @test Boot validation: disabled auth is always fine; enabled
-    /// auth refuses the default secret, an empty hash and a malformed
-    /// hash, each by its own error -- and passes a proper configuration.
+    /// auth refuses the default secret, a short secret that is not the
+    /// default, an empty hash and a malformed hash, each by its own
+    /// error -- and passes a proper configuration.
     #[test]
     fn boot_validation_covers_each_misconfiguration() {
         use crate::config::AuthSection;
@@ -284,6 +323,10 @@ mod tests {
 
         auth.password_hash = good_hash;
         assert!(boot_errors(&auth).is_empty(), "proper config passes");
+
+        auth.secret = "fifteen-chars-x".into();
+        assert_eq!(auth.secret.len(), 15);
+        assert_eq!(boot_errors(&auth), [SECRET_ERR], "a short secret");
     }
 
     /// @test Session limits: an absolute limit of zero and an idle limit

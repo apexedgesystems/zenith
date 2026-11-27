@@ -899,6 +899,66 @@ mod tests {
         assert!(!client.is_connected());
     }
 
+    /// A SLIP-encoded packet as a target would send it: any flags, uid,
+    /// opcode and payload.
+    fn target_packet(flags: u8, full_uid: u32, opcode: u16, payload: &[u8]) -> Vec<u8> {
+        let mut pkt = Vec::with_capacity(aproto::HEADER_SIZE + payload.len());
+        pkt.extend_from_slice(&aproto::MAGIC.to_le_bytes());
+        pkt.push(aproto::VERSION);
+        pkt.push(flags);
+        pkt.extend_from_slice(&full_uid.to_le_bytes());
+        pkt.extend_from_slice(&opcode.to_le_bytes());
+        pkt.extend_from_slice(&0u16.to_le_bytes());
+        pkt.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+        pkt.extend_from_slice(payload);
+        slip::encode(&pkt)
+    }
+
+    /// @test The reader routes each response by its kind: a response
+    /// that is neither ACK nor NAK is telemetry and goes to the push
+    /// channel with its uid and payload, a packet without the response
+    /// flag is skipped, and a NAK reaches the command waiting for it
+    /// with its status, never the push channel.
+    #[tokio::test]
+    async fn reader_routes_telemetry_to_push_and_a_nak_to_its_command() {
+        let addr = spawn_fake_target(|pkt| {
+            let mut nak = Vec::new();
+            nak.extend_from_slice(&pkt.header.opcode.to_le_bytes());
+            nak.extend_from_slice(&pkt.header.sequence.to_le_bytes());
+            nak.extend_from_slice(&[aproto::NAK_COMPONENT_NOT_FOUND, aproto::STAGE_RESULT, 0, 0]);
+            let mut reply = target_packet(0, 0x00D000, 0x0300, &[9, 9]);
+            reply.extend(target_packet(
+                aproto::FLAG_RESPONSE,
+                0x00D000,
+                0x0300,
+                &[1, 2, 3, 4],
+            ));
+            reply.extend(target_packet(
+                aproto::FLAG_RESPONSE,
+                0,
+                aproto::SYS_NAK,
+                &nak,
+            ));
+            reply
+        })
+        .await;
+        let (mut client, mut push_rx) = connected_client(addr, 1000).await;
+
+        let resp = client.noop().await.unwrap();
+        assert_eq!(resp.status, aproto::NAK_COMPONENT_NOT_FOUND);
+        assert_eq!(resp.status_name, "COMPONENT_NOT_FOUND");
+        let pkt = timeout(Duration::from_secs(1), push_rx.recv())
+            .await
+            .expect("the telemetry response was pushed")
+            .unwrap();
+        assert_eq!((pkt.full_uid, pkt.payload), (0x00D000, vec![1, 2, 3, 4]));
+        assert!(pkt.category.is_none());
+        assert!(
+            push_rx.try_recv().is_err(),
+            "the non-response and the NAK pushed nothing"
+        );
+    }
+
     /// @test Sending without a connection returns NotConnected.
     #[tokio::test]
     async fn send_without_connection_is_not_connected() {

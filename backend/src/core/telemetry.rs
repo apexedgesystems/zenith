@@ -816,11 +816,49 @@ mod tests {
     /// @test Each scalar decodes in the byte order its dictionary
     /// declares: the same field specs read big-endian wire bytes under
     /// a "be" stamp and little-endian bytes under none (every existing
-    /// dictionary is valid unchanged), for unsigned, signed and float
-    /// values of four and eight bytes and a two-byte signed value.
+    /// dictionary is valid unchanged), for every (type, size) the
+    /// decoder reads -- unsigned and signed integers of one, two, four
+    /// and eight bytes, floats of four and eight, and a one-byte bool
+    /// read as 0 or 1.
     #[test]
     fn scalar_values_decode_in_the_dictionary_byte_order() {
         let scalars = [
+            Scalar {
+                ty: "uint",
+                le: vec![200],
+                be: vec![200],
+                value: 200.0,
+            },
+            Scalar {
+                ty: "uint",
+                le: 0x1234u16.to_le_bytes().into(),
+                be: 0x1234u16.to_be_bytes().into(),
+                value: 4660.0,
+            },
+            Scalar {
+                ty: "int",
+                le: (-5i8).to_le_bytes().into(),
+                be: (-5i8).to_be_bytes().into(),
+                value: -5.0,
+            },
+            Scalar {
+                ty: "int",
+                le: (-70_000i32).to_le_bytes().into(),
+                be: (-70_000i32).to_be_bytes().into(),
+                value: -70_000.0,
+            },
+            Scalar {
+                ty: "bool",
+                le: vec![7],
+                be: vec![7],
+                value: 1.0,
+            },
+            Scalar {
+                ty: "bool",
+                le: vec![0],
+                be: vec![0],
+                value: 0.0,
+            },
             Scalar {
                 ty: "uint",
                 le: 258u32.to_le_bytes().into(),
@@ -865,6 +903,53 @@ mod tests {
             .collect();
         for stamp in [Some("be"), None] {
             assert_eq!(decode_scalars(&scalars, stamp), want, "stamp {stamp:?}");
+        }
+    }
+
+    /// @test A value the decoder cannot read as a number drops only its
+    /// own sample: a non-finite float of either width, and a (type,
+    /// size) pair no numeric arm reads, while the fields around them
+    /// still decode.
+    #[test]
+    fn unreadable_scalars_drop_only_their_sample() {
+        let scalars = [
+            Scalar {
+                ty: "uint",
+                le: vec![9],
+                be: vec![9],
+                value: 9.0,
+            },
+            Scalar {
+                ty: "float",
+                le: f32::NAN.to_le_bytes().into(),
+                be: f32::NAN.to_be_bytes().into(),
+                value: f64::NAN,
+            },
+            Scalar {
+                ty: "float",
+                le: f64::INFINITY.to_le_bytes().into(),
+                be: f64::INFINITY.to_be_bytes().into(),
+                value: f64::INFINITY,
+            },
+            Scalar {
+                ty: "uint",
+                le: vec![1, 2, 3],
+                be: vec![3, 2, 1],
+                value: 0.0,
+            },
+            Scalar {
+                ty: "uint",
+                le: vec![8],
+                be: vec![8],
+                value: 8.0,
+            },
+        ];
+        for stamp in [Some("be"), None] {
+            assert_eq!(
+                decode_scalars(&scalars, stamp),
+                [("Wire.v0".to_string(), 9.0), ("Wire.v4".to_string(), 8.0)],
+                "stamp {stamp:?}"
+            );
         }
     }
 
