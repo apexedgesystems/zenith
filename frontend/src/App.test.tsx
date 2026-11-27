@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { json, renderWithQuery, stubFetch, target } from "./test/helpers";
@@ -210,5 +210,59 @@ describe("App sidebar link state", () => {
     ).toBeInTheDocument();
     expect(screen.getByTitle("Connected")).toBeInTheDocument();
     expect(screen.getByTitle("Disconnected")).toBeInTheDocument();
+  });
+});
+
+/* The auto-reconnect loop: every 5 s it reads the target list itself
+ * and sends connect for each flagged target that is down, at most once
+ * per 10 s per target. A listening link waits for its peer, so it is
+ * never sent one; each redundant connect would kick a live link. */
+describe("App auto-reconnect", () => {
+  afterEach(() => {
+    localStorage.removeItem("zenith.autoReconnect");
+  });
+
+  it("connects a down target once per cooldown and never a listening one", async () => {
+    vi.useFakeTimers();
+    localStorage.setItem(
+      "zenith.autoReconnect",
+      JSON.stringify({ "target-0": true, "target-1": true }),
+    );
+    const { calls } = await renderApp((method, path) => {
+      if (path.startsWith("/api/auth/")) return json({ auth_enabled: false });
+      if (path === "/api/targets") {
+        return json({
+          targets: [
+            target({ id: "target-0" }),
+            target({ id: "target-1", listening: true }),
+          ],
+        });
+      }
+      if (method === "POST" && path.endsWith("/connect")) {
+        return json({ status: "connecting" });
+      }
+      return data(path);
+    });
+    const connects = () => calls().filter((c) => c.endsWith("/connect"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0); // the session answers: auth off
+    });
+    expect(screen.getByRole("link", { name: "Dashboard" })).toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_100); // first tick
+    });
+    expect(connects()).toEqual(["POST /api/targets/target-0/connect"]);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000); // second tick, 5 s later
+    });
+    expect(connects()).toHaveLength(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000); // third tick, 10 s later
+    });
+    expect(connects()).toEqual([
+      "POST /api/targets/target-0/connect",
+      "POST /api/targets/target-0/connect",
+    ]);
   });
 });

@@ -443,6 +443,62 @@ describe("idle tracking", () => {
   });
 });
 
+/* ----------------------------- ordering ----------------------------- */
+
+describe("answers that land out of order", () => {
+  /** Send a session read and hold its answer until the test releases it. */
+  async function heldRead(f: Fake, s: Session) {
+    f.held.set("/api/auth/session", () => {});
+    const read = s.check();
+    await settle();
+    const release = f.held.get("/api/auth/session")!;
+    f.held.delete("/api/auth/session");
+    return { read, release };
+  }
+
+  it("keeps the later idle deadline when an older answer lands after a keep-alive", async () => {
+    const f = fake();
+    const { s, input } = boot(f);
+    await settle();
+    expect(await s.signIn("ops", "pw")).toBeNull();
+    await vi.advanceTimersByTimeAsync(2 * MIN);
+    const older = statusOf(f, f.live!); // idle deadline T0 + 30 min
+    const { read, release } = await heldRead(f, s);
+    input.dispatchEvent(new Event("keydown")); // the keep-alive: T0 + 32 min
+    await settle();
+    const idle = () =>
+      (s.getState() as Extract<SessionState, { kind: "signedIn" }>)
+        .idleDeadline;
+    expect(idle()).toBe(T0 + 32 * MIN);
+    release(json(older));
+    await read;
+    expect(idle()).toBe(T0 + 32 * MIN);
+  });
+
+  it("drops a read that answers after the operator signed out, or signed in again", async () => {
+    const f = fake();
+    const { s } = boot(f);
+    await settle();
+    expect(await s.signIn("ops", "pw")).toBeNull();
+    const first = statusOf(f, f.live!); // the first session, still live
+    const a = await heldRead(f, s);
+    const b = await heldRead(f, s);
+
+    expect(await s.signOut()).toBeNull();
+    const out = s.getState();
+    a.release(json(first));
+    await a.read;
+    expect(s.getState()).toBe(out);
+
+    await vi.advanceTimersByTimeAsync(MIN);
+    expect(await s.signIn("ops", "pw")).toBeNull();
+    const second = s.getState();
+    b.release(json(first));
+    await b.read;
+    expect(s.getState()).toBe(second);
+  });
+});
+
 /* ----------------------------- notices ----------------------------- */
 
 function signedIn(
