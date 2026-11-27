@@ -13,6 +13,25 @@ architecture review; work before that is the v0.0.1 tag.
 
 ### Breaking
 
+- API clients: the command route, `POST /api/targets/{id}/command`,
+  reads `full_uid` and `opcode` as hex only with a `0x` prefix and as
+  decimal otherwise, as documented; it used to read any string of hex
+  digits as hex. Add the prefix to a hex value: `"D000"` is now refused
+  with 400, and an all-digit string changes meaning (`"1000"` is now
+  1000, not 0x1000). The console already sends `0x` strings.
+- API clients: a socket ticket from `POST /api/auth/ws-ticket` opens the
+  telemetry socket and nothing else. On another route's `?ticket=`, or
+  sent as `Authorization: Bearer`, it is now refused with 401; send the
+  bearer token there instead.
+- Operators: values the console used to coerce are refused, naming the
+  field, and nothing is sent. Command forms refuse a blank field, an
+  integer that is not a whole decimal or `0x` number or does not fit its
+  field, and a floating-point value not written in decimal notation
+  (`0x10`, `Infinity`). A tunable update refuses an integer outside its
+  field's range (300 for a uint8 used to be written as 44), a bool other
+  than 0 or 1, and a float32 beyond its range (written as infinity).
+  Enter a value the field holds; Raw Mode still sends a payload as
+  typed in hex.
 - The image runs zenith as an unprivileged user (uid 10001) instead of
   root; its entrypoint hands an existing data volume to that user on
   first start. Started as root, the container needs CAP_SETUID and
@@ -114,20 +133,12 @@ architecture review; work before that is the v0.0.1 tag.
 - `[storage] retention_hours = 0` keeps telemetry forever, as
   `audit_retention_days = 0` keeps the audit log, instead of deleting
   all of it every minute.
-- A tunable update with an integer outside its field's range, or a bool
-  other than 0 or 1, fails naming the field and uploads nothing, instead
-  of writing the value wrapped (300 into a uint8 as 44).
-- The command route reads a uid or opcode as hex only with a `0x` prefix
-  and as decimal otherwise, as documented: `256` is 256, not 0x256. A
-  client sending bare hex digits gets a 400 and must add the prefix.
 - Tunables reads int64 and bool fields as numbers instead of hex, and
   reads and writes a big-endian dictionary's fields in that byte order.
 - Tunables applies a block holding arrays, strings or other fields it
   shows as hex: each field takes back the hex form it was read as, so an
   unedited block is written back byte for byte instead of the update
   being refused. A float that is not finite also reads as hex.
-- A tunable float32 value beyond the type's range is refused, naming the
-  field, instead of being stored as infinity.
 - `zenith --hash-password` hashes the password as typed, edge spaces
   included, as sign-in compares it; only the line ending is removed.
 - An upload is checked as an RTS sequence only when it goes into a
@@ -135,8 +146,6 @@ architecture review; work before that is the v0.0.1 tag.
   (`parts/`), and the refusal reads without a run of spaces.
 - Downsampling and the bearer-token login are audited: downsampling
   with the rows it converted, the login as a console sign-in is.
-- A socket ticket opens the telemetry socket only; on another route's
-  query string, or sent as a bearer token, it is refused.
 - Shutdown waits, up to 5 s, for each target's sample writer to write
   the samples it holds, instead of exiting with them unwritten.
 - A trim with `count: 0` deletes nothing instead of a quarter of the
@@ -169,10 +178,6 @@ architecture review; work before that is the v0.0.1 tag.
 - Dashboard health cards for individual components load: the console
   asks for them with the uid and opcode in the hex form the command
   route reads.
-- Command forms refuse a blank field, an integer that is not a whole
-  decimal or 0x number within its field's range, and a floating-point
-  value not written in decimal notation, instead of sending 0 or a
-  truncated value.
 - A library swap whose file cannot be read is logged as failed on the
   Operations page instead of staying pending.
 - UDP targets show listening until first contact, and TCP targets no

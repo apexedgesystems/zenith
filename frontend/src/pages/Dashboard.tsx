@@ -273,8 +273,8 @@ async function buildHealthCards(
 
   const results = await Promise.allSettled(
     componentTasks.map(async ({ comp, tlmStruct }) => {
-      // The command route reads full_uid and opcode as hex strings (an
-      // all-digit one too), as the Commanding page sends them.
+      // The command route reads full_uid and opcode as hex with a 0x
+      // prefix (decimal without one), as the Commanding page sends them.
       const r = await apiFetch(`/api/targets/${selectedTarget}/command`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },

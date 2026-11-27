@@ -130,7 +130,7 @@ ELF ident) decode correctly with zero configuration.
 | **INSPECT**       | Browse any registered data block on any component for any category (STATIC_PARAM / TUNABLE_PARAM / STATE / INPUT / OUTPUT). Decoded field table with type info. Auto-refresh toggle (1 Hz) for live state debugging.                                                                                                                                    |
 | **File Transfer** | Drag-and-drop file upload to any path on the target via APROTO. Single-file with size cap. Per-target export of telemetry as CSV.                                                                                                                                                                                                                       |
 | **Storage**       | Live capacity gauge against the configured cap with fill rate and time-to-cap projection, per-target usage bars with trim/delete controls, the pipeline accounting table (decoded = written + counted drops), FIFO/retention counters, retention-ladder card (per-band populations), manual downsample.                                                 |
-| **Audit Log**     | Append-only log of operator actions: every command, file upload, target connect/disconnect/add/remove, library swap, storage trim; with auth on also sign-in, refused sign-in, sign-out, session expiry with its reason, and telemetry streams closed because their session ended. Filterable by actor / target / IP / status. Auto-refresh option.     |
+| **Audit Log**     | Append-only log of operator actions: every command, tunable update, file upload, target connect/disconnect/add/remove, library swap, storage trim, delete and downsample; with auth on also sign-in (console or token), refusals, sign-out, session expiry and the streams it closed. Filterable by actor / target / IP / status. Auto-refresh option.  |
 
 ## Sidebar Features
 
@@ -152,7 +152,7 @@ ELF ident) decode correctly with zero configuration.
 | Frontend      | React 19, TypeScript strict, Canvas API                                                    |
 | Storage       | SQLite (WAL mode) with read connection pool (1 writer + N readers)                         |
 | Protocol      | APROTO over TCP + SLIP framing                                                             |
-| Tests         | `cargo test --lib` (223 unit tests) + Vitest with React Testing Library (135 unit tests)   |
+| Tests         | `cargo test --lib --bins` (199 + 21 tests) + Vitest with React Testing Library (104 tests) |
 | Benches       | criterion + pprof flamegraphs                                                              |
 | Auth          | Console sign-in with server-side sessions; JWT bearer tokens for API clients (default off) |
 | Rate limiting | Per-IP token bucket on POST endpoints (when auth is on)                                    |
@@ -324,13 +324,15 @@ port = 8080
 
 [storage]
 path = "/var/lib/zenith/zenith.db"
-retention_hours = 24
+retention_hours = 24            # Telemetry older than this is deleted; 0 keeps it
 max_db_size_mb = 2048
 
 # Optional age-based retention ladder: newest window at full
 # resolution, older data as envelope buckets (mean + min/max +
 # count) so spikes stay visible while the cap holds far more
-# history. See config.toml for the [storage.tiers] keys.
+# history. See config.toml for the [storage.tiers] keys. The coarse
+# tier starts at mid_horizon_hours: unless retention_hours is 0 or
+# longer, retention deletes what it would hold, and boot warns.
 
 [[targets]]
 name = "My Target"
@@ -359,13 +361,15 @@ make run
 | `make stop`          | Stop the running container                                                                                      |
 | `make dev`           | Build + run in foreground (logs to stdout)                                                                      |
 | `make test`          | Run **both** backend and frontend test suites                                                                   |
-| `make test-backend`  | Backend only: `cargo test --lib` (currently 223 unit tests)                                                     |
-| `make test-frontend` | Frontend only: `vitest run` (currently 135 unit tests)                                                          |
+| `make test-backend`  | Backend only: the library's and the server's tests (currently 199 + 21)                                         |
+| `make test-frontend` | Frontend only: `vitest run` (currently 104 tests)                                                               |
+| `make coverage`      | Both suites once, instrumented; per-file tables and reports in `coverage/` (see docs/TESTING.md)                |
 | `make bench`         | Run criterion benches (`protocol`, `storage`, `decoder`)                                                        |
 | `make format`        | Run every pre-commit hook over the repo; the formatters fix in place                                            |
 | `make format-check`  | The same hooks; fails, showing the diff, when any of them changes a file (CI mode)                              |
 | `make lint`          | Clippy with `-D warnings`, then ESLint, in Docker                                                               |
-| `make smoke-boot`    | Boot the built image in three launch modes and check health, privilege posture and bundled content (CI runs it) |
+| `make fmt-check`     | `cargo fmt -- --check` in Docker, as CI runs it                                                                 |
+| `make smoke-boot`    | Boot the built image three ways and check its health, posture, bundled targets and an orderly stop (CI runs it) |
 | `make secret-scan`   | Scan the tree and SECRET_SCAN_RANGE commits for secrets with gitleaks (CI runs it)                              |
 
 Builds, tests and lint run inside Docker -- no local Rust or Node
@@ -398,7 +402,7 @@ secret = "change-me-in-production"
 
 [storage]
 path = "./data/zenith.db"
-retention_hours = 24
+retention_hours = 24           # Telemetry older than this is deleted; 0 keeps it
 max_db_size_mb = 2048          # Size-based FIFO kicks in above this
 
 [[targets]]
@@ -550,7 +554,7 @@ POST   /api/targets/{id}/restart                 # Restart executive (deferred A
 POST   /api/targets/{id}/noop
 GET    /api/targets/{id}/health
 GET    /api/targets/{id}/inspect/{uid}?category=N&offset=N&length=N
-POST   /api/targets/{id}/command                 # Generic (uid, opcode, payload_hex)
+POST   /api/targets/{id}/command                 # Generic: full_uid and opcode ("0x" hex or decimal), payload_hex
 GET    /api/targets/{id}/registry
 GET    /api/targets/{id}/commands
 
@@ -567,7 +571,7 @@ GET    /api/targets/{id}/telemetry/latest
 GET    /api/targets/{id}/telemetry/history?channel=&start_ms=&end_ms=&limit=
 GET    /api/targets/{id}/telemetry/csv
 GET    /api/telemetry/stats                      # totals, cap, net fill rate, time-to-cap projection
-POST   /api/telemetry/downsample
+POST   /api/telemetry/downsample                 # Last hour kept; older rows to 1 min envelopes (audited)
 
 # Operator Preferences (display policy; per target or global)
 GET    /api/prefs/{scope}/{kind}                 # scope: global | target:{id}
@@ -583,7 +587,7 @@ GET    /api/targets/{id}/telemetry/layouts/export
 
 # Storage
 GET    /api/targets/{id}/storage                 # sample count, channel count, byte estimate
-POST   /api/targets/{id}/storage/trim            # Delete oldest N samples
+POST   /api/targets/{id}/storage/trim            # Delete the oldest `count` samples (0: none; unset: a quarter)
 POST   /api/targets/{id}/storage/delete          # Delete all samples for target
 
 # Files
@@ -649,10 +653,12 @@ API clients use bearer tokens, as before:
   is recorded as the actor on every audited action.
 - API clients open the telemetry socket by trading the bearer token at
   `POST /api/auth/ws-ticket` for a 30 s single-purpose ticket passed as
-  `?ticket=`. Long-lived tokens on a query string are rejected so they
-  can never reach request logs (which record method and path only,
-  never query strings). A signed-in console opens the socket with its
-  session and is refused tickets, so no token ever reaches the browser.
+  `?ticket=`. The ticket opens the telemetry socket and nothing else: on
+  another route, or sent as a bearer token, it is refused. Long-lived
+  tokens on a query string are rejected so they can never reach request
+  logs (which record method and path only, never query strings). A
+  signed-in console opens the socket with its session and is refused
+  tickets, so no token ever reaches the browser.
 - Per-IP token bucket rate limit of 10 req/sec (burst 30) on POST
   endpoints, sign-in included. Returns 429 when exceeded. Idle buckets
   are evicted.
@@ -673,15 +679,15 @@ after `[storage] audit_retention_days` (default 90; 0 keeps
 forever).
 
 The audit log captures every state-changing action regardless of
-whether auth is on, and with auth on also sign-in, refused sign-in
-(recorded under the configured user name, or "(unknown user)" for any
-other name, so a password typed into the wrong field is never
-logged), sign-out, each session's expiry (once, under its user, with
-the limit that ended it: idle or absolute, also when it expired while
-the server was down), and telemetry streams closed because their
-session ended. View it at `GET /api/audit` or via the Audit Log page in the
-UI. Each entry has timestamp, actor, action, target, detail, status,
-and source IP.
+whether auth is on, and with auth on also sign-in, at the console or
+the token login, refused sign-in (recorded under the configured user
+name, or "(unknown user)" for any other name, so a password typed into
+the wrong field is never logged), sign-out, each session's expiry
+(once, under its user, with the limit that ended it: idle or absolute,
+also when it expired while the server was down), and telemetry streams
+closed because their session ended. View it at `GET /api/audit` or via
+the Audit Log page in the UI. Each entry has timestamp, actor, action,
+target, detail, status, and source IP.
 
 ## Deploying Beyond a Trusted LAN
 
