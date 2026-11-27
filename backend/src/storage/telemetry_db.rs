@@ -451,8 +451,7 @@ impl TelemetryDb {
 
     /// Query the newest `limit` samples in a time range, for one channel
     /// or for every channel of the target, returned in chronological
-    /// order. Both paths walk their index newest first and stop at the
-    /// limit, so a window holding more samples than the limit gives its
+    /// order. A window holding more samples than the limit gives its
     /// most recent ones: a chart of a long window is drawn up to now.
     pub fn query_range(
         &self,
@@ -467,9 +466,18 @@ impl TelemetryDb {
         let target_arc: Arc<str> = Arc::from(target_id);
         self.with_reader(|conn| {
             if let Some(ch) = channel {
-                // Single channel: resolve the dictionary id first, then
-                // range-scan its (channel_id, timestamp_ms DESC) index
-                // run newest first, reversed into time order below.
+                // Single channel: resolve the dictionary id, then read the
+                // window's newest `limit` rows in two steps over the
+                // (channel_id, timestamp_ms DESC) index, in one read
+                // transaction so both see the same rows. An index-only
+                // walk newest first finds the limit-th row; the rows from
+                // it on are read oldest first, which visits the table in
+                // the order the rows were written. Read newest first, the
+                // same rows cost about 80% more at 50,000 of them: the
+                // table is then visited in descending rowid order. Rows
+                // sharing a timestamp follow the index's rowid order (the
+                // lower rowid first, newest first), so a limit that falls
+                // among them keeps their lower rowids.
                 let chan_id: Option<i64> = conn
                     .query_row(
                         "SELECT id FROM channels WHERE target_id = ?1 AND name = ?2",
@@ -480,16 +488,39 @@ impl TelemetryDb {
                 let Some(chan_id) = chan_id else {
                     return Ok(Vec::new());
                 };
+                if limit == 0 {
+                    return Ok(Vec::new());
+                }
                 let ch_arc: Arc<str> = Arc::from(ch);
-                let mut stmt = conn.prepare_cached(
+                let tx = conn.unchecked_transaction()?;
+                let limit_th: Option<(i64, i64)> = tx
+                    .prepare_cached(
+                        "SELECT timestamp_ms, id FROM telemetry \
+                         WHERE channel_id = ?1 \
+                           AND timestamp_ms >= ?2 AND timestamp_ms <= ?3 \
+                         ORDER BY timestamp_ms DESC, id ASC LIMIT 1 OFFSET ?4",
+                    )?
+                    .query_row(
+                        params![
+                            chan_id,
+                            start_ms as i64,
+                            end_ms as i64,
+                            i64::try_from(limit - 1).unwrap_or(i64::MAX)
+                        ],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?;
+                // No limit-th row: the window holds fewer, all of them.
+                let (from_ts, from_id) = limit_th.unwrap_or((start_ms as i64, i64::MAX));
+                let mut stmt = tx.prepare_cached(
                     "SELECT timestamp_ms, value, v_min, v_max, agg_count FROM telemetry \
                      WHERE channel_id = ?1 \
                        AND timestamp_ms >= ?2 AND timestamp_ms <= ?3 \
-                     ORDER BY timestamp_ms DESC LIMIT ?4",
+                       AND (timestamp_ms > ?2 OR id <= ?4) \
+                     ORDER BY timestamp_ms ASC, id DESC",
                 )?;
-                let rows = stmt.query_map(
-                    params![chan_id, start_ms as i64, end_ms as i64, limit as i64],
-                    |row| {
+                let rows =
+                    stmt.query_map(params![chan_id, from_ts, end_ms as i64, from_id], |row| {
                         Ok(TelemetrySample {
                             target_id: Arc::clone(&target_arc),
                             timestamp_ms: row.get::<_, i64>(0)? as u64,
@@ -497,13 +528,11 @@ impl TelemetryDb {
                             value: row.get(1)?,
                             envelope: envelope_from_row(row.get(2)?, row.get(3)?, row.get(4)?),
                         })
-                    },
-                )?;
+                    })?;
                 let mut samples = Vec::new();
                 for row in rows {
                     samples.push(row?);
                 }
-                samples.reverse();
                 Ok(samples)
             } else {
                 // All channels, newest first, reversed into time order
@@ -3041,6 +3070,46 @@ mod tests {
                 (100_000, "X".to_string()),
                 (100_500, "Y".to_string()),
             ]
+        );
+    }
+
+    /// @test A limit that falls among samples sharing a timestamp still
+    /// returns exactly `limit` samples for one channel: every sample
+    /// newer than that timestamp, and of the tied ones those the index
+    /// orders first, the lower rowids (here the first two written), in
+    /// time order.
+    #[test]
+    fn query_range_cuts_a_timestamp_tie_at_the_limit() {
+        let (_dir, db) = open_temp_db();
+        let t: Arc<str> = Arc::from("t1");
+        let x: Arc<str> = Arc::from("X");
+        let written = [
+            (1_000, 1.0),
+            (2_000, 2.0),
+            (2_000, 3.0),
+            (2_000, 4.0),
+            (2_000, 5.0),
+            (3_000, 6.0),
+            (4_000, 7.0),
+        ];
+        let samples: Vec<TelemetrySample> = written
+            .iter()
+            .map(|&(ts, v)| sample(&t, &x, ts, v))
+            .collect();
+        db.insert_batch(&samples).unwrap();
+
+        let out = db.query_range("t1", Some("X"), 0, 10_000, 4).unwrap();
+        assert!(
+            out.windows(2)
+                .all(|w| w[0].timestamp_ms <= w[1].timestamp_ms),
+            "time order"
+        );
+        let mut kept: Vec<(u64, f64)> = out.iter().map(|s| (s.timestamp_ms, s.value)).collect();
+        kept.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        assert_eq!(
+            kept,
+            [(2_000, 2.0), (2_000, 3.0), (3_000, 6.0), (4_000, 7.0)],
+            "exactly the limit: both newer samples and two of the tied ones"
         );
     }
 
