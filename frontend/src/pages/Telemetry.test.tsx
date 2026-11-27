@@ -176,12 +176,28 @@ describe("Telemetry page status", () => {
     expect(screen.queryByText("Live")).not.toBeInTheDocument();
   });
 
-  it("stops reading Live when samples stop for 3 s, and reads Live again with the next one", async () => {
+  it("keeps reading Live for a target that publishes every 5 s", async () => {
+    linkConnected = true;
+    await renderPage();
+    for (let s = 0; s < 4; s++) {
+      await act(async () => {
+        FakeSocket.opened[0].serverSend({
+          ...sample,
+          timestamp_ms: 1_000 + s * 5_000,
+        });
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      // As the next sample is due
+      expect(screen.getByText("Live")).toBeInTheDocument();
+    }
+  });
+
+  it("stops reading Live when samples stop for 10 s, and reads Live again with the next one", async () => {
     linkConnected = true;
     await renderPage();
     await act(async () => {
       FakeSocket.opened[0].serverSend(sample);
-      await vi.advanceTimersByTimeAsync(2_900);
+      await vi.advanceTimersByTimeAsync(9_900);
     });
     expect(screen.getByText("Live")).toBeInTheDocument();
     await act(async () => {
@@ -189,7 +205,7 @@ describe("Telemetry page status", () => {
     });
     expect(screen.getByText("No data")).toBeInTheDocument();
     await act(async () => {
-      FakeSocket.opened[0].serverSend({ ...sample, timestamp_ms: 4_100 });
+      FakeSocket.opened[0].serverSend({ ...sample, timestamp_ms: 11_100 });
       await vi.advanceTimersByTimeAsync(0);
     });
     expect(screen.getByText("Live")).toBeInTheDocument();

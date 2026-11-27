@@ -149,7 +149,7 @@ architecture review; work before that is the v0.0.1 tag.
 - An audit log request whose offset lies past the end returns no rows
   instead of the first page.
 - The Telemetry page reads Live only while samples arrive and the link
-  is up: a link reported down, or a stream silent for 3 s, shows Off,
+  is up: a link reported down, or a stream silent for 10 s, shows Off,
   Listening or No data instead.
 - Tunables shows and applies only the selected component's values: a
   slow read of the component left behind no longer replaces them, and

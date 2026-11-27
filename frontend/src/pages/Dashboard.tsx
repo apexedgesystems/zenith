@@ -21,6 +21,7 @@ import {
   type PipelineMetrics,
 } from "../api/queries";
 import { apiFetch } from "../api/apiFetch";
+import { STALE_SAMPLE_AGE_MS } from "../types/telemetry";
 
 /* ----------------------------- Types ----------------------------- */
 
@@ -544,7 +545,7 @@ const PipelineSummary = memo(function PipelineSummary({
         m.last_sample_age_ms === null
           ? "never"
           : (m.last_sample_age_ms / 1000).toFixed(1) + "s ago",
-      bad: m.connected && (m.last_sample_age_ms ?? 0) > 10_000,
+      bad: m.connected && (m.last_sample_age_ms ?? 0) > STALE_SAMPLE_AGE_MS,
     },
   ];
 

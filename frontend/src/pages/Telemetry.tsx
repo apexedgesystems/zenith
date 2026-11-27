@@ -8,6 +8,7 @@ import {
   type TelemetryLayout,
   type Sample,
   type ChannelData,
+  STALE_SAMPLE_AGE_MS,
   TIME_WINDOWS,
   fieldName,
   groupChannels,
@@ -21,10 +22,6 @@ import {
 
 const MAX_LIVE_POINTS = 6000; // WS buffer cap for sidebar live values
 const WS_BATCH_MS = 100; // Flush WS batch every 100ms
-// A stream with no sample for this long is quiet, not live: the target
-// list is read on the same period, so a dropped link and a stalled
-// stream both leave the Live status within one read.
-const STALE_MS = 3000;
 
 export default function TelemetryPage({
   selectedTarget,
@@ -37,12 +34,14 @@ export default function TelemetryPage({
   const [layouts, setLayouts] = useState<TelemetryLayout[]>([]);
   const [selectedLayout, setSelectedLayout] = useState("");
   const [connected, setConnected] = useState(false);
-  // `connected` above means samples are arriving on the live stream (one
-  // within STALE_MS); the link itself can be up with nothing to push,
-  // and that is not "off". Neither is a listening link, bound and
-  // waiting for its target. Live (`streaming`) needs both: the stream
-  // outlives a dropped link, since the backend keeps the socket open
-  // across it.
+  // `connected` above means samples are arriving on the live stream:
+  // the newest is no older than STALE_SAMPLE_AGE_MS, the age at which
+  // the Dashboard calls a target's last sample stale. The link itself
+  // can be up with nothing to push, and that is not "off". Neither is a
+  // listening link, bound and waiting for its target. Live (`streaming`)
+  // needs both: the stream outlives a dropped link, since the backend
+  // keeps the socket open across it, so a link the target list reports
+  // down leaves Live at that read.
   const { data: targets } = useTargets();
   const link = targets?.find((t) => t.id === selectedTarget);
   const linkUp = link?.connected ?? false;
@@ -197,9 +196,10 @@ export default function TelemetryPage({
     }
 
     // Flush WS batch into liveDataRef and update state (for small
-    // windows); a stream quiet for STALE_MS stops reading as receiving.
+    // windows); a stream with no sample for STALE_SAMPLE_AGE_MS stops
+    // reading as receiving.
     const flushTimer = window.setInterval(() => {
-      if (receiving && Date.now() - lastSampleAt > STALE_MS) {
+      if (receiving && Date.now() - lastSampleAt > STALE_SAMPLE_AGE_MS) {
         receiving = false;
         setConnected(false);
       }
