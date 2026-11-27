@@ -153,9 +153,13 @@ architecture review; work before that is the v0.0.1 tag.
   ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - Tunables applies a block holding arrays, strings or other fields it
   shows as hex instead of refusing the update: each such field takes
-  back the hex form it was read as and is written back unchanged. A
-  float that is not finite, or is negative zero (which a browser writes
-  as 0), also reads as hex.
+  back the hex form it was read as. A float that is not finite, or is
+  negative zero (which a browser writes as 0), also reads as hex.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- An unedited Tunables Apply writes every field back byte for byte,
+  whatever its type: a double, which the server could read back a unit
+  in the last place off, now keeps its bytes too. A bool holding a value
+  other than 0 or 1 is refused instead, as Breaking describes.
   ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - `zenith --hash-password` hashes the password as typed, edge spaces
   included, as sign-in compares it; only the line ending is removed.

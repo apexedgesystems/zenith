@@ -7123,4 +7123,256 @@ mod tests {
             link.lock().await.disconnect();
         }
     }
+
+    /// The text of the object or array `key` holds in JSON text, as it
+    /// stands: what a client that keeps a read's values sends back,
+    /// never parsed on the way.
+    fn member_text<'a>(json: &'a str, key: &str) -> &'a str {
+        let start = json.find(&format!("\"{key}\":")).unwrap() + key.len() + 3;
+        let (mut depth, mut in_string, mut escaped) = (0, false, false);
+        for (i, c) in json[start..].char_indices() {
+            if in_string {
+                match c {
+                    _ if escaped => escaped = false,
+                    '\\' => escaped = true,
+                    '"' => in_string = false,
+                    _ => {}
+                }
+                continue;
+            }
+            match c {
+                '"' => in_string = true,
+                '{' | '[' => depth += 1,
+                '}' | ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &json[start..=start + i];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("{key}: no object or array in {json}");
+    }
+
+    /// @test An unedited Apply writes every field back byte for byte,
+    /// in either byte order, read and sent through the real router as
+    /// JSON text. The read's text goes back unparsed, as a client that
+    /// keeps the read's values sends it, so a change could only come
+    /// from the server's own reading of its numbers. One flat block
+    /// holds a field of every kind the read distinguishes: unsigned and
+    /// signed integers of each width (8-byte ones as decimal text), a
+    /// bool, float32 values whose f64 text runs to 17 digits (0.1, the
+    /// smallest subnormal, the maximum), doubles that a parse correct
+    /// only to within a unit in the last place reads off by one
+    /// (0.23217103109965914 among them), both float spellings, negative
+    /// zero and non-finite floats, a string with bytes after its NUL,
+    /// numeric and string arrays, an odd width, an opaque blob, the
+    /// leaves of a nested fragment, and a byte no field covers. A header
+    /// + entries block of doubles, float32s and int64s does the same.
+    #[tokio::test]
+    async fn an_unedited_apply_writes_every_field_back_byte_for_byte() {
+        let read_uri = "/api/targets/target-0/params/00D000";
+        let update_uri = "/api/targets/target-0/params/00D000/update";
+        // Doubles serde_json's default float parsing reads back one unit
+        // in the last place off.
+        let doubles: [f64; 5] = [
+            0.23217103109965914,
+            1.0715660391465826e-75,
+            -1.603964615428183e143,
+            -1.81996730402717e-179,
+            1.5860846119992697e-265,
+        ];
+        let mut changed: Vec<String> = Vec::new();
+        let flat_fields = json!([
+            { "name": "u8", "type": "uint", "offset": 0, "size": 1 },
+            { "name": "u16", "type": "uint", "offset": 1, "size": 2 },
+            { "name": "u32", "type": "uint", "offset": 3, "size": 4 },
+            { "name": "u64", "type": "uint", "offset": 7, "size": 8 },
+            { "name": "i8", "type": "int", "offset": 15, "size": 1 },
+            { "name": "i16", "type": "int", "offset": 16, "size": 2 },
+            { "name": "i32", "type": "int", "offset": 18, "size": 4 },
+            { "name": "i64", "type": "int", "offset": 22, "size": 8 },
+            { "name": "flag", "type": "bool", "offset": 30, "size": 1 },
+            { "name": "tenth", "type": "float", "offset": 32, "size": 4 },
+            { "name": "least", "type": "float", "offset": 36, "size": 4 },
+            { "name": "most", "type": "float", "offset": 40, "size": 4 },
+            { "name": "nought", "type": "float", "offset": 44, "size": 4 },
+            { "name": "nan", "type": "float", "offset": 48, "size": 4 },
+            { "name": "gain", "type": "float", "offset": 52, "size": 8 },
+            { "name": "tiny", "type": "float", "offset": 60, "size": 8 },
+            { "name": "vast", "type": "double", "offset": 68, "size": 8 },
+            { "name": "nil", "type": "double", "offset": 76, "size": 8 },
+            { "name": "inf", "type": "double", "offset": 84, "size": 8 },
+            { "name": "tag", "type": "string", "offset": 92, "size": 6 },
+            { "name": "taps", "type": "array", "offset": 98, "size": 8,
+              "element_type": "float", "dims": [2] },
+            { "name": "names", "type": "array", "offset": 106, "size": 8,
+              "element_type": "string", "dims": [2] },
+            { "name": "odd", "type": "uint", "offset": 114, "size": 3 },
+            { "name": "blob", "type": "nested", "offset": 117, "size": 5 },
+            { "name": "pair", "type": "nested", "offset": 122, "size": 20, "struct": "Pair" },
+        ]);
+        for (byte_order, big_endian) in [(None, false), (Some("be"), true)] {
+            // A value's bytes in this dictionary's order.
+            let ordered = |le: &[u8]| {
+                let mut bytes = le.to_vec();
+                if big_endian {
+                    bytes.reverse();
+                }
+                bytes
+            };
+            let mut block = vec![200u8];
+            for le in [
+                &0xBEEFu16.to_le_bytes()[..],
+                &0xDEAD_BEEFu32.to_le_bytes(),
+                &9_007_199_254_740_993u64.to_le_bytes(),
+                &(-5i8).to_le_bytes(),
+                &(-300i16).to_le_bytes(),
+                &(-70_000i32).to_le_bytes(),
+                &(-9_007_199_254_740_993i64).to_le_bytes(),
+            ] {
+                block.extend(ordered(le));
+            }
+            block.extend([1, 0x5A]);
+            for v in [0.1f32, f32::from_bits(1), f32::MAX, -0.0, f32::NAN] {
+                block.extend(ordered(&v.to_le_bytes()));
+            }
+            for v in [doubles[0], doubles[1], doubles[2], -0.0, f64::INFINITY] {
+                block.extend(ordered(&v.to_le_bytes()));
+            }
+            block.extend(b"ab\0\x7f\x01\x02");
+            block.extend(ordered(&1.5f32.to_le_bytes()));
+            block.extend(ordered(&(-2.0f32).to_le_bytes()));
+            block.extend(b"x\0\0\0yz\0\0");
+            block.extend([1, 2, 3, 9, 8, 7, 6, 5]);
+            for (lo, d) in [(0x0102u16, doubles[3]), (0x0304, doubles[4])] {
+                block.extend(ordered(&lo.to_le_bytes()));
+                block.extend(ordered(&d.to_le_bytes()));
+            }
+            assert_eq!(block.len(), 142);
+            let dict: ComponentDict = serde_json::from_value(json!({
+                "component": "Mix",
+                "byte_order": byte_order,
+                "structs": {
+                    "MixParams": { "category": "TUNABLE_PARAM", "size": 142, "fields": flat_fields },
+                    "Pair": { "category": "STRUCT", "size": 10, "fields": [
+                        { "name": "lo", "type": "uint", "offset": 0, "size": 2 },
+                        { "name": "d", "type": "float", "offset": 2, "size": 8 },
+                    ]},
+                },
+            }))
+            .unwrap();
+            let leaves = crate::core::config_manager::expanded_fields(
+                &dict,
+                &dict.structs["MixParams"].fields,
+                0,
+            );
+            let dicts = StructDictionary {
+                components: HashMap::from([("Mix".to_string(), dict)]),
+            };
+
+            let (vehicle, sent) = fake_vehicle(block.clone()).await;
+            let server = Server::with_dicts(APEX_TARGET, dicts);
+            let link = server.link("target-0").await;
+            link.lock()
+                .await
+                .connect(&vehicle.ip().to_string(), vehicle.port())
+                .await
+                .unwrap();
+            let (status, read) = server.get(read_uri).await;
+            assert_eq!(status, StatusCode::OK, "{read}");
+            assert!(read.contains("\"gain\":0.23217103109965914"), "{read}");
+            sent.lock().unwrap().clear();
+            let unedited = format!(
+                r#"{{"fields":{},"raw_hex":"{}"}}"#,
+                member_text(&read, "fields"),
+                hex::encode(&block)
+            );
+            let (status, body) = server.post_text(update_uri, &unedited).await;
+            assert_eq!(status, StatusCode::OK, "{byte_order:?}: {body}");
+            let payload = uploaded_payload(&sent);
+            changed.extend(
+                leaves
+                    .iter()
+                    .map(|f| (f.name.as_str(), f.offset..f.offset + f.size))
+                    .chain([("(no field)", 31..32)])
+                    .filter(|(_, at)| payload[at.clone()] != block[at.clone()])
+                    .map(|(name, at)| {
+                        format!(
+                            "{byte_order:?} {name}: wrote {} for {}",
+                            hex::encode(&payload[at.clone()]),
+                            hex::encode(&block[at])
+                        )
+                    }),
+            );
+            link.lock().await.disconnect();
+
+            // A header + entries block: a uint16 count, then entries of
+            // a double, a float32 and an int64.
+            let mut table = ordered(&2u16.to_le_bytes());
+            for (d, f, w) in [
+                (doubles[0], 0.1f32, -9_007_199_254_740_993i64),
+                (doubles[2], f32::MAX, i64::MAX),
+            ] {
+                table.extend(ordered(&d.to_le_bytes()));
+                table.extend(ordered(&f.to_le_bytes()));
+                table.extend(ordered(&w.to_le_bytes()));
+            }
+            let dict: ComponentDict = serde_json::from_value(json!({
+                "component": "Table",
+                "byte_order": byte_order,
+                "structs": {
+                    "TableHeader": { "category": "TUNABLE_PARAM", "size": 2, "fields": [
+                        { "name": "n", "type": "uint", "offset": 0, "size": 2 },
+                    ]},
+                    "TableEntry": { "category": "TUNABLE_PARAM", "size": 20, "fields": [
+                        { "name": "d", "type": "float", "offset": 0, "size": 8 },
+                        { "name": "f", "type": "float", "offset": 8, "size": 4 },
+                        { "name": "w", "type": "int", "offset": 12, "size": 8 },
+                    ]},
+                },
+            }))
+            .unwrap();
+            let dicts = StructDictionary {
+                components: HashMap::from([("Table".to_string(), dict)]),
+            };
+            let (vehicle, sent) = fake_vehicle(table.clone()).await;
+            let server = Server::with_dicts(APEX_TARGET, dicts);
+            let link = server.link("target-0").await;
+            link.lock()
+                .await
+                .connect(&vehicle.ip().to_string(), vehicle.port())
+                .await
+                .unwrap();
+            let (status, read) = server.get(read_uri).await;
+            assert_eq!(status, StatusCode::OK, "{read}");
+            assert!(read.contains(r#""variable_length":true"#), "{read}");
+            let fields = member_text(&read, "fields");
+            sent.lock().unwrap().clear();
+            let unedited = format!(
+                r#"{{"fields":{},"entries":{},"variable_length":true,"raw_hex":"{}"}}"#,
+                member_text(fields, "header"),
+                member_text(fields, "entries"),
+                hex::encode(&table)
+            );
+            let (status, body) = server.post_text(update_uri, &unedited).await;
+            assert_eq!(status, StatusCode::OK, "{byte_order:?}: {body}");
+            let payload = uploaded_payload(&sent);
+            for (i, at) in [0..2, 2..10, 10..14, 14..22, 22..30, 30..34, 34..42]
+                .into_iter()
+                .enumerate()
+            {
+                if payload[at.clone()] != table[at.clone()] {
+                    changed.push(format!(
+                        "{byte_order:?} table bytes {at:?} (part {i}): wrote {} for {}",
+                        hex::encode(&payload[at.clone()]),
+                        hex::encode(&table[at.clone()])
+                    ));
+                }
+            }
+            link.lock().await.disconnect();
+        }
+        assert!(changed.is_empty(), "changed: {changed:#?}");
+    }
 }
