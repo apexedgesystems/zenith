@@ -35,6 +35,15 @@ architecture review; work before that is the v0.0.1 tag.
   Enter a value the field holds; Raw Mode still sends a payload as
   typed in hex.
   ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- API clients: a tunable read, `GET /api/targets/{id}/params/{uid}`,
+  gives each 8-byte integer field (int64 and uint64) as a string holding
+  its exact decimal value, `"18446744073709551615"`, instead of a number,
+  which a browser's JSON rounds past 2^53. An update takes such a field
+  as that string, a `0x` hex string or a JSON integer, each read
+  exactly; a fraction, an exponent, a value outside the type or a
+  hex-bytes string is refused with 400 naming the field, and a string of
+  digits is always decimal.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - The image runs zenith as an unprivileged user (uid 10001) instead of
   root; its entrypoint hands an existing data volume to that user on
   first start. Started as root, the container needs CAP_SETUID and
@@ -138,13 +147,15 @@ architecture review; work before that is the v0.0.1 tag.
   `audit_retention_days = 0` keeps the audit log, instead of deleting
   all of it every minute.
   ([#70](https://github.com/apexedgesystems/zenith/pull/70))
-- Tunables reads int64 and bool fields as numbers instead of hex, and
-  reads and writes a big-endian dictionary's fields in that byte order.
+- Tunables shows bool and int64 fields as values instead of hex (an
+  int64 exactly, as Breaking describes), and reads and writes a
+  big-endian dictionary's fields in that byte order.
   ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - Tunables applies a block holding arrays, strings or other fields it
-  shows as hex: each field takes back the hex form it was read as, so an
-  unedited block is written back byte for byte instead of the update
-  being refused. A float that is not finite also reads as hex.
+  shows as hex instead of refusing the update: each such field takes
+  back the hex form it was read as and is written back unchanged. A
+  float that is not finite, or is negative zero (which a browser writes
+  as 0), also reads as hex.
   ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - `zenith --hash-password` hashes the password as typed, edge spaces
   included, as sign-in compares it; only the line ending is removed.

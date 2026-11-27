@@ -17,50 +17,151 @@ use serde_json::Value as Json;
 
 /// Constraint rails exported per field by the dictionary generator.
 /// The vehicle enforces the same rails on load; ground-side checks are
-/// the front door, the vehicle is the backstop.
+/// the front door, the vehicle is the backstop. Each rail is held as
+/// the dictionary wrote it, so an integer rail past 2^53 stays exact.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FieldConstraints {
     #[serde(default)]
-    pub min: Option<f64>,
+    pub min: Option<serde_json::Number>,
     #[serde(default)]
-    pub max: Option<f64>,
+    pub max: Option<serde_json::Number>,
     #[serde(default)]
-    pub step: Option<f64>,
+    pub step: Option<serde_json::Number>,
     #[serde(default)]
-    pub allowed: Option<Vec<f64>>,
+    pub allowed: Option<Vec<serde_json::Number>>,
 }
 
 impl FieldConstraints {
-    /// Check one numeric value against the rails. Step granularity is
-    /// measured from min (or zero) with a small epsilon for float
-    /// representation.
+    /// Check one numeric value against the rails, each rail read as an
+    /// f64. Step granularity is measured from min (or zero) with a small
+    /// epsilon for float representation.
     pub fn check(&self, v: f64) -> Result<(), String> {
-        if let Some(min) = self.min {
+        let rail = |r: &Option<serde_json::Number>| r.as_ref().and_then(serde_json::Number::as_f64);
+        if let Some(min) = rail(&self.min) {
             if v < min {
                 return Err(format!("{} below min {}", v, min));
             }
         }
-        if let Some(max) = self.max {
+        if let Some(max) = rail(&self.max) {
             if v > max {
                 return Err(format!("{} above max {}", v, max));
             }
         }
-        if let Some(step) = self.step {
-            if step > 0.0 {
-                let base = self.min.unwrap_or(0.0);
-                let n = (v - base) / step;
-                if (n - n.round()).abs() > 1e-6 {
-                    return Err(format!("{} not on step {} from {}", v, step, base));
-                }
+        if let Some(step) = rail(&self.step) {
+            let base = rail(&self.min).unwrap_or(0.0);
+            if !on_float_step(v, step, base) {
+                return Err(format!("{} not on step {} from {}", v, step, base));
             }
         }
         if let Some(allowed) = &self.allowed {
+            let allowed: Vec<f64> = allowed.iter().filter_map(|a| a.as_f64()).collect();
             if !allowed.iter().any(|a| (a - v).abs() < 1e-9) {
                 return Err(format!("{} not in allowed set {:?}", v, allowed));
             }
         }
         Ok(())
     }
+
+    /// Check one integer value against the rails exactly. An 8-byte
+    /// integer field holds more than an f64 carries (2^53 + 1 reads as
+    /// 2^53 there), so neither the value nor an integer rail passes
+    /// through one, and a rail written with a fraction is compared as
+    /// the real number it is. Step granularity is exact when the step
+    /// and its base (min, or zero) are whole numbers; a fractional step
+    /// takes the float rule of [`Self::check`].
+    pub fn check_integer(&self, v: i128) -> Result<(), String> {
+        use std::cmp::Ordering;
+        if let Some(min) = &self.min {
+            if compare_integer(v, min) == Some(Ordering::Less) {
+                return Err(format!("{} below min {}", v, min));
+            }
+        }
+        if let Some(max) = &self.max {
+            if compare_integer(v, max) == Some(Ordering::Greater) {
+                return Err(format!("{} above max {}", v, max));
+            }
+        }
+        if let Some(step) = &self.step {
+            let zero = serde_json::Number::from(0);
+            let base = self.min.as_ref().unwrap_or(&zero);
+            let on_step = match (whole_number(step), whole_number(base)) {
+                (Some(s), Some(b)) if s > 0 => v.rem_euclid(s) == b.rem_euclid(s),
+                (Some(_), Some(_)) => true,
+                _ => on_float_step(
+                    v as f64,
+                    step.as_f64().unwrap_or(0.0),
+                    base.as_f64().unwrap_or(0.0),
+                ),
+            };
+            if !on_step {
+                return Err(format!("{} not on step {} from {}", v, step, base));
+            }
+        }
+        if let Some(allowed) = &self.allowed {
+            if !allowed
+                .iter()
+                .any(|a| compare_integer(v, a) == Some(Ordering::Equal))
+            {
+                let set: Vec<String> = allowed.iter().map(|a| a.to_string()).collect();
+                return Err(format!("{} not in allowed set [{}]", v, set.join(", ")));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The float step rule: `v` lies a whole number of steps from `base`,
+/// within a small epsilon for float representation. A step that is not
+/// positive checks nothing.
+fn on_float_step(v: f64, step: f64, base: f64) -> bool {
+    if step <= 0.0 {
+        return true;
+    }
+    let n = (v - base) / step;
+    (n - n.round()).abs() <= 1e-6
+}
+
+/// A rail as a whole number, when it is one: an integer rail, or a
+/// float rail without a fraction inside i128.
+fn whole_number(rail: &serde_json::Number) -> Option<i128> {
+    if let Some(r) = rail.as_i64() {
+        return Some(r.into());
+    }
+    if let Some(r) = rail.as_u64() {
+        return Some(r.into());
+    }
+    let r = rail.as_f64()?;
+    (r.fract() == 0.0 && r.abs() < 2f64.powi(127)).then_some(r as i128)
+}
+
+/// How an integer compares with a rail, exactly. An integer rail is
+/// compared as an integer. A float rail is compared as the real number
+/// it is, through its floor: an integer equal to the floor of a rail
+/// with a fraction lies below the rail.
+fn compare_integer(v: i128, rail: &serde_json::Number) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    if let Some(r) = rail.as_i64() {
+        return Some(v.cmp(&r.into()));
+    }
+    if let Some(r) = rail.as_u64() {
+        return Some(v.cmp(&r.into()));
+    }
+    let r = rail.as_f64()?;
+    let bound = 2f64.powi(127);
+    if r.is_nan() {
+        return None;
+    }
+    if r >= bound {
+        return Some(Ordering::Less);
+    }
+    if r < -bound {
+        return Some(Ordering::Greater);
+    }
+    let floor = r.floor();
+    Some(match v.cmp(&(floor as i128)) {
+        Ordering::Equal if floor < r => Ordering::Less,
+        order => order,
+    })
 }
 
 /// A single field in a struct.
@@ -454,14 +555,18 @@ impl StructDictionary {
                     let mut count_matches = false;
                     for field in &hdr_def.fields {
                         if field.offset + field.size <= hdr_def.size {
-                            let val = decode_field(data, field, dict.big_endian());
-                            // Check if this field's value matches the entry count
-                            if let Some(n) = val.as_u64() {
-                                if n == n_entries as u64 {
-                                    count_matches = true;
-                                }
+                            // An integer field of any width holding the
+                            // entry count, read from its bytes (an 8-byte
+                            // one reads as text).
+                            if scalar(data, field, dict.big_endian())
+                                == Some(Scalar::Integer(n_entries as i128))
+                            {
+                                count_matches = true;
                             }
-                            hdr_fields.insert(field.name.clone(), val);
+                            hdr_fields.insert(
+                                field.name.clone(),
+                                decode_field(data, field, dict.big_endian()),
+                            );
                         }
                     }
 
@@ -508,45 +613,64 @@ impl StructDictionary {
 
 /* ----------------------------- Field Decoding ----------------------------- */
 
-/// One field's value from a parameter block, read by its (type, size)
-/// in the dictionary's byte order. A type no numeric arm reads (an
-/// array, a string, a nested blob), and a float that is not finite
-/// (JSON has no NaN or infinity), comes back as the hex of its bytes,
-/// the form an update takes back unchanged. A bool reads as its byte,
-/// so a value other than 0 or 1 shows as it is.
-fn decode_field(data: &[u8], field: &FieldDef, big_endian: bool) -> serde_json::Value {
+/// A scalar field's value as its bytes hold it: an integer exactly, a
+/// float as the f64 it widens to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Scalar {
+    Integer(i128),
+    Float(f64),
+}
+
+/// The scalar `field` holds in `data`, read by its (type, size) in the
+/// dictionary's byte order; None for a (type, size) that holds none (an
+/// array, a string, a nested blob, an odd width). A bool is its byte.
+fn scalar(data: &[u8], field: &FieldDef, big_endian: bool) -> Option<Scalar> {
     let off = field.offset;
-    let as_hex = || {
-        let bytes = &data[off..off + field.size.min(data.len() - off)];
-        serde_json::json!(hex::encode(bytes))
-    };
     // The field's N bytes, least significant first.
-    fn le<const N: usize>(data: &[u8], off: usize, big_endian: bool) -> [u8; N] {
-        let mut bytes = [0u8; N];
-        bytes.copy_from_slice(&data[off..off + N]);
+    let le = |n: usize| {
+        let mut bytes = [0u8; 8];
+        bytes[..n].copy_from_slice(&data[off..off + n]);
         if big_endian {
-            bytes.reverse();
+            bytes[..n].reverse();
         }
         bytes
-    }
-    match (field.field_type.as_str(), field.size) {
-        ("uint", 1) | ("bool", 1) => serde_json::json!(data[off]),
-        ("uint", 2) => serde_json::json!(u16::from_le_bytes(le(data, off, big_endian))),
-        ("uint", 4) => serde_json::json!(u32::from_le_bytes(le(data, off, big_endian))),
-        ("uint", 8) => serde_json::json!(u64::from_le_bytes(le(data, off, big_endian))),
-        ("int", 1) => serde_json::json!(data[off] as i8),
-        ("int", 2) => serde_json::json!(i16::from_le_bytes(le(data, off, big_endian))),
-        ("int", 4) => serde_json::json!(i32::from_le_bytes(le(data, off, big_endian))),
-        ("int", 8) => serde_json::json!(i64::from_le_bytes(le(data, off, big_endian))),
-        ("float", 4) => match f32::from_le_bytes(le(data, off, big_endian)) {
-            v if v.is_finite() => serde_json::json!(v),
-            _ => as_hex(),
-        },
-        ("float", 8) | ("double", 8) => match f64::from_le_bytes(le(data, off, big_endian)) {
-            v if v.is_finite() => serde_json::json!(v),
-            _ => as_hex(),
-        },
-        _ => as_hex(),
+    };
+    let unsigned = |n: usize| u64::from_le_bytes(le(n));
+    // Sign-extended from the field's top bit.
+    let signed = |n: usize| ((unsigned(n) << (64 - 8 * n)) as i64) >> (64 - 8 * n);
+    Some(match (field.field_type.as_str(), field.size) {
+        ("uint" | "bool", 1) | ("uint", 2 | 4 | 8) => Scalar::Integer(unsigned(field.size).into()),
+        ("int", n @ (1 | 2 | 4 | 8)) => Scalar::Integer(signed(n).into()),
+        ("float", 4) => Scalar::Float(f32::from_bits(unsigned(4) as u32).into()),
+        ("float" | "double", 8) => Scalar::Float(f64::from_bits(unsigned(8))),
+        _ => return None,
+    })
+}
+
+/// One field's value from a parameter block, read by its (type, size)
+/// in the dictionary's byte order. An 8-byte integer reads as a string
+/// holding its exact decimal value: a JSON number past 2^53 does not
+/// survive a browser's JSON.parse, so a number there would come back
+/// changed. A narrower integer, and a bool (its byte, so a value other
+/// than 0 or 1 shows as it is), reads as a number. A float reads as a
+/// number unless JSON cannot carry it through a browser: one that is
+/// not finite (JSON has no NaN or infinity) or is negative zero (a
+/// browser writes -0 as 0). That float, and a type no scalar arm reads
+/// (an array, a string, a nested blob), comes back as the hex of its
+/// bytes, the form an update takes back unchanged.
+fn decode_field(data: &[u8], field: &FieldDef, big_endian: bool) -> serde_json::Value {
+    let off = field.offset;
+    match scalar(data, field, big_endian) {
+        Some(Scalar::Integer(v)) if field.size == 8 => serde_json::Value::String(v.to_string()),
+        // Every narrower integer fits an i64.
+        Some(Scalar::Integer(v)) => serde_json::Value::from(v as i64),
+        Some(Scalar::Float(v)) if v.is_finite() && !(v == 0.0 && v.is_sign_negative()) => {
+            serde_json::json!(v)
+        }
+        _ => {
+            let bytes = &data[off..off + field.size.min(data.len() - off)];
+            serde_json::json!(hex::encode(bytes))
+        }
     }
 }
 
@@ -1213,6 +1337,74 @@ mod tests {
         assert!(allowed.check(3.0).is_ok());
         assert!(allowed.check(2.0).is_err());
     }
+
+    /// @test An integer meets its rails exactly, past where an f64 is
+    /// exact (2^53 = 9007199254740992): integer rails at 2^53 + 1 and
+    /// 2^53 + 3, which round to 2^53 and 2^53 + 4 as floats, refuse the
+    /// value one beyond each; an allowed set and a whole step compare
+    /// exactly there too. A rail with a fraction bounds as the real
+    /// number it is, whole rails written as floats count as whole, the
+    /// 64-bit limits pass their own rails, and a fractional step takes
+    /// the float rule.
+    #[test]
+    fn integer_values_meet_their_rails_exactly() {
+        let c = |j: &str| serde_json::from_str::<FieldConstraints>(j).unwrap();
+        const P53: i128 = 9_007_199_254_740_992;
+        // Rails, then (value, whether it is in) rows.
+        let cases: Vec<(&str, Vec<(i128, bool)>)> = vec![
+            (
+                r#"{"min": 9007199254740993, "max": 9007199254740995}"#,
+                vec![
+                    (P53, false),
+                    (P53 + 1, true),
+                    (P53 + 3, true),
+                    (P53 + 4, false),
+                ],
+            ),
+            (
+                r#"{"allowed": [9007199254740993]}"#,
+                vec![(P53, false), (P53 + 1, true)],
+            ),
+            (
+                r#"{"min": 1, "step": 2}"#,
+                vec![(P53 + 1, true), (P53 + 2, false)],
+            ),
+            (
+                r#"{"min": -2.5, "max": 2.5}"#,
+                vec![(-3, false), (-2, true), (2, true), (3, false)],
+            ),
+            (r#"{"min": 0.0, "step": 3.0}"#, vec![(9, true), (10, false)]),
+            (
+                r#"{"min": -9223372036854775808, "max": 18446744073709551615}"#,
+                vec![
+                    (i64::MIN.into(), true),
+                    (u64::MAX.into(), true),
+                    (i128::from(u64::MAX) + 1, false),
+                    (i128::from(i64::MIN) - 1, false),
+                ],
+            ),
+            (r#"{"step": 0.5}"#, vec![(7, true)]),
+        ];
+        let mut wrong = Vec::new();
+        for (rails, rows) in cases {
+            let rails_def = c(rails);
+            for (v, inside) in rows {
+                let verdict = rails_def.check_integer(v);
+                if verdict.is_ok() != inside {
+                    wrong.push(format!("{rails} {v}: {verdict:?}"));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "rails judged otherwise: {wrong:#?}");
+        assert_eq!(
+            c(r#"{"min": 9007199254740993}"#).check_integer(P53),
+            Err("9007199254740992 below min 9007199254740993".to_string())
+        );
+        assert_eq!(
+            c(r#"{"allowed": [1, 9007199254740993]}"#).check_integer(2),
+            Err("2 not in allowed set [1, 9007199254740993]".to_string())
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1357,9 +1549,10 @@ mod nested_tests {
 
     /// @test Parameter decode over a synthetic dictionary. A fixed block
     /// decodes each field by its declared (type, size), little-endian --
-    /// unsigned, signed and float widths, both float spellings -- with a
-    /// nested field read as its fragment's leaves, a type no numeric arm
-    /// reads as hex, and a field past the data left out. A header +
+    /// unsigned, signed and float widths, both float spellings, a uint64
+    /// as its decimal text -- with a nested field read as its fragment's
+    /// leaves, a type no numeric arm reads as hex, and a field past the
+    /// data left out. A header +
     /// entries block of 1 + 2N bytes decodes as the header whose count
     /// field equals N, then its N entries; a length no (header, entry)
     /// pair explains, or another category, decodes as nothing.
@@ -1445,7 +1638,7 @@ mod nested_tests {
         assert_eq!(
             dicts.decode_payload("Gain", "Gains", &data),
             Some(serde_json::json!({
-                "u8": 200, "u16": 0x1234, "u32": 70_000, "u64": 1u64 << 40,
+                "u8": 200, "u16": 0x1234, "u32": 70_000, "u64": (1u64 << 40).to_string(),
                 "i8": -5, "i16": -300, "i32": -70_000,
                 "f32": 1.5, "f64": -0.25, "d64": 2.0,
                 "tag": "61626364", "pair.lo": 1, "pair.hi": 2,
@@ -1478,11 +1671,11 @@ mod nested_tests {
     }
 
     /// @test Parameter values decode by their type in their dictionary's
-    /// byte order: int64 and bool read as numbers, not hex, and a
-    /// big-endian dictionary's fields read big-endian, in a fixed block
-    /// and in a header + entries block alike. The same values stamped
-    /// little-endian decode the same under a little-endian dictionary,
-    /// stamped or not.
+    /// byte order: a bool reads as a number and an int64 as its decimal
+    /// text, neither as hex, and a big-endian dictionary's fields read
+    /// big-endian, in a fixed block and in a header + entries block
+    /// alike. The same values stamped little-endian decode the same
+    /// under a little-endian dictionary, stamped or not.
     #[test]
     fn parameter_values_decode_by_type_in_the_dictionary_byte_order() {
         let tunable = |size: usize, fields: Vec<FieldDef>| StructDef {
@@ -1545,7 +1738,7 @@ mod nested_tests {
             out
         };
         let values = Some(serde_json::json!({
-            "wide": -2, "flag": 1, "tiny": -5, "short": 0x1234,
+            "wide": "-2", "flag": 1, "tiny": -5, "short": 0x1234,
             "word": -100_000, "ratio": 1.5, "count": 0x0102_0304,
         }));
 
@@ -1578,6 +1771,119 @@ mod nested_tests {
             wrong.is_empty(),
             "decoded otherwise than stamped: {wrong:#?}"
         );
+    }
+
+    /// @test An 8-byte integer reads as a string holding its exact
+    /// decimal value, so a browser's JSON.parse, which rounds a number
+    /// past 2^53, keeps it: int64 and uint64 at 2^53 + 1, the signed
+    /// limits and the unsigned maximum, in either byte order, stamped or
+    /// not, as the read's own text shows them. A header whose entry count
+    /// is a uint64 still pairs with its entries.
+    #[test]
+    fn eight_byte_integers_read_as_their_exact_decimal_text() {
+        // A component of tunable blocks, each (name, size, fields).
+        let component =
+            |name: &str, byte_order: Option<&str>, blocks: Vec<(&str, usize, Vec<FieldDef>)>| {
+                let structs = blocks.into_iter().map(|(block, size, fields)| {
+                    let sdef = StructDef {
+                        category: "TUNABLE_PARAM".to_string(),
+                        size,
+                        opcode: None,
+                        fields,
+                        layout_hash: None,
+                        canonical_spec: None,
+                        packed: None,
+                    };
+                    (block.to_string(), sdef)
+                });
+                let dict = ComponentDict {
+                    component: name.to_string(),
+                    byte_order: byte_order.map(str::to_string),
+                    structs: structs.collect(),
+                    enums: HashMap::new(),
+                    capabilities: Vec::new(),
+                };
+                (name.to_string(), dict)
+            };
+        // A fixed block, and a header + entries table in a component of
+        // its own, so no other block can pair with its entries.
+        let dicts = |byte_order: Option<&str>| StructDictionary {
+            components: HashMap::from([
+                component(
+                    "Wide",
+                    byte_order,
+                    vec![(
+                        "Params",
+                        16,
+                        vec![f("i", "int", 0, 8), f("u", "uint", 8, 8)],
+                    )],
+                ),
+                component(
+                    "Table",
+                    byte_order,
+                    vec![
+                        ("Header", 8, vec![f("n", "uint", 0, 8)]),
+                        ("Entry", 12, vec![f("v", "int", 0, 8), f("w", "uint", 8, 4)]),
+                    ],
+                ),
+            ]),
+        };
+        // Each value's bytes in the given order.
+        let ordered = |le: [u8; 8], big_endian: bool| {
+            let mut bytes = le.to_vec();
+            if big_endian {
+                bytes.reverse();
+            }
+            bytes
+        };
+        let pairs: [(i64, u64); 4] = [
+            (9_007_199_254_740_993, 9_007_199_254_740_993),
+            (-9_007_199_254_740_993, u64::MAX),
+            (i64::MAX, 9_223_372_036_854_775_807),
+            (i64::MIN, 0),
+        ];
+
+        let mut wrong = Vec::new();
+        for (stamp, big_endian) in [(None, false), (Some("le"), false), (Some("be"), true)] {
+            for (i, u) in pairs {
+                let mut block = ordered(i.to_le_bytes(), big_endian);
+                block.extend(ordered(u.to_le_bytes(), big_endian));
+                let decoded = dicts(stamp).decode_payload("Wide", "Params", &block);
+                let want = serde_json::json!({ "i": i.to_string(), "u": u.to_string() });
+                if decoded.as_ref() != Some(&want) {
+                    wrong.push(format!("{stamp:?} {i} {u}: {decoded:?}"));
+                }
+                let text = serde_json::to_string(&decoded).unwrap();
+                if !text.contains(&format!(r#""i":"{i}""#))
+                    || !text.contains(&format!(r#""u":"{u}""#))
+                {
+                    wrong.push(format!("{stamp:?} read text {text}"));
+                }
+            }
+
+            let mut table = ordered(2u64.to_le_bytes(), big_endian);
+            for (v, w) in [(i64::MIN, 7u32), (9_007_199_254_740_993, 8)] {
+                table.extend(ordered(v.to_le_bytes(), big_endian));
+                let mut w = w.to_le_bytes().to_vec();
+                if big_endian {
+                    w.reverse();
+                }
+                table.extend(w);
+            }
+            let decoded =
+                dicts(stamp).decode_variable_length_for("TUNABLE_PARAM", &table, Some("Table"));
+            let want = serde_json::json!({
+                "header": { "n": "2" },
+                "entries": [
+                    { "v": "-9223372036854775808", "w": 7 },
+                    { "v": "9007199254740993", "w": 8 },
+                ],
+            });
+            if decoded.as_ref().map(|d| &d.3) != Some(&want) {
+                wrong.push(format!("{stamp:?} header and entries: {decoded:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "read otherwise: {wrong:#?}");
     }
 
     /// @test A record table refuses each malformed definition by name,

@@ -1810,8 +1810,11 @@ async fn update_params(
             ));
         }
 
-        // Start with the original binary from the page load (preserves arrays, padding, etc.)
-        // Then overwrite only the scalar fields the user edited.
+        // Start from the bytes the page read, which keep padding and any
+        // field the request leaves out, then encode every field the
+        // request carries over them. The console sends every field; one
+        // given back as the read returned it (an 8-byte integer as its
+        // exact decimal string) encodes to the bytes it was read from.
         let mut buf = if original_binary.len() == struct_size {
             original_binary.clone()
         } else {
@@ -2237,7 +2240,11 @@ async fn delete_pref(
 
 /// Validate edited values against the dictionary's constraint rails
 /// before anything is encoded or uploaded. Arrays apply their rails
-/// per element. Returns "field: reason" strings for every violation.
+/// per element. An 8-byte integer, in any form `encode_field` takes, is
+/// compared exactly; any other number as an f64. A value neither reads
+/// a number from is left to `encode_field`, which refuses what its
+/// field cannot hold. Returns "field: reason" strings for every
+/// violation.
 fn constraint_violations(
     fields: &[crate::core::config_manager::FieldDef],
     edits: &serde_json::Map<String, serde_json::Value>,
@@ -2248,12 +2255,28 @@ fn constraint_violations(
         else {
             continue;
         };
-        let numbers: Vec<f64> = match value {
-            serde_json::Value::Array(a) => a.iter().filter_map(|v| v.as_f64()).collect(),
-            v => v.as_f64().into_iter().collect(),
+        // The values the rails apply to, and the (type, size) of each.
+        let (values, shape): (Vec<&serde_json::Value>, Option<(&str, usize)>) = match value {
+            serde_json::Value::Array(a) => (
+                a.iter().collect(),
+                array_elements(field).map(|(_, size, ty)| (ty, size)),
+            ),
+            v => (vec![v], Some((field.field_type.as_str(), field.size))),
         };
-        for n in numbers {
-            if let Err(reason) = rails.check(n) {
+        let wide = matches!(shape, Some(("int" | "uint", 8)));
+        for v in values {
+            let verdict = if wide {
+                match wide_integer(v) {
+                    Ok(n) => rails.check_integer(n),
+                    Err(_) => continue,
+                }
+            } else {
+                match v.as_f64() {
+                    Some(n) => rails.check(n),
+                    None => continue,
+                }
+            };
+            if let Err(reason) = verdict {
                 violations.push(format!("{}: {}", field.name, reason));
             }
         }
@@ -2263,18 +2286,20 @@ fn constraint_violations(
 
 /// Encode one edited field into the payload buffer, in its dictionary's
 /// byte order (`big_endian`). A field takes back what the parameter read
-/// returned for it: a number, or, for a field the read returns as hex
-/// (a string, an array, a shape it reads no number from, a float that
-/// is not finite), that hex form, written as the bytes it holds, so an
-/// unedited block is written back unchanged. A value the field cannot
-/// hold is refused with the reason, never written: the wrong JSON type,
-/// an integer outside the field's width (an unchecked cast would store
-/// 300 in a uint8 as 44), a bool other than 0 or 1, a float beyond
-/// float32's range for a float32, a string longer than its buffer, an
-/// array of the wrong length, or a (type, size) given neither a value
-/// nor its hex form. Callers fail the request naming the field: a value
-/// skipped here would upload the OLD value under a SUCCESS response,
-/// which reads as "applied" while changing nothing.
+/// returned for it and writes the bytes it was read from: a number; an
+/// 8-byte integer's decimal string (it also takes a 0x string or a JSON
+/// integer, see `wide_integer`); or, for a field the read returns as
+/// hex (a string, an array, a shape it reads no number from, a float
+/// that is not finite or is negative zero), that hex form, written as
+/// the bytes it holds. A value the field cannot hold is refused with
+/// the reason, never written: the wrong JSON type, an integer outside
+/// the field's width (an unchecked cast would store 300 in a uint8 as
+/// 44), a bool other than 0 or 1, a float beyond float32's range for a
+/// float32, a string longer than its buffer, an array of the wrong
+/// length, or a (type, size) given neither a value nor its hex form.
+/// Callers fail the request naming the field: a value skipped here
+/// would upload the OLD value under a SUCCESS response, which reads as
+/// "applied" while changing nothing.
 fn encode_field(
     buf: &mut [u8],
     field: &crate::core::config_manager::FieldDef,
@@ -2296,9 +2321,26 @@ fn encode_field(
         }
     };
     match (field.field_type.as_str(), size) {
-        // Integers are checked against the field's width, then written
-        // as their low `size` bytes, exact for any value in range.
-        ("uint", 1 | 2 | 4 | 8) => {
+        // An 8-byte integer is read exactly, in any of its forms, then
+        // checked against its type's range.
+        ("uint", 8) => {
+            let v = u64::try_from(wide_integer(value)?)
+                .map_err(|_| format!("{value} is outside uint64's range 0..={}", u64::MAX))?;
+            put(&v.to_le_bytes());
+        }
+        ("int", 8) => {
+            let v = i64::try_from(wide_integer(value)?).map_err(|_| {
+                format!(
+                    "{value} is outside int64's range {}..={}",
+                    i64::MIN,
+                    i64::MAX
+                )
+            })?;
+            put(&v.to_le_bytes());
+        }
+        // A narrower integer is checked against the field's width, then
+        // written as its low `size` bytes, exact for any value in range.
+        ("uint", 1 | 2 | 4) => {
             let max = u64::MAX >> (64 - bits);
             let v = match (value.as_u64(), value.as_i64()) {
                 (Some(v), _) if v <= max => v,
@@ -2309,7 +2351,7 @@ fn encode_field(
             };
             put(&v.to_le_bytes()[..size]);
         }
-        ("int", 1 | 2 | 4 | 8) => {
+        ("int", 1 | 2 | 4) => {
             let (min, max) = (i64::MIN >> (64 - bits), i64::MAX >> (64 - bits));
             let v = match (value.as_i64(), value.as_u64()) {
                 (Some(v), _) if (min..=max).contains(&v) => v,
@@ -2362,11 +2404,6 @@ fn encode_field(
         // element_type at its slot (strings recurse into the bounded-
         // string rule above).
         ("array", total) => {
-            let count = field
-                .dims
-                .as_ref()
-                .map(|d| d.iter().product::<usize>())
-                .unwrap_or(0);
             let Some(arr) = value.as_array() else {
                 return match hex_form(value, total) {
                     Some(bytes) => {
@@ -2376,17 +2413,15 @@ fn encode_field(
                     None => Err(format!("{value} is not an array")),
                 };
             };
-            if count == 0 || total % count != 0 {
+            let Some((count, elem_size, elem_type)) = array_elements(field) else {
                 return Err("the dictionary gives this array no element size".to_string());
-            }
+            };
             if arr.len() != count {
                 return Err(format!(
                     "{} elements where the field holds {count}",
                     arr.len()
                 ));
             }
-            let elem_size = total / count;
-            let elem_type = field.element_type.as_deref().unwrap_or("uint");
             for (i, v) in arr.iter().enumerate() {
                 let elem = crate::core::config_manager::FieldDef {
                     name: field.name.clone(),
@@ -2421,6 +2456,73 @@ fn encode_field(
 fn hex_form(value: &serde_json::Value, size: usize) -> Option<Vec<u8>> {
     let bytes = hex::decode(value.as_str()?).ok()?;
     (bytes.len() == size).then_some(bytes)
+}
+
+/// An array field's elements: their count, size and type (uint when
+/// the dictionary names none). None when the dictionary gives the array
+/// no whole element size.
+fn array_elements(field: &crate::core::config_manager::FieldDef) -> Option<(usize, usize, &str)> {
+    let count = field
+        .dims
+        .as_ref()
+        .map(|d| d.iter().product::<usize>())
+        .unwrap_or(0);
+    (count > 0 && field.size.is_multiple_of(count)).then(|| {
+        (
+            count,
+            field.size / count,
+            field.element_type.as_deref().unwrap_or("uint"),
+        )
+    })
+}
+
+/// The integer an 8-byte integer field is given, read exactly: a JSON
+/// integer, or a string holding a whole number in decimal (digits with
+/// an optional leading minus; a string of digits is always decimal) or
+/// in hex after a 0x prefix. The read gives these fields as decimal
+/// strings, since a JSON number past 2^53 does not survive a browser's
+/// JSON.parse, and nothing here goes through a float: a fraction, an
+/// exponent and a hex-bytes string without the prefix are refused. An
+/// integer past both 64-bit ranges, which serde_json reads as a float,
+/// is returned past them for the range check to name; the result is
+/// not yet checked against the field's type.
+fn wide_integer(value: &serde_json::Value) -> Result<i128, String> {
+    let exact = match value {
+        serde_json::Value::Number(n) => n
+            .as_i64()
+            .map(i128::from)
+            .or_else(|| n.as_u64().map(i128::from))
+            .or_else(|| {
+                let f = n.as_f64()?;
+                let inside = -(2f64.powi(63))..2f64.powi(64);
+                (f.fract() == 0.0 && !inside.contains(&f)).then_some(f as i128)
+            }),
+        serde_json::Value::String(s) => whole_number_text(s),
+        _ => None,
+    };
+    exact.ok_or_else(|| {
+        format!("{value} is not an integer (a JSON integer, or a decimal or 0x string)")
+    })
+}
+
+/// A whole number written as text: decimal digits with an optional
+/// leading minus, or hex digits after a 0x (or 0X) prefix. Nothing else
+/// is taken: no sign on hex, no plus, no surrounding space. A value too
+/// large for i128 saturates, past every range a caller checks.
+fn whole_number_text(s: &str) -> Option<i128> {
+    let (negative, digits, radix) = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(hex) => (false, hex, 16),
+        None => match s.strip_prefix('-') {
+            Some(decimal) => (true, decimal, 10),
+            None => (false, s, 10),
+        },
+    };
+    if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
+        return None;
+    }
+    let magnitude = u128::from_str_radix(digits, radix).unwrap_or(u128::MAX);
+    let magnitude = i128::try_from(magnitude).unwrap_or(i128::MAX);
+    Some(if negative { -magnitude } else { magnitude })
 }
 
 /* ----------------------------- Telemetry History ----------------------------- */
@@ -5215,6 +5317,11 @@ mod tests {
         }
 
         async fn post(&self, uri: &str, body: serde_json::Value) -> (StatusCode, String) {
+            self.post_text(uri, &body.to_string()).await
+        }
+
+        /// A POST whose body is JSON text as a client writes it.
+        async fn post_text(&self, uri: &str, body: &str) -> (StatusCode, String) {
             self.call(
                 axum::http::Request::post(uri)
                     .header(header::CONTENT_TYPE, "application/json")
@@ -5488,6 +5595,154 @@ mod tests {
         for (shape, reason, said) in refusals {
             assert!(said.contains(reason), "{shape}: refused as {said:?}");
         }
+    }
+
+    /// @test An 8-byte integer encodes exactly from each form the update
+    /// takes, in either byte order: a decimal string, a 0x string and a
+    /// JSON integer, at 2^53 + 1, the signed limits and the unsigned
+    /// maximum. A string of digits is decimal. A value past its type, a
+    /// fraction, an exponent, a hex-bytes string without the prefix, a
+    /// sign or space the forms do not take and another JSON type are
+    /// refused, naming the value.
+    #[test]
+    fn eight_byte_integers_encode_exactly_from_each_form() {
+        let (int64, uint64) = (field("int", 8), field("uint", 8));
+        let mut forms: Vec<(&FieldDef, serde_json::Value, [u8; 8])> = Vec::new();
+        for v in [
+            9_007_199_254_740_993i64,
+            -9_007_199_254_740_993,
+            i64::MAX,
+            i64::MIN,
+        ] {
+            forms.push((&int64, json!(v.to_string()), v.to_le_bytes()));
+            forms.push((&int64, json!(v), v.to_le_bytes()));
+            if v >= 0 {
+                forms.push((&int64, json!(format!("0x{v:X}")), v.to_le_bytes()));
+            }
+        }
+        for v in [
+            9_007_199_254_740_993u64,
+            9_223_372_036_854_775_807,
+            u64::MAX,
+        ] {
+            forms.push((&uint64, json!(v.to_string()), v.to_le_bytes()));
+            forms.push((&uint64, json!(v), v.to_le_bytes()));
+            forms.push((&uint64, json!(format!("0x{v:x}")), v.to_le_bytes()));
+        }
+        forms.push((
+            &int64,
+            json!("0100000000002000"),
+            100_000_000_002_000i64.to_le_bytes(),
+        ));
+
+        let mut wrong = Vec::new();
+        for big_endian in [false, true] {
+            for (field, value, le) in &forms {
+                let mut want = le.to_vec();
+                if big_endian {
+                    want.reverse();
+                }
+                let mut buf = vec![0u8; 8];
+                let got = encode_field(&mut buf, field, value, big_endian).map(|()| buf);
+                if got.as_ref() != Ok(&want) {
+                    wrong.push(format!(
+                        "{}64 <- {value} (be {big_endian}): {got:?}",
+                        field.field_type
+                    ));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "written otherwise: {wrong:#?}");
+
+        let past_both: serde_json::Value = serde_json::from_str("18446744073709551616").unwrap();
+        for (field, value, reason) in [
+            (
+                &int64,
+                json!("9223372036854775808"),
+                "\"9223372036854775808\" is outside int64's range \
+                 -9223372036854775808..=9223372036854775807",
+            ),
+            (
+                &int64,
+                json!("-9223372036854775809"),
+                "is outside int64's range",
+            ),
+            (
+                &int64,
+                json!(9_223_372_036_854_775_808u64),
+                "is outside int64's range",
+            ),
+            (
+                &uint64,
+                json!("18446744073709551616"),
+                "is outside uint64's range 0..=18446744073709551615",
+            ),
+            (&uint64, json!("-1"), "\"-1\" is outside uint64's range"),
+            (&uint64, past_both, "is outside uint64's range"),
+            (&int64, json!("1.5"), "\"1.5\" is not an integer"),
+            (&int64, json!(1.5), "1.5 is not an integer"),
+            (&int64, json!("1e3"), "is not an integer"),
+            (&int64, json!(1e3), "is not an integer"),
+            (&uint64, json!("ffffffffffffdfff"), "is not an integer"),
+            (&int64, json!("-0x10"), "is not an integer"),
+            (&int64, json!("+5"), "is not an integer"),
+            (&int64, json!(" 5"), "is not an integer"),
+            (&int64, json!("0x"), "is not an integer"),
+            (&int64, json!(""), "is not an integer"),
+            (&int64, json!(true), "true is not an integer"),
+        ] {
+            match encoded(field, &value) {
+                Err(said) => assert!(said.contains(reason), "{value}: refused as {said:?}"),
+                Ok(bytes) => wrong.push(format!("{value} wrote {bytes:?}")),
+            }
+        }
+        assert!(wrong.is_empty(), "values refused nowhere: {wrong:#?}");
+    }
+
+    /// @test The rails judge an 8-byte integer exactly, in whatever form
+    /// it comes: an int64 with max 2^53 refuses 2^53 + 1 as a decimal
+    /// string, a 0x string and a JSON integer, each of which an f64
+    /// reads as the max itself, passes 2^53, and judges each element of
+    /// an int64 array. A narrower field keeps the float check, and a
+    /// value no number is read from is left to the encoder.
+    #[test]
+    fn rails_judge_an_eight_byte_integer_exactly() {
+        let fields: Vec<FieldDef> = serde_json::from_value(json!([
+            { "name": "wide", "type": "int", "offset": 0, "size": 8,
+              "constraints": { "max": 9_007_199_254_740_992u64 } },
+            { "name": "lanes", "type": "array", "offset": 8, "size": 16,
+              "element_type": "int", "dims": [2],
+              "constraints": { "max": 9_007_199_254_740_992u64 } },
+            { "name": "level", "type": "uint", "offset": 24, "size": 1,
+              "constraints": { "max": 10 } },
+        ]))
+        .unwrap();
+        let violations =
+            |edits: serde_json::Value| constraint_violations(&fields, edits.as_object().unwrap());
+        for over in [
+            json!("9007199254740993"),
+            json!("0x20000000000001"),
+            json!(9_007_199_254_740_993u64),
+        ] {
+            assert_eq!(
+                violations(json!({ "wide": over })),
+                ["wide: 9007199254740993 above max 9007199254740992"],
+                "{over}"
+            );
+        }
+        assert!(violations(json!({ "wide": "9007199254740992", "level": 10 })).is_empty());
+        assert_eq!(
+            violations(json!({ "lanes": ["1", "9007199254740993"] })),
+            ["lanes: 9007199254740993 above max 9007199254740992"]
+        );
+        assert_eq!(
+            violations(json!({ "level": 11 })),
+            ["level: 11 above max 10"]
+        );
+        assert!(
+            violations(json!({ "wide": "ffff", "lanes": "00" })).is_empty(),
+            "left to the encoder"
+        );
     }
 
     /// Dictionaries with one tunable block: uint8 `level`, bool
@@ -6087,8 +6342,8 @@ mod tests {
     /// @test A tunable value is written in its dictionary's byte order:
     /// a big-endian field gets its most significant byte first, array
     /// elements each in turn, and every scalar a block decodes to is
-    /// written back to the block's own bytes in either order, so an
-    /// unedited Apply rewrites what was read.
+    /// written back to the block's own bytes in either order, so the
+    /// values a read returns, given back, rewrite what was read.
     #[test]
     fn tunable_values_encode_in_the_dictionary_byte_order() {
         let mut buf = [0u8; 2];
@@ -6461,11 +6716,14 @@ mod tests {
     /* ---- What the read returns, the update takes back ---- */
 
     /// @test Every field a tunable block reads takes the read's value
-    /// back and writes the block's own bytes: numbers as numbers, and a
-    /// field the read returns as hex (a string, an array, a shape it
-    /// reads no number from, a float that is not finite) as that hex,
-    /// so an unedited Apply rewrites the block unchanged in either byte
-    /// order, junk after a string's NUL included. Edits still go in as
+    /// back and writes the block's own bytes: numbers as numbers, an
+    /// 8-byte integer as its decimal text, and a field the read returns
+    /// as hex (a string, an array, a shape it reads no number from, a
+    /// float that is not finite or is negative zero) as that hex, so the
+    /// values a read returns, given back, rewrite the block unchanged in
+    /// either byte order, junk after a string's NUL included. None of
+    /// those forms is one a browser's JSON changes: no number past 2^53
+    /// and no negative zero, which it writes as 0. Edits still go in as
     /// values: text for a string, elements for an array.
     #[test]
     fn every_field_takes_back_what_the_read_returned() {
@@ -6480,6 +6738,10 @@ mod tests {
             { "name": "blob", "type": "nested", "offset": 27, "size": 5 },
             { "name": "gain", "type": "float", "offset": 32, "size": 4 },
             { "name": "scale", "type": "double", "offset": 36, "size": 8 },
+            { "name": "nought", "type": "float", "offset": 44, "size": 4 },
+            { "name": "nil", "type": "double", "offset": 48, "size": 8 },
+            { "name": "wide", "type": "int", "offset": 56, "size": 8 },
+            { "name": "huge", "type": "uint", "offset": 64, "size": 8 },
         ]);
         // The block in the given byte order: each scalar's bytes, and
         // each element's, ordered as a big-endian writer would.
@@ -6499,18 +6761,30 @@ mod tests {
             out.extend([1, 2, 3, 9, 8, 7, 6, 5]);
             out.extend(order(&f32::NAN.to_le_bytes()));
             out.extend(order(&f64::INFINITY.to_le_bytes()));
+            out.extend(order(&(-0.0f32).to_le_bytes()));
+            out.extend(order(&(-0.0f64).to_le_bytes()));
+            out.extend(order(&(-9_007_199_254_740_993i64).to_le_bytes()));
+            out.extend(order(&u64::MAX.to_le_bytes()));
             out
         };
 
         let mut refused = Vec::new();
         for (stamp, big_endian) in [(None, false), (Some("le"), false), (Some("be"), true)] {
             let bytes = block(big_endian);
-            assert_eq!(bytes.len(), 44);
-            let dicts = block_dicts(stamp, fields.clone(), 44);
+            assert_eq!(bytes.len(), 72);
+            let dicts = block_dicts(stamp, fields.clone(), 72);
             let decoded = dicts
                 .decode_payload("Block", "BlockParams", &bytes)
                 .unwrap();
-            let mut written = vec![0u8; 44];
+            for (name, form) in [
+                ("nought", json!(hex::encode(&bytes[44..48]))),
+                ("nil", json!(hex::encode(&bytes[48..56]))),
+                ("wide", json!("-9007199254740993")),
+                ("huge", json!("18446744073709551615")),
+            ] {
+                assert_eq!(decoded[name], form, "{stamp:?} {name}");
+            }
+            let mut written = vec![0u8; 72];
             for field in &dicts.components["Block"].structs["BlockParams"].fields {
                 let value = &decoded[&field.name];
                 if let Err(e) = encode_field(&mut written, field, value, big_endian) {
@@ -6523,7 +6797,7 @@ mod tests {
         }
         assert!(refused.is_empty(), "read values refused: {refused:#?}");
 
-        let dicts = block_dicts(None, fields, 44);
+        let dicts = block_dicts(None, fields, 72);
         let fields = &dicts.components["Block"].structs["BlockParams"].fields;
         let mut edited = block(false);
         encode_field(&mut edited, &fields[1], &json!("new"), false).unwrap();
@@ -6590,5 +6864,207 @@ mod tests {
             (audit[0].action.as_str(), audit[0].status.as_str()),
             ("update_tprm", "err: not connected")
         );
+    }
+
+    /// The commands a vehicle was sent: (opcode, payload), in order.
+    type SentCommands = Arc<std::sync::Mutex<Vec<(u16, Vec<u8>)>>>;
+
+    /// A vehicle on loopback for one connection: it answers an INSPECT
+    /// with `block`, and every other command with SUCCESS, and keeps
+    /// each command it is sent.
+    async fn fake_vehicle(block: Vec<u8>) -> (SocketAddr, SentCommands) {
+        use protocol::{aproto, slip};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sent = SentCommands::default();
+        let log = sent.clone();
+        tokio::spawn(async move {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let mut decoder = slip::Decoder::new();
+            let mut buf = [0u8; 65536];
+            while let Ok(n @ 1..) = sock.read(&mut buf).await {
+                for frame in decoder.feed(&buf[..n]) {
+                    let Some(cmd) = aproto::parse_packet(&frame) else {
+                        continue;
+                    };
+                    log.lock()
+                        .unwrap()
+                        .push((cmd.header.opcode, cmd.payload.clone()));
+                    // ACK: the command's opcode and sequence, status
+                    // SUCCESS, an immediate result, then the extra.
+                    let mut ack = Vec::new();
+                    ack.extend(cmd.header.opcode.to_le_bytes());
+                    ack.extend(cmd.header.sequence.to_le_bytes());
+                    ack.extend([0, aproto::STAGE_RESULT, 0, 0]);
+                    if cmd.header.opcode == aproto::EXEC_INSPECT {
+                        ack.extend(&block);
+                    }
+                    let mut reply = Vec::new();
+                    reply.extend(aproto::MAGIC.to_le_bytes());
+                    reply.extend([aproto::VERSION, aproto::FLAG_RESPONSE]);
+                    reply.extend(0u32.to_le_bytes());
+                    reply.extend(aproto::SYS_ACK.to_le_bytes());
+                    reply.extend(0u16.to_le_bytes());
+                    reply.extend((ack.len() as u16).to_le_bytes());
+                    reply.extend(ack);
+                    if sock.write_all(&slip::encode(&reply)).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        (addr, sent)
+    }
+
+    /// The tunable payload one upload carried: its FILE_CHUNK payloads
+    /// joined, each without its two-byte index, then past the v4
+    /// prelude.
+    fn uploaded_payload(sent: &SentCommands) -> Vec<u8> {
+        let stamped: Vec<u8> = sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(opcode, _)| *opcode == protocol::aproto::FILE_CHUNK)
+            .flat_map(|(_, payload)| payload[2..].to_vec())
+            .collect();
+        tprm::parse_v4(&stamped).unwrap().1.to_vec()
+    }
+
+    /// @test 8-byte integers keep every bit from the vehicle through the
+    /// console and back, in either byte order. The read of the shipped
+    /// SpecMatrix block gives iWide = 2^53 + 1 and uWide = 2^64 - 1 as
+    /// decimal strings in its JSON text, which a browser's JSON keeps
+    /// (it rounds a number past 2^53), and the console's unedited Apply,
+    /// that read sent back as JSON text, uploads the block's own bytes:
+    /// iWide's 0100000000002000 little-endian. Edits written as decimal
+    /// strings, 0x strings and JSON integers upload exactly at the signed
+    /// limits and 2^53 + 1. A value past its type, a fraction, an
+    /// exponent and a hex-bytes string fail with 400 naming the field,
+    /// and nothing reaches the vehicle.
+    #[tokio::test]
+    async fn eight_byte_tunables_cross_the_read_and_the_update_exactly() {
+        let shipped = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../targets/sil-ops-demo/structs/SpecMatrix.json"
+        ))
+        .unwrap();
+        let read_uri = "/api/targets/target-0/params/00D000";
+        let update_uri = "/api/targets/target-0/params/00D000/update";
+        for (byte_order, big_endian) in [(None, false), (Some("be"), true)] {
+            let mut dict: ComponentDict = serde_json::from_str(&shipped).unwrap();
+            dict.byte_order = byte_order.map(str::to_string);
+            let dicts = StructDictionary {
+                components: HashMap::from([(dict.component.clone(), dict)]),
+            };
+            // A value's bytes in this dictionary's order.
+            let ordered = |le: [u8; 8]| {
+                let mut bytes = le.to_vec();
+                if big_endian {
+                    bytes.reverse();
+                }
+                bytes
+            };
+            // SpecMatrixTunableParams: iWide int64 at 0, uWide uint64 at
+            // 8, precise double at 16, the rest left zero.
+            let mut block = vec![0u8; 80];
+            block[0..8].copy_from_slice(&ordered(9_007_199_254_740_993i64.to_le_bytes()));
+            block[8..16].copy_from_slice(&ordered(u64::MAX.to_le_bytes()));
+            block[16..24].copy_from_slice(&ordered(2.5f64.to_le_bytes()));
+            let raw_hex = hex::encode(&block);
+
+            let (vehicle, sent) = fake_vehicle(block.clone()).await;
+            let server = Server::with_dicts(APEX_TARGET, dicts);
+            let link = server.link("target-0").await;
+            link.lock()
+                .await
+                .connect(&vehicle.ip().to_string(), vehicle.port())
+                .await
+                .unwrap();
+
+            let (status, read) = server.get(read_uri).await;
+            assert_eq!(status, StatusCode::OK, "{read}");
+            assert!(
+                read.contains(r#""iWide":"9007199254740993""#)
+                    && read.contains(r#""uWide":"18446744073709551615""#),
+                "{byte_order:?}: {read}"
+            );
+
+            // The console's unedited Apply: the read's fields and bytes,
+            // back as JSON text.
+            let read: serde_json::Value = serde_json::from_str(&read).unwrap();
+            let unedited = json!({ "fields": read["fields"], "raw_hex": read["raw_hex"] });
+            sent.lock().unwrap().clear();
+            let (status, body) = server.post_text(update_uri, &unedited.to_string()).await;
+            assert_eq!(status, StatusCode::OK, "{byte_order:?}: {body}");
+            let payload = uploaded_payload(&sent);
+            assert_eq!(hex::encode(&payload), raw_hex, "{byte_order:?}: unedited");
+            if !big_endian {
+                assert_eq!(hex::encode(&payload[..8]), "0100000000002000");
+            }
+
+            for (fields, i_wide, u_wide) in [
+                (
+                    r#""iWide":"-9007199254740993","uWide":"0xFFFFFFFFFFFFFFFF""#,
+                    -9_007_199_254_740_993i64,
+                    u64::MAX,
+                ),
+                (
+                    r#""iWide":9223372036854775807,"uWide":9007199254740993"#,
+                    i64::MAX,
+                    9_007_199_254_740_993,
+                ),
+                (
+                    r#""iWide":"-9223372036854775808","uWide":"0x20000000000001""#,
+                    i64::MIN,
+                    9_007_199_254_740_993,
+                ),
+            ] {
+                sent.lock().unwrap().clear();
+                let text = format!(r#"{{"fields":{{{fields}}},"raw_hex":"{raw_hex}"}}"#);
+                let (status, body) = server.post_text(update_uri, &text).await;
+                assert_eq!(status, StatusCode::OK, "{byte_order:?} {fields}: {body}");
+                let mut want = block.clone();
+                want[0..8].copy_from_slice(&ordered(i_wide.to_le_bytes()));
+                want[8..16].copy_from_slice(&ordered(u_wide.to_le_bytes()));
+                assert_eq!(uploaded_payload(&sent), want, "{byte_order:?} {fields}");
+            }
+
+            for (fields, refusal) in [
+                (
+                    r#""iWide":"9223372036854775808""#,
+                    r#"iWide: "9223372036854775808" is outside int64's range"#,
+                ),
+                (
+                    r#""uWide":"18446744073709551616""#,
+                    r#"uWide: "18446744073709551616" is outside uint64's range"#,
+                ),
+                (r#""uWide":-1"#, "uWide: -1 is outside uint64's range"),
+                (r#""iWide":1.5"#, "iWide: 1.5 is not an integer"),
+                (r#""iWide":"1e3""#, r#"iWide: "1e3" is not an integer"#),
+                (
+                    r#""uWide":"ffffffffffffffff""#,
+                    r#"uWide: "ffffffffffffffff" is not an integer"#,
+                ),
+            ] {
+                sent.lock().unwrap().clear();
+                let text = format!(r#"{{"fields":{{{fields}}},"raw_hex":"{raw_hex}"}}"#);
+                let (status, body) = server.post_text(update_uri, &text).await;
+                assert_eq!(
+                    status,
+                    StatusCode::BAD_REQUEST,
+                    "{byte_order:?} {fields}: {body}"
+                );
+                assert!(body.contains(refusal), "{byte_order:?} {fields}: {body}");
+                assert!(
+                    sent.lock().unwrap().is_empty(),
+                    "{byte_order:?} {fields}: reached the vehicle"
+                );
+            }
+            link.lock().await.disconnect();
+        }
     }
 }
