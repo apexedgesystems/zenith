@@ -72,7 +72,8 @@ pub fn validate_rts_upload(
         };
         if timeout > 0 && delay > 0 && timeout <= delay {
             return Err(format!(
-                "step {}: timeoutCycles {} expires within the step's own {}-cycle delay                  (TIMEOUT_SHORTER_THAN_DELAY; the vehicle would refuse this at load)",
+                "step {}: timeoutCycles {} expires within the step's own {}-cycle delay \
+                 (TIMEOUT_SHORTER_THAN_DELAY; the vehicle would refuse this at load)",
                 i, timeout, delay
             ));
         }
@@ -180,9 +181,11 @@ mod tests {
         assert!(err.contains("step 1"), "{err}");
         let err =
             validate_rts_upload(&dicts, &sequence_bytes(0, &[(10, 20), (30, 25)])).unwrap_err();
-        assert!(err.contains("step 1"), "{err}");
-        assert!(err.contains("timeoutCycles 25"), "{err}");
-        assert!(err.contains("30-cycle delay"), "{err}");
+        assert_eq!(
+            err,
+            "step 1: timeoutCycles 25 expires within the step's own 30-cycle delay \
+             (TIMEOUT_SHORTER_THAN_DELAY; the vehicle would refuse this at load)"
+        );
 
         // ATS exempt by design.
         assert!(validate_rts_upload(&dicts, &sequence_bytes(1, &[(30, 30)])).is_ok());

@@ -111,6 +111,17 @@ fn health_check(cli: &Cli) -> i32 {
     }
 }
 
+/// The password a `--hash-password` stdin line holds: the line as
+/// typed, only its line ending removed, since sign-in compares the
+/// password exactly as it is sent, edge spaces included. None for an
+/// empty or blank line.
+fn password_from_line(line: &str) -> Option<&str> {
+    let password = line
+        .strip_suffix('\n')
+        .map_or(line, |l| l.strip_suffix('\r').unwrap_or(l));
+    (!password.trim().is_empty()).then_some(password)
+}
+
 /// Authenticated principal for audit attribution, inserted by the auth
 /// middleware on every request: the token's sub or the browser
 /// session's user when auth is on, the anonymous "operator" when it is
@@ -154,6 +165,10 @@ struct TargetState {
     /// Timed block reads feeding the telemetry stream (config `poll`);
     /// torn down wherever the router is.
     _poll_handles: Vec<tokio::task::JoinHandle<()>>,
+    /// The thread writing this target's samples to the database. It
+    /// ends once every sender of `sample_tx` is gone, after writing
+    /// what it still holds.
+    sample_writer: Option<std::thread::JoinHandle<()>>,
 }
 
 struct SharedState {
@@ -985,7 +1000,7 @@ async fn upload_file(
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid base64: {}", e)))?;
 
     // RTS destinations get the author-time sequence check.
-    if body.remote_path.contains("rts/") {
+    if in_rts_directory(&body.remote_path) {
         let dicts = {
             state
                 .read()
@@ -1052,6 +1067,16 @@ async fn upload_file(
             Err((StatusCode::BAD_GATEWAY, err_msg))
         }
     }
+}
+
+/// Whether an upload's remote path puts the file in a directory named
+/// `rts`, where the vehicle loads sequence plans from (the console's
+/// destination is bank_a/rts/). A directory whose name merely ends in
+/// "rts" (parts/, shirts/) is not one, nor is a file named rts.
+fn in_rts_directory(remote_path: &str) -> bool {
+    let mut parts = remote_path.split('/');
+    parts.next_back();
+    parts.any(|dir| dir == "rts")
 }
 
 #[derive(Deserialize)]
@@ -1637,7 +1662,8 @@ async fn update_params(
             Some(key) => dicts.components.get(key).into_iter().collect(),
             None => dicts.components.values().collect(),
         };
-        let mut tunable_structs: Vec<&crate::core::config_manager::StructDef> = Vec::new();
+        // Each block with its dictionary's byte order.
+        let mut tunable_structs: Vec<(&crate::core::config_manager::StructDef, bool)> = Vec::new();
         for dict in search_dicts {
             if exact_key.is_none() {
                 if let Some(hint) = comp_name {
@@ -1650,11 +1676,11 @@ async fn update_params(
             }
             for sdef in dict.structs.values() {
                 if sdef.category == "TUNABLE_PARAM" && !sdef.fields.is_empty() && sdef.size > 0 {
-                    tunable_structs.push(sdef);
+                    tunable_structs.push((sdef, dict.big_endian()));
                 }
             }
         }
-        tunable_structs.sort_by_key(|s| s.size);
+        tunable_structs.sort_by_key(|(s, _)| s.size);
 
         if tunable_structs.len() < 2 {
             return Err((
@@ -1663,8 +1689,8 @@ async fn update_params(
             ));
         }
 
-        let hdr_struct = tunable_structs[0]; // smaller = header
-        let ent_struct = tunable_structs[1]; // larger = entry
+        let (hdr_struct, hdr_big_endian) = tunable_structs[0]; // smaller = header
+        let (ent_struct, ent_big_endian) = tunable_structs[1]; // larger = entry
         let entries = body
             .entries
             .as_ref()
@@ -1690,7 +1716,7 @@ async fn update_params(
         // Encode header
         for field in &hdr_struct.fields {
             if let Some(value) = body.fields.get(&field.name) {
-                if let Err(reason) = encode_field(&mut buf, field, value) {
+                if let Err(reason) = encode_field(&mut buf, field, value, hdr_big_endian) {
                     unencodable.push(format!("{}: {}", field.name, reason));
                 }
             }
@@ -1703,7 +1729,9 @@ async fn update_params(
                 if let Some(value) = entry_fields.get(&field.name) {
                     let mut adjusted_field = field.clone();
                     adjusted_field.offset = base + field.offset;
-                    if let Err(reason) = encode_field(&mut buf, &adjusted_field, value) {
+                    if let Err(reason) =
+                        encode_field(&mut buf, &adjusted_field, value, ent_big_endian)
+                    {
                         unencodable.push(format!("entry[{}].{}: {}", i, field.name, reason));
                     }
                 }
@@ -1749,10 +1777,12 @@ async fn update_params(
     } else {
         // Flat: single struct
         let mut dict_hash: Option<u32> = None;
+        let mut big_endian = false;
         if let Some((comp, _sname, sdef)) =
             find_tunable_struct(&dicts, original_binary.len(), full_uid, manifest.as_deref())
         {
             struct_size = sdef.size;
+            big_endian = dicts.components.get(comp).is_some_and(|d| d.big_endian());
             // Expanded so nested fragments are editable leaf by leaf
             // (offsets payload-absolute; encode_field works unchanged).
             struct_fields = dicts
@@ -1791,7 +1821,7 @@ async fn update_params(
         let mut unencodable: Vec<String> = Vec::new();
         for field in &struct_fields {
             if let Some(value) = body.fields.get(&field.name) {
-                if let Err(reason) = encode_field(&mut buf, field, value) {
+                if let Err(reason) = encode_field(&mut buf, field, value, big_endian) {
                     unencodable.push(format!("{}: {}", field.name, reason));
                 }
             }
@@ -2232,7 +2262,8 @@ fn constraint_violations(
     violations
 }
 
-/// Encode one edited field into the payload buffer. A value the field
+/// Encode one edited field into the payload buffer, in its dictionary's
+/// byte order (`big_endian`). A value the field
 /// cannot hold is refused with the reason, never written: the wrong
 /// JSON type, an integer outside the field's width (an unchecked cast
 /// would store 300 in a uint8 as 44), a bool other than 0 or 1, a
@@ -2244,6 +2275,7 @@ fn encode_field(
     buf: &mut [u8],
     field: &crate::core::config_manager::FieldDef,
     value: &serde_json::Value,
+    big_endian: bool,
 ) -> Result<(), String> {
     let off = field.offset;
     let size = field.size;
@@ -2251,6 +2283,14 @@ fn encode_field(
         return Err(format!("lies past the {}-byte payload", buf.len()));
     }
     let bits = size * 8;
+    // A scalar's little-endian bytes, put in the dictionary's order.
+    let mut put = |le: &[u8]| {
+        let dst = &mut buf[off..off + le.len()];
+        dst.copy_from_slice(le);
+        if big_endian {
+            dst.reverse();
+        }
+    };
     match (field.field_type.as_str(), size) {
         // Integers are checked against the field's width, then written
         // as their low `size` bytes, exact for any value in range.
@@ -2263,7 +2303,7 @@ fn encode_field(
                 }
                 (None, None) => return Err(format!("{value} is not an integer")),
             };
-            buf[off..off + size].copy_from_slice(&v.to_le_bytes()[..size]);
+            put(&v.to_le_bytes()[..size]);
         }
         ("int", 1 | 2 | 4 | 8) => {
             let (min, max) = (i64::MIN >> (64 - bits), i64::MAX >> (64 - bits));
@@ -2276,23 +2316,23 @@ fn encode_field(
                 }
                 (None, None) => return Err(format!("{value} is not an integer")),
             };
-            buf[off..off + size].copy_from_slice(&v.to_le_bytes()[..size]);
+            put(&v.to_le_bytes()[..size]);
         }
         ("bool", 1) => match value.as_u64() {
-            Some(v @ (0 | 1)) => buf[off] = v as u8,
+            Some(v @ (0 | 1)) => put(&[v as u8]),
             _ => return Err(format!("{value} is not a bool (0 or 1)")),
         },
         ("float", 4) => {
             let v = value
                 .as_f64()
                 .ok_or_else(|| format!("{value} is not a number"))?;
-            buf[off..off + 4].copy_from_slice(&(v as f32).to_le_bytes());
+            put(&(v as f32).to_le_bytes());
         }
         ("float", 8) | ("double", 8) => {
             let v = value
                 .as_f64()
                 .ok_or_else(|| format!("{value} is not a number"))?;
-            buf[off..off + 8].copy_from_slice(&v.to_le_bytes());
+            put(&v.to_le_bytes());
         }
         // Bounded string: fixed char buffer, NUL-padded. A value longer
         // than the field is refused, never truncated -- the packer on
@@ -2341,7 +2381,7 @@ fn encode_field(
                     struct_ref: None,
                     enum_ref: None,
                 };
-                encode_field(buf, &elem, v).map_err(|e| format!("element {i}: {e}"))?;
+                encode_field(buf, &elem, v, big_endian).map_err(|e| format!("element {i}: {e}"))?;
             }
         }
         (ty, _) => return Err(format!("a {size}-byte {ty} field has no encoding")),
@@ -2759,16 +2799,40 @@ async fn target_storage_stats(
     Ok(Json(serde_json::to_value(stats).unwrap_or_default()))
 }
 
+/// Rewrite stored history: the last hour stays at full resolution,
+/// everything older becomes 1-minute envelope buckets. Audited like a
+/// trim, since what it converts is gone.
 async fn downsample_data(
     State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let st = state.read().await;
     let db = st.db.clone();
     drop(st);
 
-    // Keep last hour at full resolution, downsample older to 1-minute averages
-    let result = db_blocking(db, |db| db.downsample(3_600_000, 60_000)).await?;
-    Ok(Json(serde_json::to_value(result).unwrap_or_default()))
+    let result = db_blocking(db.clone(), |db| db.downsample(3_600_000, 60_000)).await;
+    let ip_str = addr.ip().to_string();
+    let (detail, status) = match &result {
+        Ok(r) => (
+            Some(format!(
+                "samples_before={} samples_after={} removed={}",
+                r.samples_before, r.samples_after, r.removed
+            )),
+            "ok".to_string(),
+        ),
+        Err((_, err_msg)) => (None, format!("err: {}", err_msg)),
+    };
+    record_audit(
+        &db,
+        &actor.0,
+        "downsample_telemetry",
+        None,
+        detail.as_deref(),
+        &status,
+        Some(&ip_str),
+    );
+    Ok(Json(serde_json::to_value(result?).unwrap_or_default()))
 }
 
 async fn delete_target_data(
@@ -2830,8 +2894,9 @@ async fn delete_target_data(
 
 #[derive(Deserialize)]
 struct TrimRequest {
-    /// Number of samples to delete (oldest first). If unset, defaults to
-    /// 25% of the current sample count for this target.
+    /// Number of samples to delete (oldest first); 0 deletes none. If
+    /// unset, defaults to 25% of the current sample count for this
+    /// target.
     #[serde(default)]
     count: Option<usize>,
 }
@@ -2853,8 +2918,8 @@ async fn trim_target_data(
     drop(st);
 
     let count = match body.count {
-        Some(n) if n > 0 => n,
-        _ => {
+        Some(n) => n,
+        None => {
             let db = db.clone();
             let id = id.clone();
             let stats = db_blocking(db, move |db| db.target_stats(&id)).await?;
@@ -3016,7 +3081,7 @@ async fn add_target(
     let metrics = TargetMetrics::new();
 
     // Spawn DB writer for new target
-    spawn_sample_writer(
+    let sample_writer = spawn_sample_writer(
         id.clone(),
         st.db.clone(),
         sample_tx.subscribe(),
@@ -3044,6 +3109,7 @@ async fn add_target(
             record_table: artifacts.record_table,
             _router_handle: None,
             _poll_handles: Vec::new(),
+            sample_writer: Some(sample_writer),
         },
     );
     drop(st);
@@ -3352,8 +3418,11 @@ struct LoginRequest {
     password: String,
 }
 
+/// The bearer-token login. Both outcomes are audited as signing in at
+/// the session door is, marked as this login; the password never is.
 async fn login(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<LoginRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let st = state.read().await;
@@ -3369,6 +3438,7 @@ async fn login(
     // signing secret is never compared against user input. Boot
     // validation guarantees password_hash is present when auth is on.
     let auth = st.config.auth.clone();
+    let db = st.db.clone();
     drop(st);
 
     let ok = crate::core::auth::verify_credentials(
@@ -3377,27 +3447,48 @@ async fn login(
         &auth.username,
         &auth.password_hash,
     );
+    let ip = addr.ip().to_string();
+    const DETAIL: Option<&str> = Some("bearer token");
 
-    if ok {
-        let token = crate::core::auth::mint_token(
-            &body.username,
-            &auth.secret,
-            chrono::Utc::now().timestamp(),
-        )
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("JWT error: {}", e),
-            )
-        })?;
-
-        Ok(Json(serde_json::json!({
-            "token": token,
-            "expires_in": crate::core::auth::TOKEN_TTL_SECS,
-        })))
-    } else {
-        Err((StatusCode::UNAUTHORIZED, "Invalid credentials".to_string()))
+    if !ok {
+        let actor = crate::core::auth::refused_sign_in_actor(&body.username, &auth.username);
+        record_audit(
+            &db,
+            actor,
+            "sign_in",
+            None,
+            DETAIL,
+            "err: invalid credentials",
+            Some(&ip),
+        );
+        return Err((StatusCode::UNAUTHORIZED, "Invalid credentials".to_string()));
     }
+    let token =
+        crate::core::auth::mint_token(&body.username, &auth.secret, chrono::Utc::now().timestamp());
+    let outcome = match &token {
+        Ok(_) => "ok".to_string(),
+        Err(e) => format!("err: {}", e),
+    };
+    record_audit(
+        &db,
+        &body.username,
+        "sign_in",
+        None,
+        DETAIL,
+        &outcome,
+        Some(&ip),
+    );
+    let token = token.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("JWT error: {}", e),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "token": token,
+        "expires_in": crate::core::auth::TOKEN_TTL_SECS,
+    })))
 }
 
 /// Mint a short-lived single-purpose WebSocket ticket for the caller.
@@ -3829,6 +3920,7 @@ async fn auth_middleware(
     }
     let session_door =
         path == "/auth/session" && matches!(*request.method(), Method::POST | Method::DELETE);
+    let socket = opens_telemetry_socket(path);
 
     // CRITICAL: read the config under a SHORT-lived guard and then drop
     // it before calling next.run(). Holding the guard across the await
@@ -3855,10 +3947,11 @@ async fn auth_middleware(
     // WebSocket upgrades from API clients -- a short-lived ticket on
     // the query string, which MUST be a ticket (ws claim, 30 s expiry,
     // minted via POST /api/auth/ws-ticket) so long-lived tokens never
-    // land in request logs; else the browser's session cookie, which
-    // must come from the console's own origin for anything that is not
-    // a plain read. Validation lives in core (lib-testable); the
-    // subject becomes the audit actor for the request.
+    // land in request logs, and opens the telemetry socket only; else
+    // the browser's session cookie, which must come from the console's
+    // own origin for anything that is not a plain read. Validation
+    // lives in core (lib-testable); the subject becomes the audit actor
+    // for the request.
     let query = request.uri().query().map(str::to_owned);
     let user: Option<Arc<str>> = match crate::core::auth::credential(&headers, query.as_deref()) {
         Credential::Bearer(token) => Some(Arc::from(
@@ -3866,6 +3959,14 @@ async fn auth_middleware(
                 .map_err(|e| (StatusCode::UNAUTHORIZED, e))?
                 .as_str(),
         )),
+        Credential::Ticket(_) if !socket => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "a socket ticket opens the telemetry socket only \
+                 (the request was not carried out)"
+                    .to_string(),
+            ));
+        }
         Credential::Ticket(ticket) => Some(Arc::from(
             crate::core::auth::validate_token(ticket, &secret, true)
                 .map_err(|e| (StatusCode::UNAUTHORIZED, e))?
@@ -3911,6 +4012,15 @@ async fn auth_middleware(
             "missing token or session (the request was not carried out)".to_string(),
         )),
     }
+}
+
+/// Whether a request opens a target's telemetry socket, the one route
+/// a socket ticket authenticates: `/targets/{id}/telemetry/live`, as
+/// the middleware sees it under the /api prefix.
+fn opens_telemetry_socket(path: &str) -> bool {
+    path.strip_prefix("/targets/")
+        .and_then(|rest| rest.strip_suffix("/telemetry/live"))
+        .is_some_and(|id| !id.is_empty() && !id.contains('/'))
 }
 
 /* ----------------------------- Rate Limiting ----------------------------- */
@@ -4136,7 +4246,7 @@ fn spawn_sample_writer(
     db: Arc<TelemetryDb>,
     mut rx: broadcast::Receiver<TelemetrySample>,
     metrics: Arc<TargetMetrics>,
-) {
+) -> std::thread::JoinHandle<()> {
     use std::sync::atomic::Ordering;
 
     fn flush(
@@ -4253,33 +4363,46 @@ fn spawn_sample_writer(
             &mut failed_batches,
             &mut last_err_log,
         );
-    });
+    })
 }
 
-/// Take every target down at the stop signal, closing connections. The
-/// write guard covers only what needs it (closing connect admission,
-/// stopping the routers and polls, collecting each link); it is dropped
-/// before waiting on any link mutex, which a connect in its dial or an
-/// upload can hold for seconds while every request needs the state's
-/// guard. A connect that completes after this sees `stopping` and tears
-/// its link down.
+/// How long shutdown waits for the sample writers to write what they
+/// hold: a writer blocked on a busy database gives up after SQLite's
+/// busy timeout (5 s) anyway, and the rest of the shutdown must fit the
+/// container's stop timeout (10 s).
+const SAMPLE_WRITER_FLUSH_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Take every target down at the stop signal: close connections, then
+/// let each sample writer write what it holds. The write guard covers
+/// only what needs it (closing connect admission, stopping the routers
+/// and polls, closing each target's sample channel, collecting each link
+/// and writer); it is dropped before waiting on any link mutex, which a
+/// connect in its dial or an upload can hold for seconds while every
+/// request needs the state's guard. A connect that completes after this
+/// sees `stopping` and tears its link down.
 async fn shut_down_targets(state: &AppState) {
-    let links: Vec<(String, Arc<Mutex<ProtocolLink>>)> = {
+    let mut links = Vec::new();
+    let mut routers = Vec::new();
+    let mut writers = Vec::new();
+    {
         let mut st = state.write().await;
         st.stopping = true;
-        st.targets
-            .iter_mut()
-            .map(|(id, target)| {
-                if let Some(h) = target._router_handle.take() {
-                    h.abort();
-                }
-                for h in target._poll_handles.drain(..) {
-                    h.abort();
-                }
-                (id.clone(), target.client.clone())
-            })
-            .collect()
-    };
+        for (id, target) in st.targets.iter_mut() {
+            if let Some(h) = target._router_handle.take() {
+                h.abort();
+                routers.push(h);
+            }
+            for h in target._poll_handles.drain(..) {
+                h.abort();
+            }
+            // A writer ends once every sender of its channel is gone:
+            // this one, replaced here, and the router's, which goes with
+            // the router.
+            target.sample_tx = broadcast::channel(1).0;
+            writers.extend(target.sample_writer.take());
+            links.push((id.clone(), target.client.clone()));
+        }
+    }
     for (id, client) in links {
         // Up from our side, peer or no peer: a listening link's
         // socket and tasks end here too.
@@ -4288,6 +4411,21 @@ async fn shut_down_targets(state: &AppState) {
             cli.disconnect();
             tracing::info!("Disconnected target {} during shutdown", id);
         }
+    }
+    for router in routers {
+        let _ = router.await;
+    }
+    let flushed = tokio::time::timeout(SAMPLE_WRITER_FLUSH_LIMIT, async {
+        for writer in writers {
+            let _ = tokio::task::spawn_blocking(move || writer.join()).await;
+        }
+    })
+    .await;
+    if flushed.is_err() {
+        tracing::warn!(
+            "sample writers still writing after {:?}; their last samples may be lost",
+            SAMPLE_WRITER_FLUSH_LIMIT
+        );
     }
 }
 
@@ -4311,13 +4449,17 @@ async fn main() {
     let cli = Cli::parse();
 
     if cli.hash_password {
-        let mut password = String::new();
+        let mut line = String::new();
         eprintln!("Password (echoed):");
-        if std::io::stdin().read_line(&mut password).is_err() || password.trim().is_empty() {
+        let password = match std::io::stdin().read_line(&mut line) {
+            Ok(_) => password_from_line(&line),
+            Err(_) => None,
+        };
+        let Some(password) = password else {
             eprintln!("no password read from stdin");
             std::process::exit(1);
-        }
-        match crate::core::auth::hash_password(password.trim()) {
+        };
+        match crate::core::auth::hash_password(password) {
             Ok(hash) => {
                 println!("{}", hash);
                 std::process::exit(0);
@@ -4509,6 +4651,7 @@ async fn main() {
                 record_table,
                 _router_handle: None,
                 _poll_handles: Vec::new(),
+                sample_writer: None,
             },
         );
     }
@@ -4533,14 +4676,15 @@ async fn main() {
     };
 
     // Spawn background writer: subscribes to each target's sample_tx and writes to DB.
-    // Each writer flushes remaining samples when the broadcast channel closes (shutdown).
-    for (id, target) in targets.iter() {
-        spawn_sample_writer(
+    // Each writer flushes remaining samples when the broadcast channel closes;
+    // shutdown closes the channels and waits for the writers (shut_down_targets).
+    for (id, target) in targets.iter_mut() {
+        target.sample_writer = Some(spawn_sample_writer(
             id.clone(),
             db.clone(),
             target.sample_tx.subscribe(),
             target.metrics.clone(),
-        );
+        ));
     }
 
     // Spawn periodic maintenance (every 60 seconds)
@@ -4966,7 +5110,7 @@ mod tests {
     struct Server {
         state: AppState,
         db: Arc<TelemetryDb>,
-        _dir: TempDir,
+        dir: TempDir,
     }
 
     impl Server {
@@ -5011,11 +5155,7 @@ mod tests {
                 sessions: Arc::new(sessions),
                 stopping: false,
             }));
-            Self {
-                state,
-                db,
-                _dir: dir,
-            }
+            Self { state, db, dir }
         }
 
         /// One request answered in process by the router the server
@@ -5101,6 +5241,7 @@ mod tests {
             record_table: None,
             _router_handle: None,
             _poll_handles: Vec::new(),
+            sample_writer: None,
         }
     }
 
@@ -5174,7 +5315,7 @@ mod tests {
     /// `value` encoded into `field` alone: the bytes, or the refusal.
     fn encoded(field: &FieldDef, value: &serde_json::Value) -> Result<Vec<u8>, String> {
         let mut buf = vec![0u8; field.size];
-        encode_field(&mut buf, field, value).map(|()| buf)
+        encode_field(&mut buf, field, value, false).map(|()| buf)
     }
 
     /// @test A tunable value its field cannot hold is refused, never
@@ -5840,6 +5981,7 @@ mod tests {
             .collect();
         let expected = [
             ("(unknown user)", "sign_in", "err: invalid credentials"),
+            ("(unknown user)", "sign_in", "err: invalid credentials"),
             ("ops", "disconnect_target", "ok"),
             ("api-client", "disconnect_target", "ok"),
         ]
@@ -5865,5 +6007,400 @@ mod tests {
         let audit = server.audit();
         assert_eq!(audit.len(), 1);
         assert_eq!(audit[0].actor, "operator");
+    }
+
+    /* ---- Byte order, passwords, uploads, audit, tickets, writers, trim ---- */
+
+    /// A component with one tunable block and the given byte-order stamp.
+    fn block_dicts(
+        byte_order: Option<&str>,
+        fields: serde_json::Value,
+        size: usize,
+    ) -> StructDictionary {
+        let dict: ComponentDict = serde_json::from_value(json!({
+            "component": "Block",
+            "byte_order": byte_order,
+            "structs": { "BlockParams": {
+                "category": "TUNABLE_PARAM", "size": size, "fields": fields,
+            }},
+        }))
+        .unwrap();
+        StructDictionary {
+            components: HashMap::from([("Block".to_string(), dict)]),
+        }
+    }
+
+    /// @test A tunable value is written in its dictionary's byte order:
+    /// a big-endian field gets its most significant byte first, array
+    /// elements each in turn, and every scalar a block decodes to is
+    /// written back to the block's own bytes in either order, so an
+    /// unedited Apply rewrites what was read.
+    #[test]
+    fn tunable_values_encode_in_the_dictionary_byte_order() {
+        let mut buf = [0u8; 2];
+        encode_field(&mut buf, &field("uint", 2), &json!(0x1234), true).unwrap();
+        assert_eq!(buf, [0x12, 0x34], "big-endian uint16");
+        let pair: FieldDef = serde_json::from_value(json!({
+            "name": "f", "type": "array", "offset": 0, "size": 4,
+            "element_type": "int", "dims": [2],
+        }))
+        .unwrap();
+        let mut buf = [0u8; 4];
+        encode_field(&mut buf, &pair, &json!([-2, 0x0102]), true).unwrap();
+        assert_eq!(buf, [0xFF, 0xFE, 0x01, 0x02], "big-endian int16 elements");
+
+        let fields = json!([
+            { "name": "wide", "type": "int", "offset": 0, "size": 8 },
+            { "name": "flag", "type": "bool", "offset": 8, "size": 1 },
+            { "name": "tiny", "type": "int", "offset": 9, "size": 1 },
+            { "name": "short", "type": "uint", "offset": 10, "size": 2 },
+            { "name": "word", "type": "int", "offset": 12, "size": 4 },
+            { "name": "ratio", "type": "float", "offset": 16, "size": 4 },
+            { "name": "precise", "type": "double", "offset": 20, "size": 8 },
+        ]);
+        // The block's values, each field's bytes in the given order.
+        let block = |big_endian: bool| {
+            let mut out = Vec::new();
+            for le in [
+                &(-2i64).to_le_bytes()[..],
+                &[1],
+                &(-5i8).to_le_bytes(),
+                &0x1234u16.to_le_bytes(),
+                &(-100_000i32).to_le_bytes(),
+                &1.5f32.to_le_bytes(),
+                &(-0.25f64).to_le_bytes(),
+            ] {
+                let mut bytes = le.to_vec();
+                if big_endian {
+                    bytes.reverse();
+                }
+                out.extend(bytes);
+            }
+            out
+        };
+        for (stamp, big_endian) in [(None, false), (Some("le"), false), (Some("be"), true)] {
+            let bytes = block(big_endian);
+            let dicts = block_dicts(stamp, fields.clone(), 28);
+            let decoded = dicts
+                .decode_payload("Block", "BlockParams", &bytes)
+                .unwrap();
+            let mut written = vec![0u8; 28];
+            for field in &dicts.components["Block"].structs["BlockParams"].fields {
+                encode_field(&mut written, field, &decoded[&field.name], big_endian)
+                    .unwrap_or_else(|e| panic!("{stamp:?} {}: {e}", field.name));
+            }
+            assert_eq!(written, bytes, "{stamp:?}: {decoded}");
+        }
+    }
+
+    /// @test `--hash-password` hashes the password as typed, only the
+    /// line ending removed, since sign-in compares the password exactly
+    /// as it is sent: edge spaces stay, a CRLF or no line ending at all
+    /// reads the same, and an empty or blank line holds no password.
+    #[test]
+    fn a_hashed_password_keeps_its_edge_spaces() {
+        assert_eq!(
+            password_from_line("  pass phrase \n"),
+            Some("  pass phrase ")
+        );
+        assert_eq!(password_from_line("secret\r\n"), Some("secret"));
+        assert_eq!(password_from_line("secret"), Some("secret"));
+        assert_eq!(password_from_line("\n"), None);
+        assert_eq!(password_from_line(" \t \n"), None);
+    }
+
+    /// Dictionaries describing a sequence plan, the vehicle's shape in
+    /// miniature: a 32-byte plan of an 8-byte header and two 12-byte
+    /// steps, each with its delay and timeout in cycles.
+    fn sequence_dicts() -> StructDictionary {
+        let dict: ComponentDict = serde_json::from_value(json!({
+            "component": "Action",
+            "structs": {
+                "StandaloneSequenceTprm": { "category": "PROTOCOL", "size": 32, "fields": [
+                    { "name": "sequenceId", "type": "uint", "offset": 0, "size": 2 },
+                    { "name": "stepCount", "type": "uint", "offset": 4, "size": 1 },
+                    { "name": "type", "type": "uint", "offset": 6, "size": 1 },
+                    { "name": "steps", "type": "array", "offset": 8, "size": 24 },
+                ]},
+                "StandaloneStepTprm": { "category": "STRUCT", "size": 12, "fields": [
+                    { "name": "actionType", "type": "uint", "offset": 0, "size": 1 },
+                    { "name": "delayCycles", "type": "uint", "offset": 4, "size": 4 },
+                    { "name": "timeoutCycles", "type": "uint", "offset": 8, "size": 4 },
+                ]},
+            },
+        }))
+        .unwrap();
+        StructDictionary {
+            components: HashMap::from([("Action".to_string(), dict)]),
+        }
+    }
+
+    /// @test An upload is checked as an RTS sequence only when it goes
+    /// into a directory named rts: a plan the vehicle would refuse at
+    /// load is refused (422) on its way to bank_a/rts/ or rts/, while
+    /// the same bytes to parts/, to shirts/ or to a file named rts go on
+    /// to the link.
+    #[tokio::test]
+    async fn only_uploads_into_an_rts_directory_are_checked_as_sequences() {
+        use base64::Engine;
+        let server = Server::with_dicts(APEX_TARGET, sequence_dicts());
+        // One RTS step whose timeout expires within its own delay.
+        let mut plan = vec![0u8; 32];
+        plan[4] = 1;
+        plan[12..16].copy_from_slice(&30u32.to_le_bytes());
+        plan[16..20].copy_from_slice(&30u32.to_le_bytes());
+        let plan = base64::engine::general_purpose::STANDARD.encode(&plan);
+        let upload = |path: &str| json!({ "remote_path": path, "content_base64": plan });
+        let uri = "/api/targets/target-0/upload";
+
+        for path in ["bank_a/rts/seq1.bin", "rts/seq1.bin"] {
+            let (status, body) = server.post(uri, upload(path)).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{path}: {body}");
+            assert!(
+                body.contains("TIMEOUT_SHORTER_THAN_DELAY"),
+                "{path}: {body}"
+            );
+        }
+        for path in ["parts/blob.bin", "bank_a/shirts/seq1.bin", "bank_a/rts"] {
+            let (status, body) = server.post(uri, upload(path)).await;
+            assert_eq!(
+                (status, body.as_str()),
+                (StatusCode::BAD_GATEWAY, "Upload failed: not connected"),
+                "{path}"
+            );
+        }
+    }
+
+    /// @test Downsampling rewrites stored history, so it is audited like
+    /// a trim: under the actor, with the rows it converted.
+    #[tokio::test]
+    async fn downsampling_is_audited() {
+        let server = Server::new(APEX_TARGET);
+        // Two samples in one minute bucket, two hours old.
+        let minute = (now_ms() - 2 * 3_600_000) / 60_000 * 60_000;
+        server
+            .db
+            .insert_batch(&[
+                sample("A.x", minute, 1.0),
+                sample("A.x", minute + 1_000, 3.0),
+            ])
+            .unwrap();
+
+        let (status, body) = server
+            .call(request(
+                Method::POST,
+                "/api/telemetry/downsample",
+                &[],
+                None,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let audit = server.audit();
+        assert_eq!(audit.len(), 1, "downsampling wrote no audit row");
+        assert_eq!(
+            (
+                audit[0].actor.as_str(),
+                audit[0].action.as_str(),
+                audit[0].status.as_str()
+            ),
+            ("operator", "downsample_telemetry", "ok")
+        );
+        assert_eq!(
+            audit[0].detail.as_deref(),
+            Some("samples_before=2 samples_after=1 removed=1")
+        );
+    }
+
+    /// @test With auth on the bearer login is audited as signing in at
+    /// the session door is: a refusal under "(unknown user)" for a name
+    /// that is not the configured one, never the name submitted, and a
+    /// success under the user, both marked as the bearer login.
+    #[tokio::test]
+    async fn the_bearer_login_is_audited_like_a_sign_in() {
+        let hash = crate::core::auth::hash_password("pass phrase").unwrap();
+        let server = Server::new(&format!(
+            r#"
+            [auth]
+            enabled = true
+            secret = "{SECRET}"
+            username = "ops"
+            password_hash = "{hash}"
+            {APEX_TARGET}
+            "#
+        ));
+        let login = |user: &str, password: &str| {
+            request(
+                Method::POST,
+                "/api/auth/login",
+                &[],
+                Some(json!({ "username": user, "password": password })),
+            )
+        };
+
+        let (status, body) = server.call(login("hunter2", "x")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        let (status, body) = server.call(login("ops", "pass phrase")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("\"token\""), "{body}");
+
+        let audited: Vec<(String, String, Option<String>, String)> = server
+            .audit()
+            .into_iter()
+            .map(|e| (e.actor, e.action, e.detail, e.status))
+            .collect();
+        let bearer = Some("bearer token".to_string());
+        assert_eq!(
+            audited,
+            [
+                (
+                    "(unknown user)".to_string(),
+                    "sign_in".to_string(),
+                    bearer.clone(),
+                    "err: invalid credentials".to_string()
+                ),
+                (
+                    "ops".to_string(),
+                    "sign_in".to_string(),
+                    bearer,
+                    "ok".to_string()
+                ),
+            ]
+        );
+    }
+
+    /// @test A socket ticket opens the telemetry socket and nothing else:
+    /// on another route's query string, for a read or a write, or in any
+    /// route's Authorization header, it is refused, and nothing is done;
+    /// on the socket's query string it passes.
+    #[tokio::test]
+    async fn a_socket_ticket_opens_only_the_telemetry_socket() {
+        let server = Server::new(&auth_on());
+        let now = chrono::Utc::now().timestamp();
+        let ticket = crate::core::auth::mint_ws_ticket("api-client", SECRET, now).unwrap();
+        let as_bearer = format!("Bearer {ticket}");
+        let upgrade = [
+            ("connection", "upgrade"),
+            ("upgrade", "websocket"),
+            ("sec-websocket-version", "13"),
+            ("sec-websocket-key", "AAAAAAAAAAAAAAAAAAAAAA=="),
+        ];
+        let mut upgrade_as_bearer = upgrade.to_vec();
+        upgrade_as_bearer.push(("authorization", as_bearer.as_str()));
+        let socket = format!("/api/targets/target-0/telemetry/live?ticket={ticket}");
+
+        for (label, request) in [
+            (
+                "a read",
+                request(
+                    Method::GET,
+                    &format!("/api/targets?ticket={ticket}"),
+                    &[],
+                    None,
+                ),
+            ),
+            (
+                "a write",
+                request(
+                    Method::POST,
+                    &format!("/api/targets/target-0/disconnect?ticket={ticket}"),
+                    &[],
+                    None,
+                ),
+            ),
+            (
+                "a header",
+                request(
+                    Method::GET,
+                    "/api/targets",
+                    &[("authorization", &as_bearer)],
+                    None,
+                ),
+            ),
+            (
+                "a header on the socket",
+                request(
+                    Method::GET,
+                    "/api/targets/target-0/telemetry/live",
+                    &upgrade_as_bearer,
+                    None,
+                ),
+            ),
+        ] {
+            let (status, body) = server.call(request).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{label}: {body}");
+        }
+        assert!(
+            server.audit().is_empty(),
+            "a refused ticket's write was carried out"
+        );
+
+        let (status, body) = server
+            .call(request(Method::GET, &socket, &upgrade, None))
+            .await;
+        assert_eq!(status, StatusCode::UPGRADE_REQUIRED, "{body}");
+    }
+
+    /// @test Shutdown waits for each target's sample writer to write what
+    /// it holds: the samples broadcast before the stop signal are in the
+    /// database when shutdown returns, though another connection held
+    /// the database's write lock when it began.
+    #[tokio::test]
+    async fn shutdown_waits_for_the_sample_writers() {
+        let server = Server::new(APEX_TARGET);
+        let blocker = rusqlite::Connection::open(server.dir.path().join("zenith.db")).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        {
+            let mut st = server.state.write().await;
+            let target = st.targets.get_mut("target-0").unwrap();
+            target.sample_writer = Some(spawn_sample_writer(
+                "target-0".to_string(),
+                server.db.clone(),
+                target.sample_tx.subscribe(),
+                target.metrics.clone(),
+            ));
+            for i in 0..10u64 {
+                target
+                    .sample_tx
+                    .send(sample("A.x", 1_000 + i, i as f64))
+                    .unwrap();
+            }
+        }
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            blocker.execute_batch("ROLLBACK").unwrap();
+        });
+
+        shut_down_targets(&server.state).await;
+        assert_eq!(
+            server.db.count().unwrap(),
+            10,
+            "shutdown returned before the writer wrote its samples"
+        );
+        release.join().unwrap();
+    }
+
+    /// @test A trim deletes the number of samples asked for, oldest
+    /// first: none for a count of 0, and a quarter of the target's
+    /// samples only when no count is given.
+    #[tokio::test]
+    async fn a_trim_deletes_what_it_is_asked_for() {
+        let server = Server::new(APEX_TARGET);
+        let samples: Vec<TelemetrySample> = (0..8u64)
+            .map(|i| sample("A.x", 1_000 + i, i as f64))
+            .collect();
+        server.db.insert_batch(&samples).unwrap();
+        let uri = "/api/targets/target-0/storage/trim";
+
+        for (body, deleted, left) in [
+            (json!({ "count": 0 }), 0, 8),
+            (json!({}), 2, 6),
+            (json!({ "count": 3 }), 3, 3),
+        ] {
+            let (status, answer) = server.post(uri, body.clone()).await;
+            assert_eq!(status, StatusCode::OK, "{body}: {answer}");
+            let answer: serde_json::Value = serde_json::from_str(&answer).unwrap();
+            assert_eq!(answer["deleted"], json!(deleted), "{body}");
+            assert_eq!(server.db.count().unwrap(), left, "{body}");
+        }
     }
 }

@@ -131,7 +131,9 @@ fn encode_claims(claims: serde_json::Value, secret: &str) -> Result<String, Stri
 ///
 /// `from_query` marks credentials that arrived on a query string:
 /// only ws tickets are accepted there, so a long-lived bearer token
-/// can never end up in request logs.
+/// can never end up in request logs, and only there, so a ticket is
+/// never a bearer token. Which route a ticket may open is the
+/// middleware's to decide: the telemetry socket alone.
 ///
 /// A credential is refused from the second its `exp` passes. The
 /// server mints and checks its own tokens on one clock, so the
@@ -150,6 +152,11 @@ pub fn validate_token(token: &str, secret: &str, from_query: bool) -> Result<Str
 
     if from_query && !decoded.claims.ws {
         return Err("query credentials must be ws tickets (POST /api/auth/ws-ticket)".into());
+    }
+    if !from_query && decoded.claims.ws {
+        return Err(
+            "a socket ticket goes on the telemetry socket's query string, not in a header".into(),
+        );
     }
     Ok(decoded.claims.sub)
 }
@@ -256,6 +263,7 @@ mod tests {
 
         let ticket = mint_ws_ticket("ops", SECRET, now()).unwrap();
         assert_eq!(validate_token(&ticket, SECRET, true).unwrap(), "ops");
+        assert!(validate_token(&ticket, SECRET, false).is_err());
     }
 
     /// @test A token signed with the right secret is still refused when

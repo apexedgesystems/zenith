@@ -334,7 +334,8 @@ impl StructDictionary {
         Ok(Self { components })
     }
 
-    /// Decode a binary payload using a struct definition.
+    /// Decode a binary payload using a struct definition, each value in
+    /// the dictionary's byte order.
     ///
     /// Returns a JSON object with field names mapped to decoded values.
     pub fn decode_payload(
@@ -354,7 +355,7 @@ impl StructDictionary {
             if field.offset + field.size > data.len() {
                 continue;
             }
-            let value = decode_field(data, field);
+            let value = decode_field(data, field, dict.big_endian());
             fields.insert(field.name.clone(), value);
         }
 
@@ -453,7 +454,7 @@ impl StructDictionary {
                     let mut count_matches = false;
                     for field in &hdr_def.fields {
                         if field.offset + field.size <= hdr_def.size {
-                            let val = decode_field(data, field);
+                            let val = decode_field(data, field, dict.big_endian());
                             // Check if this field's value matches the entry count
                             if let Some(n) = val.as_u64() {
                                 if n == n_entries as u64 {
@@ -481,8 +482,10 @@ impl StructDictionary {
                         let mut ent_fields = serde_json::Map::new();
                         for field in &ent_def.fields {
                             if field.offset + field.size <= ent_def.size {
-                                ent_fields
-                                    .insert(field.name.clone(), decode_field(entry_data, field));
+                                ent_fields.insert(
+                                    field.name.clone(),
+                                    decode_field(entry_data, field, dict.big_endian()),
+                                );
                             }
                         }
                         entries.push(serde_json::Value::Object(ent_fields));
@@ -505,57 +508,33 @@ impl StructDictionary {
 
 /* ----------------------------- Field Decoding ----------------------------- */
 
-fn decode_field(data: &[u8], field: &FieldDef) -> serde_json::Value {
+/// One field's value from a parameter block, read by its (type, size)
+/// in the dictionary's byte order. A type no numeric arm reads (an
+/// array, a string, a nested blob) comes back as hex. A bool reads as
+/// its byte, so a value other than 0 or 1 shows as it is.
+fn decode_field(data: &[u8], field: &FieldDef, big_endian: bool) -> serde_json::Value {
     let off = field.offset;
+    // The field's N bytes, least significant first.
+    fn le<const N: usize>(data: &[u8], off: usize, big_endian: bool) -> [u8; N] {
+        let mut bytes = [0u8; N];
+        bytes.copy_from_slice(&data[off..off + N]);
+        if big_endian {
+            bytes.reverse();
+        }
+        bytes
+    }
     match (field.field_type.as_str(), field.size) {
-        ("uint", 1) => serde_json::json!(data[off]),
-        ("uint", 2) => serde_json::json!(u16::from_le_bytes([data[off], data[off + 1]])),
-        ("uint", 4) => {
-            serde_json::json!(u32::from_le_bytes([
-                data[off],
-                data[off + 1],
-                data[off + 2],
-                data[off + 3]
-            ]))
-        }
-        ("uint", 8) => {
-            serde_json::json!(u64::from_le_bytes([
-                data[off],
-                data[off + 1],
-                data[off + 2],
-                data[off + 3],
-                data[off + 4],
-                data[off + 5],
-                data[off + 6],
-                data[off + 7],
-            ]))
-        }
+        ("uint", 1) | ("bool", 1) => serde_json::json!(data[off]),
+        ("uint", 2) => serde_json::json!(u16::from_le_bytes(le(data, off, big_endian))),
+        ("uint", 4) => serde_json::json!(u32::from_le_bytes(le(data, off, big_endian))),
+        ("uint", 8) => serde_json::json!(u64::from_le_bytes(le(data, off, big_endian))),
         ("int", 1) => serde_json::json!(data[off] as i8),
-        ("int", 2) => serde_json::json!(i16::from_le_bytes([data[off], data[off + 1]])),
-        ("int", 4) => {
-            serde_json::json!(i32::from_le_bytes([
-                data[off],
-                data[off + 1],
-                data[off + 2],
-                data[off + 3]
-            ]))
-        }
-        ("float", 4) => {
-            let v = f32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
-            serde_json::json!(v)
-        }
+        ("int", 2) => serde_json::json!(i16::from_le_bytes(le(data, off, big_endian))),
+        ("int", 4) => serde_json::json!(i32::from_le_bytes(le(data, off, big_endian))),
+        ("int", 8) => serde_json::json!(i64::from_le_bytes(le(data, off, big_endian))),
+        ("float", 4) => serde_json::json!(f32::from_le_bytes(le(data, off, big_endian))),
         ("float", 8) | ("double", 8) => {
-            let v = f64::from_le_bytes([
-                data[off],
-                data[off + 1],
-                data[off + 2],
-                data[off + 3],
-                data[off + 4],
-                data[off + 5],
-                data[off + 6],
-                data[off + 7],
-            ]);
-            serde_json::json!(v)
+            serde_json::json!(f64::from_le_bytes(le(data, off, big_endian)))
         }
         _ => {
             // Unknown type -- return hex
@@ -1489,6 +1468,109 @@ mod nested_tests {
         assert_eq!(
             dicts.decode_variable_length_for("STATE", &table, Some("Ctl")),
             None
+        );
+    }
+
+    /// @test Parameter values decode by their type in their dictionary's
+    /// byte order: int64 and bool read as numbers, not hex, and a
+    /// big-endian dictionary's fields read big-endian, in a fixed block
+    /// and in a header + entries block alike. The same values stamped
+    /// little-endian decode the same under a little-endian dictionary,
+    /// stamped or not.
+    #[test]
+    fn parameter_values_decode_by_type_in_the_dictionary_byte_order() {
+        let tunable = |size: usize, fields: Vec<FieldDef>| StructDef {
+            category: "TUNABLE_PARAM".to_string(),
+            size,
+            opcode: None,
+            fields,
+            layout_hash: None,
+            canonical_spec: None,
+            packed: None,
+        };
+        let dicts = |byte_order: Option<&str>| StructDictionary {
+            components: HashMap::from([(
+                "Wide".to_string(),
+                ComponentDict {
+                    component: "Wide".to_string(),
+                    byte_order: byte_order.map(str::to_string),
+                    structs: HashMap::from([
+                        (
+                            "Params".to_string(),
+                            tunable(
+                                24,
+                                vec![
+                                    f("wide", "int", 0, 8),
+                                    f("flag", "bool", 8, 1),
+                                    f("tiny", "int", 9, 1),
+                                    f("short", "uint", 10, 2),
+                                    f("word", "int", 12, 4),
+                                    f("ratio", "float", 16, 4),
+                                    f("count", "uint", 20, 4),
+                                ],
+                            ),
+                        ),
+                        ("Header".to_string(), tunable(2, vec![f("n", "uint", 0, 2)])),
+                        ("Entry".to_string(), tunable(4, vec![f("v", "int", 0, 4)])),
+                    ]),
+                    enums: HashMap::new(),
+                    capabilities: Vec::new(),
+                },
+            )]),
+        };
+        // The block's values, each field's bytes in the given order.
+        let block = |big_endian: bool| {
+            let mut out = Vec::new();
+            for le in [
+                &(-2i64).to_le_bytes()[..],
+                &[1],
+                &(-5i8).to_le_bytes(),
+                &0x1234u16.to_le_bytes(),
+                &(-100_000i32).to_le_bytes(),
+                &1.5f32.to_le_bytes(),
+                &0x0102_0304u32.to_le_bytes(),
+            ] {
+                let mut bytes = le.to_vec();
+                if big_endian {
+                    bytes.reverse();
+                }
+                out.extend(bytes);
+            }
+            out
+        };
+        let values = Some(serde_json::json!({
+            "wide": -2, "flag": 1, "tiny": -5, "short": 0x1234,
+            "word": -100_000, "ratio": 1.5, "count": 0x0102_0304,
+        }));
+
+        let mut wrong = Vec::new();
+        for (stamp, big_endian) in [(None, false), (Some("le"), false), (Some("be"), true)] {
+            let decoded = dicts(stamp).decode_payload("Wide", "Params", &block(big_endian));
+            if decoded != values {
+                wrong.push(format!("{stamp:?}: {decoded:?}"));
+            }
+        }
+
+        let mut table = 2u16.to_be_bytes().to_vec();
+        table.extend((-1i32).to_be_bytes());
+        table.extend(7i32.to_be_bytes());
+        let decoded =
+            dicts(Some("be")).decode_variable_length_for("TUNABLE_PARAM", &table, Some("Wide"));
+        let header_and_entries = Some((
+            "Wide".to_string(),
+            "Header".to_string(),
+            "Entry".to_string(),
+            serde_json::json!({
+                "header": {"n": 2},
+                "entries": [{"v": -1}, {"v": 7}],
+            }),
+        ));
+        if decoded != header_and_entries {
+            wrong.push(format!("be header and entries: {decoded:?}"));
+        }
+        assert!(
+            wrong.is_empty(),
+            "decoded otherwise than stamped: {wrong:#?}"
         );
     }
 

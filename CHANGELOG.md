@@ -116,6 +116,21 @@ architecture review; work before that is the v0.0.1 tag.
 - The command route reads a uid or opcode as hex only with a `0x` prefix
   and as decimal otherwise, as documented: `256` is 256, not 0x256. A
   client sending bare hex digits gets a 400 and must add the prefix.
+- Tunables reads int64 and bool fields as numbers instead of hex, and
+  reads and writes a big-endian dictionary's fields in that byte order.
+- `zenith --hash-password` hashes the password as typed, edge spaces
+  included, as sign-in compares it; only the line ending is removed.
+- An upload is checked as an RTS sequence only when it goes into a
+  directory named `rts`, not whenever its path contains `rts/`
+  (`parts/`), and the refusal reads without a run of spaces.
+- Downsampling and the bearer-token login are audited: downsampling
+  with the rows it converted, the login as a console sign-in is.
+- A socket ticket opens the telemetry socket only; on another route's
+  query string, or sent as a bearer token, it is refused.
+- Shutdown waits, up to 5 s, for each target's sample writer to write
+  the samples it holds, instead of exiting with them unwritten.
+- A trim with `count: 0` deletes nothing instead of a quarter of the
+  target's samples.
 - History queries over a window holding more samples than their limit
   return the newest ones, so a chart of a long window reaches the
   present instead of stopping at the limit's oldest samples. History
