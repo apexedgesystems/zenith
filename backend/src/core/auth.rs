@@ -132,9 +132,15 @@ fn encode_claims(claims: serde_json::Value, secret: &str) -> Result<String, Stri
 /// `from_query` marks credentials that arrived on a query string:
 /// only ws tickets are accepted there, so a long-lived bearer token
 /// can never end up in request logs.
+///
+/// A credential is refused from the second its `exp` passes. The
+/// server mints and checks its own tokens on one clock, so the
+/// library's default grace for clock skew (60 s) would only stretch
+/// every lifetime, a 30 s ticket to 90 s.
 pub fn validate_token(token: &str, secret: &str, from_query: bool) -> Result<String, String> {
     let mut validation = jsonwebtoken::Validation::default();
     validation.set_required_spec_claims(&["exp", "sub"]);
+    validation.leeway = 0;
     let decoded = jsonwebtoken::decode::<Claims>(
         token,
         &jsonwebtoken::DecodingKey::from_secret(secret.as_bytes()),
@@ -223,6 +229,20 @@ mod tests {
     fn expired_token_rejected() {
         let token = mint_token("ops", SECRET, now() - 2 * TOKEN_TTL_SECS).unwrap();
         assert!(validate_token(&token, SECRET, false).is_err());
+    }
+
+    /// @test A credential is refused from the second its exp passes, with
+    /// no grace: a socket ticket minted WS_TICKET_TTL_SECS + 1 seconds
+    /// ago, and a bearer token minted TOKEN_TTL_SECS + 1 seconds ago,
+    /// are both a second past their exp, so a "30 s" ticket lives 30 s.
+    #[test]
+    fn a_credential_past_its_exp_is_refused_at_once() {
+        let ticket = mint_ws_ticket("ops", SECRET, now() - WS_TICKET_TTL_SECS - 1).unwrap();
+        assert!(validate_token(&ticket, SECRET, true).is_err(), "ticket");
+        let token = mint_token("ops", SECRET, now() - TOKEN_TTL_SECS - 1).unwrap();
+        assert!(validate_token(&token, SECRET, false).is_err(), "token");
+        let fresh = mint_ws_ticket("ops", SECRET, now()).unwrap();
+        assert_eq!(validate_token(&fresh, SECRET, true).unwrap(), "ops");
     }
 
     /// @test Query-string credentials must be ws tickets: a full bearer

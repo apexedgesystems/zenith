@@ -449,7 +449,11 @@ impl TelemetryDb {
         Ok(())
     }
 
-    /// Query samples in a time range (returned in chronological order).
+    /// Query the newest `limit` samples in a time range, for one channel
+    /// or for every channel of the target, returned in chronological
+    /// order. Both paths walk their index newest first and stop at the
+    /// limit, so a window holding more samples than the limit gives its
+    /// most recent ones: a chart of a long window is drawn up to now.
     pub fn query_range(
         &self,
         target_id: &str,
@@ -464,7 +468,8 @@ impl TelemetryDb {
         self.with_reader(|conn| {
             if let Some(ch) = channel {
                 // Single channel: resolve the dictionary id first, then
-                // range-scan its (channel_id, timestamp_ms) index run.
+                // range-scan its (channel_id, timestamp_ms DESC) index
+                // run newest first, reversed into time order below.
                 let chan_id: Option<i64> = conn
                     .query_row(
                         "SELECT id FROM channels WHERE target_id = ?1 AND name = ?2",
@@ -480,7 +485,7 @@ impl TelemetryDb {
                     "SELECT timestamp_ms, value, v_min, v_max, agg_count FROM telemetry \
                      WHERE channel_id = ?1 \
                        AND timestamp_ms >= ?2 AND timestamp_ms <= ?3 \
-                     ORDER BY timestamp_ms ASC LIMIT ?4",
+                     ORDER BY timestamp_ms DESC LIMIT ?4",
                 )?;
                 let rows = stmt.query_map(
                     params![chan_id, start_ms as i64, end_ms as i64, limit as i64],
@@ -498,14 +503,16 @@ impl TelemetryDb {
                 for row in rows {
                     samples.push(row?);
                 }
+                samples.reverse();
                 Ok(samples)
             } else {
-                // All channels, newest first. INDEXED BY pins the plan
-                // to a backward walk of the time index with an O(1)
-                // dictionary probe per row, stopping at LIMIT -- the
-                // planner otherwise flips to a channels-outer join that
-                // scans and sorts the whole range (measured ~5.8 ms for
-                // LIMIT 100 over 100k rows, scaling with table size).
+                // All channels, newest first, reversed into time order
+                // below. INDEXED BY pins the plan to a backward walk of
+                // the time index with an O(1) dictionary probe per row,
+                // stopping at LIMIT -- the planner otherwise flips to a
+                // channels-outer join that scans and sorts the whole
+                // range (measured ~5.8 ms for LIMIT 100 over 100k rows,
+                // scaling with table size).
                 let mut stmt = conn.prepare_cached(
                     "SELECT c.name, t.timestamp_ms, t.value, t.v_min, t.v_max, t.agg_count \
                      FROM telemetry t INDEXED BY idx_telemetry_ts \
@@ -543,6 +550,7 @@ impl TelemetryDb {
                         envelope,
                     });
                 }
+                samples.reverse();
                 Ok(samples)
             }
         })
@@ -602,7 +610,9 @@ impl TelemetryDb {
         // config layouts always kept). The ranking must partition by
         // target_id: a global newest-100 would let one target's saves
         // evict another target's layouts. Plots are deleted explicitly
-        // because the FK cascade only fires with PRAGMA foreign_keys on.
+        // rather than left to the ON DELETE CASCADE: the bundled SQLite
+        // enforces foreign keys by default, but a connection can turn
+        // that off, and the cascade fires only while it is on.
         const RETAIN_PER_TARGET: i64 = 100;
         let stale_layouts = "SELECT id FROM (
                 SELECT id, ROW_NUMBER() OVER (
@@ -869,18 +879,19 @@ impl TelemetryDb {
     }
 
     /// One bounded step of the retention ladder: rows below `to_tier`
-    /// older than `cutoff_ms` are aggregated into `bucket_ms`-wide
-    /// envelope buckets at `to_tier` -- value becomes the (weighted)
-    /// mean, v_min/v_max keep the spread, agg_count the source-sample
-    /// total. Weighting by agg_count makes re-tiering exact: a tier-1
-    /// bucket of 9 samples pulls a tier-2 mean 9x harder than a
-    /// bucket of 1.
+    /// in the `bucket_ms`-wide buckets that end by `cutoff_ms` are
+    /// aggregated into envelope buckets at `to_tier` (the bucket the
+    /// cutoff falls in waits for a later pass) -- value becomes the
+    /// (weighted) mean, v_min/v_max keep the spread, agg_count the
+    /// source-sample total. Weighting by agg_count makes re-tiering
+    /// exact: a tier-1 bucket of 9 samples pulls a tier-2 mean 9x
+    /// harder than a bucket of 1.
     ///
     /// Processes at most `slice_ms` of source data per call, starting
     /// at the oldest eligible row, so a large backlog converges over
     /// successive maintenance ticks instead of one full-history
     /// rewrite under the writer lock. Returns zeros when nothing is
-    /// eligible (converged).
+    /// eligible (converged, or no bucket complete before the cutoff).
     pub fn tier_pass(
         &self,
         to_tier: u32,
@@ -908,13 +919,24 @@ impl TelemetryDb {
             });
         };
 
-        // Bucket-align the window so every bucket this pass writes is
-        // complete; the window never crosses the cutoff.
+        // Bucket-align both ends of the window so every bucket this pass
+        // writes is complete. The window never crosses the cutoff, and
+        // its end is aligned down: the bucket the cutoff falls in keeps
+        // its rows until a later cutoff passes the bucket's end, so no
+        // (channel, bucket) is ever written twice. With no complete
+        // bucket before the cutoff there is nothing to do yet.
         let window_start = (oldest / bucket) * bucket;
         let window_end = window_start
             .saturating_add(slice_ms.min(i64::MAX as u64) as i64)
             .max(window_start + bucket)
             .min(cutoff);
+        let window_end = (window_end / bucket) * bucket;
+        if window_end <= window_start {
+            return Ok(TierPassResult {
+                source_rows: 0,
+                bucket_rows: 0,
+            });
+        }
 
         // RAII transaction: an error between DELETE and re-INSERT must
         // roll back atomically, never leave history deleted without its
@@ -1064,6 +1086,10 @@ impl TelemetryDb {
     /// is necessary because ts_ms is millisecond-resolution and multiple
     /// entries within the same ms would otherwise be order-undefined.
     pub fn query_audit(&self, limit: usize, offset: usize) -> Result<Vec<AuditEntry>, DbError> {
+        // SQLite's OFFSET is signed and reads a negative value as none:
+        // an offset past i64 must stay past the end, not wrap into the
+        // first page.
+        let offset = i64::try_from(offset).unwrap_or(i64::MAX);
         self.with_reader(|conn| {
             let mut stmt = conn.prepare_cached(
                 "SELECT id, ts_ms, actor, action, target_id, detail, status, source_ip
@@ -1071,7 +1097,7 @@ impl TelemetryDb {
                  ORDER BY ts_ms DESC, id DESC
                  LIMIT ?1 OFFSET ?2",
             )?;
-            let rows = stmt.query_map(params![limit as i64, offset as i64], |row| {
+            let rows = stmt.query_map(params![limit as i64, offset], |row| {
                 Ok(AuditEntry {
                     id: row.get(0)?,
                     ts_ms: row.get::<_, i64>(1)? as u64,
@@ -2867,6 +2893,151 @@ mod tests {
         };
         assert_eq!(bucket("X"), (4.5, 0.0, 9.0, 10));
         assert_eq!(bucket("Y"), (102.0, 100.0, 104.0, 5));
+    }
+
+    /// @test The ladder's cutoffs are now minus a window, never on a
+    /// bucket boundary, and a pass tiers only the buckets that end by
+    /// its cutoff: the bucket the cutoff falls in keeps its rows at full
+    /// resolution until a later pass's cutoff passes its end, so no
+    /// (channel, bucket) is written twice across passes.
+    #[test]
+    fn tier_pass_never_writes_a_bucket_twice() {
+        let (_dir, db) = open_temp_db();
+        let t: Arc<str> = Arc::from("t1");
+        let x: Arc<str> = Arc::from("X");
+        let y: Arc<str> = Arc::from("Y");
+        let mut samples = Vec::new();
+        for i in 0..300u64 {
+            samples.push(sample(&t, &x, i * 1_000, i as f64));
+            samples.push(sample(&t, &y, i * 1_000, -(i as f64)));
+        }
+        db.insert_batch(&samples).unwrap();
+
+        // 60 s buckets: the first cutoff falls 5.3 s into [120 s, 180 s).
+        let p1 = db.tier_pass(MID_TIER, 125_300, 60_000, 600_000).unwrap();
+        assert_eq!(
+            (p1.source_rows, p1.bucket_rows),
+            (240, 4),
+            "two buckets each"
+        );
+        let p2 = db.tier_pass(MID_TIER, 185_300, 60_000, 600_000).unwrap();
+        assert_eq!(
+            (p2.source_rows, p2.bucket_rows),
+            (120, 2),
+            "one bucket each"
+        );
+        let doubled: i64 = {
+            let conn = db.writer.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM (SELECT 1 FROM telemetry WHERE tier = ?1
+                 GROUP BY channel_id, timestamp_ms HAVING COUNT(*) > 1)",
+                params![MID_TIER],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(doubled, 0, "a (channel, bucket) written twice");
+        let open_bucket = db
+            .query_range("t1", Some("X"), 180_000, 185_300, 100)
+            .unwrap();
+        assert_eq!(open_bucket.len(), 6);
+        assert!(open_bucket.iter().all(|s| s.envelope.is_none()));
+    }
+
+    /// @test Saving a user layout again under its name leaves no plot
+    /// rows behind: the replaced row's plots go with it, so after three
+    /// saves of a two-plot layout the table holds exactly two plots,
+    /// both on the live layout.
+    #[test]
+    fn resaving_a_layout_leaves_no_orphan_plots() {
+        let (_dir, db) = open_temp_db();
+        let plot = |title: &str| SavedPlot {
+            title: title.to_string(),
+            channels: vec!["X".to_string()],
+            height: 180,
+            position: [0, 0],
+            y_min: None,
+            y_max: None,
+            y_label: None,
+            thresholds: None,
+        };
+        for _ in 0..3 {
+            db.save_layout("t1", "Mine", "2x1", 30, &[plot("a"), plot("b")])
+                .unwrap();
+        }
+        let (plots, orphans): (i64, i64) = {
+            let conn = db.writer.lock().unwrap();
+            let count = |sql: &str| conn.query_row(sql, [], |row| row.get(0)).unwrap();
+            (
+                count("SELECT COUNT(*) FROM telemetry_plots"),
+                count(
+                    "SELECT COUNT(*) FROM telemetry_plots
+                     WHERE layout_id NOT IN (SELECT id FROM telemetry_layouts)",
+                ),
+            )
+        };
+        assert_eq!((plots, orphans), (2, 0));
+        assert_eq!(db.get_layouts("t1").unwrap()[0].plots.len(), 2);
+    }
+
+    /// @test An audit offset at or past the end of the log returns no
+    /// page, however large: an offset beyond what SQLite's signed
+    /// OFFSET holds must not wrap into the first page.
+    #[test]
+    fn audit_offset_past_every_row_returns_no_page() {
+        let (_dir, db) = open_temp_db();
+        for i in 0..3 {
+            db.log_audit("op", &format!("a{i}"), None, None, "ok", None)
+                .unwrap();
+        }
+        assert_eq!(db.query_audit(10, 2).unwrap().len(), 1);
+        for offset in [3, 1 << 63, usize::MAX] {
+            assert!(
+                db.query_audit(10, offset).unwrap().is_empty(),
+                "offset {offset}"
+            );
+        }
+    }
+
+    /// @test A window holding more samples than the limit returns its
+    /// newest `limit` samples, in time order, both for one channel and
+    /// for every channel of the target: a chart of a long window is
+    /// drawn up to now, and an export lists rows oldest first.
+    #[test]
+    fn query_range_keeps_the_newest_rows_in_time_order() {
+        let (_dir, db) = open_temp_db();
+        let t: Arc<str> = Arc::from("t1");
+        let x: Arc<str> = Arc::from("X");
+        let y: Arc<str> = Arc::from("Y");
+        let mut samples: Vec<TelemetrySample> = (1..=100u64)
+            .map(|i| sample(&t, &x, i * 1_000, i as f64))
+            .collect();
+        samples.extend((1..=100u64).map(|i| sample(&t, &y, i * 1_000 + 500, -(i as f64))));
+        db.insert_batch(&samples).unwrap();
+
+        let one: Vec<u64> = db
+            .query_range("t1", Some("X"), 0, 200_000, 10)
+            .unwrap()
+            .iter()
+            .map(|s| s.timestamp_ms)
+            .collect();
+        assert_eq!(one, (91..=100).map(|i| i * 1_000).collect::<Vec<_>>());
+
+        let all: Vec<(u64, String)> = db
+            .query_range("t1", None, 0, 200_000, 4)
+            .unwrap()
+            .iter()
+            .map(|s| (s.timestamp_ms, s.channel.to_string()))
+            .collect();
+        assert_eq!(
+            all,
+            [
+                (99_000, "X".to_string()),
+                (99_500, "Y".to_string()),
+                (100_000, "X".to_string()),
+                (100_500, "Y".to_string()),
+            ]
+        );
     }
 
     /// @test Preference round trip: set, read back, overwrite,

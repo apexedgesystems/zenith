@@ -156,10 +156,12 @@ impl RecordSpec {
 
 /// The bytes of one deframed TM frame that the packet stage should
 /// see. A dropped frame counts as one unroutable unit and arms
-/// resync; the next verified frame then starts at its first packet
-/// header (the orphaned head of a straddling packet is discarded
-/// with the extractor's residue), or is skipped whole when no packet
-/// starts in it.
+/// resync, which holds until a verified frame in which a packet
+/// starts: that frame is seen from its first packet header (the
+/// orphaned head of a straddling packet is discarded with the
+/// extractor's residue), and every frame before it, in which no
+/// packet starts, is skipped whole -- it carries only the middle of
+/// the orphaned packet.
 fn tm_field<'a>(
     frame: &'a ccsds_tm::Frame,
     extractor: &mut ccsds_spp::Extractor,
@@ -179,9 +181,10 @@ fn tm_field<'a>(
             if !*resync {
                 return Some(field);
             }
+            let start = (*first_header)?;
             *resync = false;
             extractor.reset();
-            first_header.map(|p| &field[p..])
+            Some(&field[start..])
         }
     }
 }
@@ -1937,6 +1940,55 @@ mod tests {
             "C follows; nothing bogus between"
         );
         link.disconnect();
+    }
+
+    /// @test A packet spanning three frames whose first frame is dropped
+    /// leaks nothing: the middle frame carries no packet start (its
+    /// first-header pointer says so), so resync stays armed through it,
+    /// and the packet stage resumes at the third frame's first header.
+    /// The orphaned tail before that header is shaped like a plausible
+    /// header on a routed address, as real payload bytes can be, and
+    /// must not parse.
+    #[test]
+    fn a_continuation_frame_after_a_dropped_frame_keeps_the_resync() {
+        const FRAME: usize = 32;
+        let field_len = FRAME - ccsds_tm::HEADER_SIZE - ccsds_tm::TRAILER_SIZE; // 24
+                                                                                // A: 54 bytes on the wire, 24 in frame 1, 24 in frame 2, 6 in 3.
+        let mut a_payload = vec![0xA5u8; 48];
+        // A's last six bytes read as a header: APID 0x0D0, one data byte.
+        a_payload[42..48].copy_from_slice(&[0x00, 0xD0, 0xC0, 0x00, 0x00, 0x00]);
+        let a = ccsds_spp::pack(0x0D0, 1, &a_payload);
+        assert_eq!(a.len(), 54);
+        let b = ccsds_spp::pack(0x0D0, 2, &[1, 2, 3, 4]);
+        let restamp = |frame: &mut Vec<u8>, first_header: u16| {
+            frame[4..6].copy_from_slice(&(0x1800u16 | first_header).to_be_bytes());
+            let crc = ccsds_tm::crc16(&frame[..FRAME - ccsds_tm::TRAILER_SIZE]);
+            frame[FRAME - 2..].copy_from_slice(&crc.to_be_bytes());
+        };
+        let mut f1 = ccsds_tm::pack_frame(FRAME, 0x044, 0, &a[..field_len]);
+        let mut f2 = ccsds_tm::pack_frame(FRAME, 0x044, 1, &a[field_len..2 * field_len]);
+        restamp(&mut f2, 0x7FF); // no packet starts in frame 2
+        let mut f3_content = a[2 * field_len..].to_vec();
+        f3_content.extend_from_slice(&b);
+        let mut f3 = ccsds_tm::pack_frame(FRAME, 0x044, 2, &f3_content);
+        restamp(&mut f3, 6); // B starts after A's six-byte tail
+        f1[10] ^= 0xFF; // frame 1 fails its CRC
+
+        let mut pipeline = PacketPipeline::build(&PipelineSpec::TmSpp {
+            apid_map: HashMap::from([(0x0D0u16, 0x00D000u32)]),
+            frame_size: FRAME,
+        });
+        let mut stream = f1;
+        stream.extend_from_slice(&f2);
+        stream.extend_from_slice(&f3);
+        let (packets, unroutable) = pipeline.feed(&stream);
+        let payloads: Vec<Vec<u8>> = packets.into_iter().map(|p| p.payload).collect();
+        assert_eq!(
+            payloads,
+            vec![vec![1u8, 2, 3, 4]],
+            "B alone, nothing bogus before it"
+        );
+        assert_eq!(unroutable, 1, "the dropped frame");
     }
 
     /// @test Connect is idempotent on a listening link: a second call

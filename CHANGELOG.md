@@ -107,6 +107,23 @@ architecture review; work before that is the v0.0.1 tag.
 
 ### Fixed
 
+- History queries over a window holding more samples than their limit
+  return the newest ones, so a chart of a long window reaches the
+  present instead of stopping at the limit's oldest samples. History
+  and CSV export rows come in time order; CSV exports list the oldest
+  row first.
+- Tiered history no longer holds two points at one timestamp for a
+  channel: a tier pass leaves the bucket its cutoff falls in for a
+  later pass instead of writing it twice.
+- After a dropped TM frame, a packet spanning three or more frames no
+  longer yields bogus telemetry or swallows the next real packet:
+  decoding resumes at the next frame in which a packet starts.
+- A SLIP peer can no longer grow a frame past the 64 KiB bound with
+  escaped bytes, and escaped bytes outside a frame are dropped.
+- Socket tickets and bearer tokens are refused once expired, without
+  the 60-second grace that let a 30-second ticket work for 90 seconds.
+- An audit log request whose offset lies past the end returns no rows
+  instead of the first page.
 - UDP targets show listening until first contact, and TCP targets no
   longer falsely remain connected after an immediate hangup or a
   disconnect racing an incoming session. Clients of the connect

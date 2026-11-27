@@ -61,40 +61,46 @@ impl Decoder {
     }
 
     /// Feed raw bytes from the socket. Returns decoded frames.
+    ///
+    /// Every data byte, escaped or not, enters the frame through one
+    /// path: only while a frame is open, and never past MAX_FRAME_SIZE,
+    /// where the frame is dropped and the decoder waits for the next
+    /// END. Bytes outside a frame are discarded, whatever their
+    /// encoding.
     pub fn feed(&mut self, data: &[u8]) -> Vec<Vec<u8>> {
         let mut frames = Vec::new();
 
         for &b in data {
-            if self.escape {
+            let byte = if self.escape {
                 self.escape = false;
                 match b {
-                    ESC_END => self.buf.push(END),
-                    ESC_ESC => self.buf.push(ESC),
-                    _ => self.buf.push(b), // Protocol violation, accept anyway
+                    ESC_END => END,
+                    ESC_ESC => ESC,
+                    other => other, // Protocol violation, accept anyway
                 }
-                continue;
-            }
-
-            match b {
-                END => {
-                    if self.in_frame && !self.buf.is_empty() {
-                        frames.push(std::mem::take(&mut self.buf));
-                    }
-                    self.buf.clear();
-                    self.in_frame = true;
-                }
-                ESC => {
-                    self.escape = true;
-                }
-                _ => {
-                    if self.in_frame {
-                        self.buf.push(b);
-                        if self.buf.len() > MAX_FRAME_SIZE {
-                            tracing::warn!("SLIP frame exceeds {} bytes, dropping", MAX_FRAME_SIZE);
-                            self.buf.clear();
-                            self.in_frame = false;
+            } else {
+                match b {
+                    END => {
+                        if self.in_frame && !self.buf.is_empty() {
+                            frames.push(std::mem::take(&mut self.buf));
                         }
+                        self.buf.clear();
+                        self.in_frame = true;
+                        continue;
                     }
+                    ESC => {
+                        self.escape = true;
+                        continue;
+                    }
+                    other => other,
+                }
+            };
+            if self.in_frame {
+                self.buf.push(byte);
+                if self.buf.len() > MAX_FRAME_SIZE {
+                    tracing::warn!("SLIP frame exceeds {} bytes, dropping", MAX_FRAME_SIZE);
+                    self.buf.clear();
+                    self.in_frame = false;
                 }
             }
         }
@@ -145,6 +151,37 @@ mod tests {
         // The oversized frame must be dropped and decoder recovers
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0], b"after");
+    }
+
+    /// @test The frame-size bound holds for escaped bytes too: a frame
+    /// of MAX_FRAME_SIZE + 1 escaped bytes is dropped as it passes the
+    /// bound, the decoder never holds more than the bound, and the next
+    /// frame decodes. Escaped bytes outside any frame are dropped like
+    /// plain ones, so a peer streaming escapes without an END holds no
+    /// memory.
+    #[test]
+    fn escaped_bytes_respect_the_frame_bound() {
+        let mut d = Decoder::new();
+        let mut stream = vec![END];
+        for _ in 0..=MAX_FRAME_SIZE {
+            stream.extend_from_slice(&[ESC, ESC_ESC]);
+        }
+        assert!(d.feed(&stream).is_empty());
+        assert!(d.buf.len() <= MAX_FRAME_SIZE, "{} bytes held", d.buf.len());
+        let mut tail = vec![END];
+        tail.extend_from_slice(&encode(b"ok"));
+        assert_eq!(d.feed(&tail), vec![b"ok".to_vec()]);
+
+        let mut outside = Decoder::new();
+        let escapes: Vec<u8> = std::iter::repeat_n([ESC, ESC_END], 1 << 16)
+            .flatten()
+            .collect();
+        assert!(outside.feed(&escapes).is_empty());
+        assert!(
+            outside.buf.is_empty(),
+            "{} bytes held outside a frame",
+            outside.buf.len()
+        );
     }
 
     /// @test Two consecutive END bytes (an empty frame) are not
