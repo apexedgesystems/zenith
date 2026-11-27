@@ -412,13 +412,6 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../compat/tprm")
     }
 
-    /// Whether a container declared `type = "struct"` contributes its
-    /// own `name:struct:0:offset;` row ahead of its leaves. By the
-    /// contract it does not: a key typed struct is a grouping whose
-    /// leaves carry the rows, as for a plain nested table, and the
-    /// nested_enum vector hashes its five leaves only.
-    const STRUCT_CONTAINER_ROWS: bool = false;
-
     /// One parsed vector-toml leaf (owned strings; tests build
     /// LeafSpec views over these).
     #[derive(Debug, Default)]
@@ -434,9 +427,10 @@ mod tests {
     /// Parse a vector toml in the authoring-template format, returning
     /// leaves in declaration order. Line-scan on purpose: declaration
     /// order is part of the contract, and a map-based toml parse would
-    /// lose it. Skips the [__enums__] section; a struct container is
-    /// returned as its own zero-size leaf ahead of its nested leaves,
-    /// and leaf_specs decides whether it hashes (STRUCT_CONTAINER_ROWS).
+    /// lose it. Skips the [__enums__] section and struct containers: by
+    /// the contract a key typed struct is a grouping whose leaves carry
+    /// the rows, as for a plain nested table (the nested_enum vector
+    /// hashes its five leaves only).
     ///
     /// Two section styles appear in the contract: fixed-shape vectors
     /// declare one `[Section.leaf]` per leaf with key = value lines,
@@ -509,11 +503,10 @@ mod tests {
             }
         }
         // Offset assignment by declaration-order accumulation (the
-        // toml carries sizes only). A struct container takes the
-        // offset where its leaves start and consumes no bytes; its
-        // leaves follow at absolute offsets. Section headers that
-        // only held inline tables have no type and drop.
-        leaves.retain(|l| !l.field_type.is_empty());
+        // toml carries sizes only), leaves at absolute offsets. Section
+        // headers that only held inline tables have no type, and
+        // struct containers no row: both drop.
+        leaves.retain(|l| !l.field_type.is_empty() && l.field_type != "struct");
         let mut off = 0usize;
         for l in &mut leaves {
             l.offset = off;
@@ -531,7 +524,6 @@ mod tests {
     fn leaf_specs(leaves: &[TomlLeaf]) -> Vec<LeafSpec<'_>> {
         leaves
             .iter()
-            .filter(|l| STRUCT_CONTAINER_ROWS || l.field_type != "struct")
             .map(|l| LeafSpec {
                 name: &l.name,
                 field_type: &l.field_type,
@@ -549,33 +541,32 @@ mod tests {
         std::fs::read(contract_dir().join("payloads").join(name)).unwrap()
     }
 
-    /// nested_enum stamped with the 20-byte APV3 prelude: the bytes a
-    /// parser of this format must refuse by their magic.
-    const APV3_NESTED_ENUM: &[u8] = b"APV3\x03\x00\x0d\x00\x00\xca\x00\x00b.\x9f\xe4\x93X\xf4\xb9\
-        \x07\xee\xff\xc0\x00\x02\x01\x00\x00`@\xfe\xff";
-
-    /// @test CRC-32 (IEEE 802.3) matches the standard check vector.
-    #[test]
-    fn crc32_known_vector() {
-        assert_eq!(crc32(b"123456789"), 0xCBF4_3926);
-        assert_eq!(crc32(b""), 0x0000_0000);
-    }
-
     /// @test For every golden payload vector: the layout hash computed
     /// from the toml source's declaration-order field spec matches the
     /// committed prelude, and stamping the vector's own body with that
     /// hash reproduces the committed bytes exactly. This pins the
     /// prelude packing, the CRC, and the canonical-spec recipe against
-    /// the contract in one assertion per vector.
+    /// the contract in one assertion per vector. The raw (unstamped)
+    /// nested_enum vector is exactly the stamped one's body.
     #[test]
     fn stamped_vectors_reproduce_byte_identically() {
-        for (toml_name, bin_name, full_uid) in [
-            ("scalar_types.toml", "scalar_types.bin", 0x000000u32),
-            ("strings_arrays.toml", "strings_arrays.bin", 0x00D001),
-            ("nested_enum.toml", "nested_enum.bin", 0x00CA00),
+        for (toml_name, bin_name, full_uid, raw_name) in [
+            ("scalar_types.toml", "scalar_types.bin", 0x000000u32, None),
+            ("strings_arrays.toml", "strings_arrays.bin", 0x00D001, None),
+            (
+                "nested_enum.toml",
+                "nested_enum.bin",
+                0x00CA00,
+                Some("nested_enum_raw.bin"),
+            ),
             // Variable-length shape: flat header + entry leaves, so the
             // toml's declaration order IS the recipe's expansion order.
-            ("scheduler_shape.toml", "scheduler_shape.bin", 0x000100),
+            (
+                "scheduler_shape.toml",
+                "scheduler_shape.bin",
+                0x000100,
+                None,
+            ),
         ] {
             let vector = read_vector(bin_name);
             let leaves = parse_vector_toml(toml_name);
@@ -594,6 +585,9 @@ mod tests {
                 "{bin_name}: layout-hash recipe diverges from contract"
             );
             assert_eq!(prelude.full_uid, full_uid, "{bin_name}: contract uid");
+            if let Some(raw_name) = raw_name {
+                assert_eq!(read_vector(raw_name), body, "{raw_name}: the stamped body");
+            }
 
             let restamped = stamp_v4(full_uid, hash, body);
             assert_eq!(
@@ -603,24 +597,14 @@ mod tests {
         }
     }
 
-    /// @test The raw (unstamped) vector is exactly the stamped
-    /// vector's body: stamping raw reproduces the stamped file.
-    #[test]
-    fn raw_vector_stamps_to_committed_bytes() {
-        let raw = read_vector("nested_enum_raw.bin");
-        let stamped = read_vector("nested_enum.bin");
-        let (prelude, body) = parse_v4(&stamped).unwrap();
-        assert_eq!(raw, body);
-        let restamped = stamp_v4(prelude.full_uid, prelude.layout_hash, &raw);
-        assert_eq!(restamped, stamped);
-    }
-
     /// @test Every prelude field reads back from its own bytes, and
     /// each defect is rejected distinctly at the field that carries
-    /// it: truncation one byte short of the prelude, bad magic (with
-    /// the bytes found), wrong version, non-zero reserved bytes, a
-    /// size that lies in the low or the high byte of the 64-bit
-    /// field, a corrupted CRC field, a corrupted body.
+    /// it: truncation one byte short of the prelude, bad magic in its
+    /// first or its last byte (the earlier format's APV3 among them),
+    /// with the bytes found and the magic wanted, wrong version,
+    /// non-zero reserved bytes, a size that lies in the low or the high
+    /// byte of the 64-bit field, a corrupted CRC field, a corrupted
+    /// body.
     #[test]
     fn parse_rejects_each_defect_distinctly() {
         let body = [1u8, 2, 3, 4];
@@ -644,6 +628,11 @@ mod tests {
         let mut bad = good.clone();
         bad[0] = b'X';
         assert_eq!(parse_v4(&bad), Err(TprmError::BadMagic { found: *b"XPV4" }));
+        let mut bad = good.clone();
+        bad[3] = b'3';
+        let err = parse_v4(&bad).unwrap_err();
+        assert_eq!(err, TprmError::BadMagic { found: *b"APV3" });
+        assert_eq!(err.to_string(), "bad magic \"APV3\" (want \"APV4\")");
 
         let mut bad = good.clone();
         bad[4] = 9;
@@ -680,16 +669,6 @@ mod tests {
         let mut bad = good.clone();
         *bad.last_mut().unwrap() ^= 0xFF;
         assert_eq!(parse_v4(&bad), Err(TprmError::BadCrc));
-    }
-
-    /// @test A payload stamped with the 20-byte APV3 prelude is refused
-    /// by its magic, and the refusal names both the magic it found and
-    /// the magic this format wants.
-    #[test]
-    fn apv3_stamp_is_refused_by_its_magic() {
-        let err = parse_v4(APV3_NESTED_ENUM).unwrap_err();
-        assert_eq!(err, TprmError::BadMagic { found: *b"APV3" });
-        assert_eq!(err.to_string(), "bad magic \"APV3\" (want \"APV4\")");
     }
 
     /// @test A body longer than 16 bits can count is stamped with its

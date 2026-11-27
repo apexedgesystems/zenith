@@ -173,11 +173,16 @@ mod tests {
         // Zero timeout or zero delay: exempt (no timeout policy set).
         assert!(validate_rts_upload(&dicts, &sequence_bytes(0, &[(10, 0), (0, 5)])).is_ok());
 
-        // Violation on step 1 names it with both values.
+        // Violation on step 1 names it with both values: a timeout equal
+        // to the delay and one shorter than it both refuse.
         let err =
             validate_rts_upload(&dicts, &sequence_bytes(0, &[(10, 20), (30, 30)])).unwrap_err();
         assert!(err.contains("step 1"), "{err}");
-        assert!(err.contains("30"), "{err}");
+        let err =
+            validate_rts_upload(&dicts, &sequence_bytes(0, &[(10, 20), (30, 25)])).unwrap_err();
+        assert!(err.contains("step 1"), "{err}");
+        assert!(err.contains("timeoutCycles 25"), "{err}");
+        assert!(err.contains("30-cycle delay"), "{err}");
 
         // ATS exempt by design.
         assert!(validate_rts_upload(&dicts, &sequence_bytes(1, &[(30, 30)])).is_ok());

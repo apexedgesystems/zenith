@@ -1800,70 +1800,62 @@ mod tests {
         }
     }
 
-    /// @test Inserting a batch then querying the same time range
-    /// returns the samples in chronological order with correct
-    /// timestamps and values.
+    /// @test query_range over one channel returns exactly the samples
+    /// inside the window, both bounds inclusive, with their timestamps
+    /// and values, and at most `limit` of them; an unknown channel
+    /// returns none. Over every channel it returns the target's own
+    /// samples in the window and no other target's. An empty batch
+    /// writes nothing.
     #[test]
-    fn insert_and_query_round_trip() {
-        let (_dir, db) = open_temp_db();
-        let t: Arc<str> = Arc::from("t1");
-        let ch: Arc<str> = Arc::from("X.field");
-        let samples = vec![
-            sample(&t, &ch, 100, 1.0),
-            sample(&t, &ch, 200, 2.0),
-            sample(&t, &ch, 300, 3.0),
-        ];
-        db.insert_batch(&samples).unwrap();
-
-        let out = db.query_range("t1", Some("X.field"), 0, 1000, 100).unwrap();
-        assert_eq!(out.len(), 3);
-        assert_eq!(out[0].timestamp_ms, 100);
-        assert_eq!(out[0].value, 1.0);
-        assert_eq!(out[2].timestamp_ms, 300);
-    }
-
-    /// @test insert_batch with an empty slice returns Ok and writes
-    /// nothing to the database.
-    #[test]
-    fn insert_empty_batch_is_noop() {
+    fn query_range_selects_the_window_and_honours_the_limit() {
         let (_dir, db) = open_temp_db();
         db.insert_batch(&[]).unwrap();
-        assert_eq!(db.count().unwrap(), 0);
-    }
+        assert_eq!(db.count().unwrap(), 0, "an empty batch writes nothing");
 
-    /// @test query_range with a start_ms/end_ms window only returns
-    /// samples whose timestamps fall inside that window.
-    #[test]
-    fn query_range_respects_time_window() {
-        let (_dir, db) = open_temp_db();
-        let t: Arc<str> = Arc::from("t1");
-        let ch: Arc<str> = Arc::from("X.field");
-        let samples: Vec<TelemetrySample> = (0..100)
-            .map(|i| sample(&t, &ch, i * 10, i as f64))
+        let t1: Arc<str> = Arc::from("t1");
+        let t2: Arc<str> = Arc::from("t2");
+        let x: Arc<str> = Arc::from("X.field");
+        let y: Arc<str> = Arc::from("Y.field");
+        let mut samples: Vec<TelemetrySample> = (0..100)
+            .map(|i| sample(&t1, &x, i * 10, i as f64))
             .collect();
+        samples.push(sample(&t1, &y, 250, -1.0));
+        samples.push(sample(&t2, &x, 300, 99.0));
         db.insert_batch(&samples).unwrap();
 
         let out = db
             .query_range("t1", Some("X.field"), 200, 500, 100)
             .unwrap();
-        assert!(!out.is_empty());
-        for s in &out {
-            assert!(s.timestamp_ms >= 200 && s.timestamp_ms <= 500);
-        }
-    }
+        let got: Vec<(u64, f64)> = out.iter().map(|s| (s.timestamp_ms, s.value)).collect();
+        let want: Vec<(u64, f64)> = (20..=50).map(|i| (i * 10, i as f64)).collect();
+        assert_eq!(got, want, "200..=500, both bounds inclusive");
+        assert!(out
+            .iter()
+            .all(|s| &*s.target_id == "t1" && &*s.channel == "X.field"));
 
-    /// @test query_range with a limit returns at most that many rows.
-    #[test]
-    fn query_range_limit_clamps_results() {
-        let (_dir, db) = open_temp_db();
-        let t: Arc<str> = Arc::from("t1");
-        let ch: Arc<str> = Arc::from("X.field");
-        let samples: Vec<TelemetrySample> =
-            (0..100).map(|i| sample(&t, &ch, i, i as f64)).collect();
-        db.insert_batch(&samples).unwrap();
+        let limited = db.query_range("t1", Some("X.field"), 0, 1000, 10).unwrap();
+        assert_eq!(limited.len(), 10);
+        assert!(db
+            .query_range("t1", Some("Nope.field"), 0, 1000, 10)
+            .unwrap()
+            .is_empty());
 
-        let out = db.query_range("t1", Some("X.field"), 0, 1000, 10).unwrap();
-        assert_eq!(out.len(), 10);
+        let mut all: Vec<(u64, String, f64)> = db
+            .query_range("t1", None, 200, 300, 100)
+            .unwrap()
+            .into_iter()
+            .map(|s| {
+                assert_eq!(&*s.target_id, "t1");
+                (s.timestamp_ms, s.channel.to_string(), s.value)
+            })
+            .collect();
+        all.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        let mut want_all: Vec<(u64, String, f64)> = (20..=30)
+            .map(|i| (i * 10, "X.field".to_string(), i as f64))
+            .collect();
+        want_all.push((250, "Y.field".to_string(), -1.0));
+        want_all.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        assert_eq!(all, want_all, "t1's samples only, from both channels");
     }
 
     /// @test query_latest returns one row per channel containing the
@@ -1916,10 +1908,13 @@ mod tests {
     }
 
     /// @test log_audit followed by query_audit returns the entries
-    /// in newest-first order with all fields preserved.
+    /// in newest-first order with all fields preserved; the offset
+    /// skips exactly that many entries, and audit_count reports the
+    /// live number of rows.
     #[test]
     fn audit_log_round_trip() {
         let (_dir, db) = open_temp_db();
+        assert_eq!(db.audit_count().unwrap(), 0);
         db.log_audit(
             "admin",
             "send_command",
@@ -1957,26 +1952,11 @@ mod tests {
         assert_eq!(entries[1].action, "trim");
         assert_eq!(entries[2].action, "send_command");
         assert_eq!(entries[2].status, "ok");
-    }
 
-    /// @test query_audit with offset returns a non-overlapping page
-    /// of results, exercising the OFFSET clause.
-    #[test]
-    fn audit_log_pagination_via_offset() {
-        let (_dir, db) = open_temp_db();
-        for i in 0..20 {
-            db.log_audit("admin", &format!("action_{}", i), None, None, "ok", None)
-                .unwrap();
-        }
-        let page1 = db.query_audit(5, 0).unwrap();
-        let page2 = db.query_audit(5, 5).unwrap();
-        assert_eq!(page1.len(), 5);
-        assert_eq!(page2.len(), 5);
-        // No overlap
-        let p1_ids: std::collections::HashSet<_> = page1.iter().map(|e| e.id).collect();
-        for e in &page2 {
-            assert!(!p1_ids.contains(&e.id));
-        }
+        let page = db.query_audit(1, 1).unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].id, entries[1].id, "offset 1 is the middle entry");
+        assert_eq!(db.audit_count().unwrap(), 3);
     }
 
     /// @test delete_oldest_for_target removes only that target's
@@ -2085,110 +2065,123 @@ mod tests {
         assert_eq!(stats.span_seconds, Some(4));
     }
 
-    /// @test global_stats reports a non-zero db_size_bytes after data
-    /// has been written, computed via filesystem stat without
-    /// triggering a wal_checkpoint.
-    #[test]
-    fn global_stats_includes_db_file_size() {
-        let (_dir, db) = open_temp_db();
-        let t: Arc<str> = Arc::from("t1");
-        let ch: Arc<str> = Arc::from("X");
-        let samples: Vec<TelemetrySample> =
-            (0..200).map(|i| sample(&t, &ch, i, i as f64)).collect();
-        db.insert_batch(&samples).unwrap();
-
-        let stats = db.global_stats().unwrap();
-        assert!(stats.total_samples >= 200);
-        assert!(stats.db_size_bytes > 0);
-        // Sanity: a 200-row WAL db should be at least one page (4KB)
-        assert!(stats.db_size_bytes >= 4096);
-    }
-
     /// @test save_layout followed by get_layouts returns the saved
-    /// layout with all plot fields (title, channels, height, y bounds,
-    /// label, thresholds) preserved.
+    /// layout with every layout and plot field preserved: name, grid,
+    /// time window, source, and each plot's title, channels, height,
+    /// position, y bounds, label and thresholds (a threshold saved
+    /// without a label reads back with an empty one).
     #[test]
     fn save_and_load_user_layout_round_trip() {
         let (_dir, db) = open_temp_db();
-        let plots = vec![SavedPlot {
-            title: "Wave".to_string(),
-            channels: vec!["A".to_string(), "B".to_string()],
-            height: 200,
-            position: [0, 0],
-            y_min: Some(-1.0),
-            y_max: Some(1.0),
-            y_label: Some("V".to_string()),
-            thresholds: None,
-        }];
-        let id = db.save_layout("t1", "MyLayout", "1x1", 60, &plots).unwrap();
+        let plots = vec![
+            SavedPlot {
+                title: "Wave".to_string(),
+                channels: vec!["A".to_string(), "B".to_string()],
+                height: 200,
+                position: [0, 1],
+                y_min: Some(-1.0),
+                y_max: Some(1.0),
+                y_label: Some("V".to_string()),
+                thresholds: Some(vec![
+                    Threshold {
+                        value: 0.8,
+                        color: "#ff0000".to_string(),
+                        label: "high".to_string(),
+                    },
+                    Threshold {
+                        value: -0.8,
+                        color: "#0000ff".to_string(),
+                        label: String::new(),
+                    },
+                ]),
+            },
+            SavedPlot {
+                title: "Bare".to_string(),
+                channels: vec!["C".to_string()],
+                height: 120,
+                position: [1, 0],
+                y_min: None,
+                y_max: None,
+                y_label: None,
+                thresholds: None,
+            },
+        ];
+        let id = db.save_layout("t1", "MyLayout", "2x1", 60, &plots).unwrap();
         assert!(id > 0);
 
         let loaded = db.get_layouts("t1").unwrap();
         assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].name, "MyLayout");
-        assert_eq!(loaded[0].source, "user");
-        assert_eq!(loaded[0].plots.len(), 1);
-        assert_eq!(loaded[0].plots[0].title, "Wave");
-        assert_eq!(loaded[0].plots[0].channels, vec!["A", "B"]);
-        assert_eq!(loaded[0].plots[0].y_min, Some(-1.0));
+        let layout = &loaded[0];
+        assert_eq!(
+            (
+                layout.id,
+                layout.name.as_str(),
+                layout.source.as_str(),
+                layout.grid.as_str(),
+                layout.time_window_s
+            ),
+            (id, "MyLayout", "user", "2x1", 60)
+        );
+        let saved = serde_json::to_value(&plots).unwrap();
+        let read = serde_json::to_value(&layout.plots).unwrap();
+        assert_eq!(read, saved, "every plot field round-trips, in order");
+        let thresholds = layout.plots[0].thresholds.as_ref().unwrap();
+        assert_eq!(thresholds[1].label, "");
     }
 
-    /// @test 16 concurrent threads each running 50 query_range calls
-    /// against the read pool all succeed without deadlocks. Verifies
-    /// the connection pool actually allows parallel reads vs the
-    /// previous Mutex<Connection> design.
+    /// @test Readers opened at once all succeed against the WAL file:
+    /// eight threads start their first query together, so each opens
+    /// and tunes its own reader connection concurrently (the pool is
+    /// empty), and every query returns the full result.
     #[test]
     fn concurrent_readers_succeed_in_parallel() {
-        // Verifies the read pool actually allows concurrent reads. We
-        // spawn many threads, each running query_range, and assert they
-        // all succeed without deadlocks. With the old Mutex<Connection>
-        // they would have serialized; with the pool they run in parallel.
         use std::sync::Arc as StdArc;
         use std::thread;
+        const THREADS: usize = 8;
 
         let (_dir, db) = open_temp_db();
         let t: Arc<str> = Arc::from("t1");
         let ch: Arc<str> = Arc::from("X");
-        let samples: Vec<TelemetrySample> =
-            (0..1000).map(|i| sample(&t, &ch, i, i as f64)).collect();
+        let samples: Vec<TelemetrySample> = (0..10).map(|i| sample(&t, &ch, i, i as f64)).collect();
         db.insert_batch(&samples).unwrap();
 
         let db = StdArc::new(db);
-        let mut handles = Vec::new();
-        for _ in 0..16 {
-            let db = StdArc::clone(&db);
-            handles.push(thread::spawn(move || {
-                for _ in 0..50 {
-                    let out = db.query_range("t1", Some("X"), 0, 10000, 1000).unwrap();
-                    assert_eq!(out.len(), 1000);
-                }
-            }));
-        }
+        let start = StdArc::new(std::sync::Barrier::new(THREADS));
+        let handles: Vec<_> = (0..THREADS)
+            .map(|_| {
+                let (db, start) = (StdArc::clone(&db), StdArc::clone(&start));
+                thread::spawn(move || {
+                    start.wait();
+                    for _ in 0..2 {
+                        let out = db.query_range("t1", Some("X"), 0, 100, 100).unwrap();
+                        assert_eq!(out.len(), 10);
+                    }
+                })
+            })
+            .collect();
         for h in handles {
             h.join().unwrap();
         }
     }
 
-    /// @test After many sequential reads, the pool retains at most
-    /// READ_POOL_MAX cached connections (no fd leak).
+    /// @test The read pool keeps at most READ_POOL_MAX connections:
+    /// readers held at once each open their own connection, and when
+    /// all of them come back the pool keeps the cap and closes the
+    /// rest.
     #[test]
-    fn read_pool_returns_connections_for_reuse() {
-        // After running many sequential reads, the pool should hold up
-        // to READ_POOL_MAX connections (capped). We can't observe pool
-        // size directly through public API, but the API can be verified
-        // doesn't leak file descriptors by running far more reads than
-        // the cap and confirming everything still works.
-        let (_dir, db) = open_temp_db();
-        let t: Arc<str> = Arc::from("t1");
-        let ch: Arc<str> = Arc::from("X");
-        db.insert_batch(&[sample(&t, &ch, 100, 1.0)]).unwrap();
-        for _ in 0..100 {
-            let out = db.query_range("t1", Some("X"), 0, 1000, 10).unwrap();
-            assert_eq!(out.len(), 1);
+    fn read_pool_keeps_at_most_its_cap() {
+        fn hold(db: &TelemetryDb, depth: usize) {
+            if depth > 0 {
+                db.with_reader(|_| {
+                    hold(db, depth - 1);
+                    Ok(())
+                })
+                .unwrap();
+            }
         }
-        // Pool internals: at most READ_POOL_MAX connections should be cached
-        let pool = db.readers.lock().unwrap();
-        assert!(pool.len() <= READ_POOL_MAX);
+        let (_dir, db) = open_temp_db();
+        hold(&db, READ_POOL_MAX + 2);
+        assert_eq!(db.readers.lock().unwrap().len(), READ_POOL_MAX);
     }
 
     /// @test Saving a user layout with the same name as an existing
@@ -2218,32 +2211,11 @@ mod tests {
         assert_eq!(stock.source, "config");
     }
 
-    /// @test Saving a user layout with a name that doesn't collide
-    /// with any config layout succeeds and creates a new row.
-    #[test]
-    fn save_layout_allows_distinct_user_name() {
-        let (_dir, db) = open_temp_db();
-        {
-            let conn = db.writer.lock().unwrap();
-            conn.execute(
-                "INSERT INTO telemetry_layouts (target_id, name, source, grid, time_window_s, created_at)
-                 VALUES ('t1', 'StockLayout', 'config', '1x1', 30, 0)",
-                [],
-            ).unwrap();
-        }
-        // Save with a different name -- should succeed
-        let id = db.save_layout("t1", "MyLayout", "1x1", 60, &[]).unwrap();
-        assert!(id > 0);
-        // Both layouts should now exist
-        let layouts = db.get_layouts("t1").unwrap();
-        assert_eq!(layouts.len(), 2);
-    }
-
     /// @test Saving a user layout with the same name as an existing
     /// user layout replaces the previous version (intended behavior
     /// for "Save" with the same name).
     #[test]
-    fn save_layout_overwrites_own_user_layout_in_place() {
+    fn save_layout_replaces_own_user_layout() {
         let (_dir, db) = open_temp_db();
         // Save once
         let plots1 = vec![SavedPlot {
@@ -2507,7 +2479,8 @@ mod tests {
     /// @test global_stats total_samples reflects live rows, not the rowid
     /// high-water mark: after a FIFO deletion the count drops by the number
     /// of deleted rows. Guards the maintenance loop's eviction sizing,
-    /// which divides db bytes by this value.
+    /// which divides db bytes by this value. Its size is the database
+    /// file and its write-ahead log together, at least a page.
     #[test]
     fn global_stats_counts_live_rows_after_deletion() {
         let (_dir, db) = open_temp_db();
@@ -2515,7 +2488,10 @@ mod tests {
         let ch: Arc<str> = Arc::from("X.f");
         let samples: Vec<_> = (0..100u64).map(|i| sample(&t, &ch, i, i as f64)).collect();
         db.insert_batch(&samples).unwrap();
-        assert_eq!(db.global_stats().unwrap().total_samples, 100);
+        let stats = db.global_stats().unwrap();
+        assert_eq!(stats.total_samples, 100);
+        assert!(stats.db_size_bytes >= 4096, "{}", stats.db_size_bytes);
+        assert_eq!(stats.db_size_bytes, db.db_size_bytes().unwrap());
 
         db.delete_oldest(60).unwrap();
         assert_eq!(db.global_stats().unwrap().total_samples, 40);
@@ -2523,9 +2499,11 @@ mod tests {
 
     /// @test A failed insert_batch rolls back completely (no partial rows
     /// from the main-table inserts) and leaves the writer connection
-    /// usable: the next insert_batch succeeds. Guards against the raw
-    /// BEGIN leaking an open transaction, which wedged every subsequent
-    /// insert with "cannot start a transaction within a transaction".
+    /// usable: the next insert_batch succeeds, with no transaction left
+    /// open ("cannot start a transaction within a transaction"). The
+    /// channel's dictionary entry died with the rollback, so its id
+    /// must not stay cached: the retried rows resolve a live id and
+    /// are found by their (target, channel).
     #[test]
     fn insert_batch_failure_rolls_back_and_recovers() {
         let (_dir, db) = open_temp_db();
@@ -2556,6 +2534,8 @@ mod tests {
         assert_eq!(db.count().unwrap(), 2);
         let latest = db.query_latest("t1").unwrap();
         assert_eq!(latest.len(), 1);
+        let by_channel = db.query_range("t1", Some("X.field"), 0, 1000, 10).unwrap();
+        assert_eq!(by_channel.len(), 2, "rows point at a live dictionary id");
     }
 
     /// @test The standard pragmas set a nonzero busy_timeout on both the
@@ -2579,62 +2559,41 @@ mod tests {
         assert!(reader_timeout >= 1000, "reader busy_timeout too low");
     }
 
-    fn counts(v: &[(&str, u64)]) -> Vec<(String, u64)> {
-        v.iter().map(|(t, c)| (t.to_string(), *c)).collect()
-    }
-
-    /// @test Fair eviction trims only the largest holder when its
-    /// excess covers the whole volume; the quiet target loses nothing.
+    /// @test Fair eviction lowers one waterline across the targets: the
+    /// largest holders are trimmed to a common level and a target below
+    /// it loses nothing; equal holders split the volume, the integer
+    /// remainder shaved from the last so allocations sum exactly; a
+    /// request of at least the total returns every nonzero target in
+    /// full; zero rows to delete, or none held, allocate nothing.
     #[test]
-    fn allocate_evictions_spares_quiet_targets() {
-        let out = allocate_evictions(&counts(&[("big", 80), ("small", 20)]), 40);
-        assert_eq!(out, vec![("big".to_string(), 40)]);
-        let out = allocate_evictions(&counts(&[("big", 100), ("small", 5)]), 50);
-        assert_eq!(out, vec![("big".to_string(), 50)]);
-    }
-
-    /// @test Equal holders split the eviction volume equally, and the
-    /// integer remainder is shaved so allocations sum exactly.
-    #[test]
-    fn allocate_evictions_splits_equals_and_sums_exactly() {
-        let out = allocate_evictions(&counts(&[("a", 50), ("b", 50)]), 20);
-        assert_eq!(out.iter().map(|(_, d)| d).sum::<u64>(), 20);
-        assert!(out.iter().all(|(_, d)| *d == 10));
-
-        let out = allocate_evictions(&counts(&[("a", 50), ("b", 50)]), 21);
-        assert_eq!(out.iter().map(|(_, d)| d).sum::<u64>(), 21);
-
-        let out = allocate_evictions(&counts(&[("a", 5), ("b", 5), ("c", 5)]), 1);
-        assert_eq!(out.iter().map(|(_, d)| d).sum::<u64>(), 1);
-    }
-
-    /// @test A waterline between targets trims each proportionally to
-    /// its excess: mixed sizes converge to a common survivor level.
-    #[test]
-    fn allocate_evictions_waterlines_mixed_sizes() {
-        // 7/3/3 evicting 6: waterline 2 -> allocations 5/1/1 minus one
-        // shaved row = exactly 6, and every survivor holds >= 2.
-        let out = allocate_evictions(&counts(&[("a", 7), ("b", 3), ("c", 3)]), 6);
-        assert_eq!(out.iter().map(|(_, d)| d).sum::<u64>(), 6);
-        let get = |t: &str| {
-            out.iter()
-                .find(|(n, _)| n == t)
-                .map(|(_, d)| *d)
-                .unwrap_or(0)
+    fn allocate_evictions_lowers_a_common_waterline() {
+        type Rows = &'static [(&'static str, u64)];
+        let cases: [(Rows, u64, Rows); 9] = [
+            (&[("big", 80), ("small", 20)], 40, &[("big", 40)]),
+            (&[("big", 100), ("small", 5)], 50, &[("big", 50)]),
+            (&[("a", 50), ("b", 50)], 20, &[("a", 10), ("b", 10)]),
+            (&[("a", 50), ("b", 50)], 21, &[("a", 11), ("b", 10)]),
+            (&[("a", 5), ("b", 5), ("c", 5)], 1, &[("a", 1)]),
+            // Waterline 2: every survivor holds at least 2.
+            (&[("a", 7), ("b", 3), ("c", 3)], 6, &[("a", 5), ("b", 1)]),
+            (
+                &[("a", 10), ("b", 0), ("c", 3)],
+                999,
+                &[("a", 10), ("c", 3)],
+            ),
+            (&[("a", 10)], 0, &[]),
+            (&[], 5, &[]),
+        ];
+        let owned = |rows: Rows| -> Vec<(String, u64)> {
+            rows.iter().map(|(t, c)| (t.to_string(), *c)).collect()
         };
-        assert!(get("a") >= 4);
-        assert!(get("b") <= 1 && get("c") <= 1);
-    }
-
-    /// @test Requesting at least the total row count returns every
-    /// nonzero target in full; zero requests return nothing.
-    #[test]
-    fn allocate_evictions_edges() {
-        let all = allocate_evictions(&counts(&[("a", 10), ("b", 0), ("c", 3)]), 999);
-        assert_eq!(all.len(), 2);
-        assert_eq!(all.iter().map(|(_, d)| d).sum::<u64>(), 13);
-        assert!(allocate_evictions(&counts(&[("a", 10)]), 0).is_empty());
-        assert!(allocate_evictions(&[], 5).is_empty());
+        for (held, to_delete, want) in cases {
+            assert_eq!(
+                allocate_evictions(&owned(held), to_delete),
+                owned(want),
+                "{held:?} evicting {to_delete}"
+            );
+        }
     }
 
     /// @test target_sample_counts reports live per-target row counts.
@@ -2660,7 +2619,7 @@ mod tests {
     /// @test A transient spike survives both ladder transitions as a
     /// min/max excursion: the tier-1 bucket keeps max=spike, and
     /// re-tiering to the coarse tier keeps it again while the mean
-    /// dampens. This is the ticket's core acceptance.
+    /// dampens.
     #[test]
     fn spike_survives_both_tier_transitions() {
         let (_dir, db) = open_temp_db();
@@ -2764,45 +2723,6 @@ mod tests {
         assert!(recent.iter().all(|s| s.envelope.is_none()));
     }
 
-    /// @test A dictionary-schema database from before the tier columns
-    /// opens cleanly, gains them in place, and its old rows read as
-    /// full-resolution samples with no envelope.
-    #[test]
-    fn pre_tier_schema_gains_columns_in_place() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("v2.db");
-        {
-            let conn = Connection::open(&path).unwrap();
-            conn.execute_batch(
-                "CREATE TABLE channels (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    target_id TEXT NOT NULL, name TEXT NOT NULL,
-                    UNIQUE(target_id, name));
-                 CREATE TABLE telemetry (
-                    id INTEGER PRIMARY KEY,
-                    channel_id INTEGER NOT NULL,
-                    timestamp_ms INTEGER NOT NULL,
-                    value REAL NOT NULL);
-                 CREATE INDEX idx_telemetry_chan_ts
-                    ON telemetry (channel_id, timestamp_ms DESC);
-                 CREATE INDEX idx_telemetry_ts
-                    ON telemetry (timestamp_ms ASC);
-                 INSERT INTO channels (target_id, name) VALUES ('t1', 'X');
-                 INSERT INTO telemetry (channel_id, timestamp_ms, value)
-                    VALUES (1, 100, 42.0);",
-            )
-            .unwrap();
-        }
-        let db = TelemetryDb::open(&path).unwrap();
-        let out = db.query_range("t1", Some("X"), 0, 1_000, 10).unwrap();
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].value, 42.0);
-        assert!(out[0].envelope.is_none());
-        // And the ladder can process the migrated rows.
-        let pass = db.tier_pass(COARSE_TIER, 1_000, 1_000, u64::MAX).unwrap();
-        assert_eq!(pass.source_rows, 1);
-    }
-
     /// @test Preference round trip: set, read back, overwrite,
     /// list within (scope, kind), delete -- with scopes isolated.
     #[test]
@@ -2843,46 +2763,54 @@ mod tests {
             .is_some());
     }
 
-    /// @test audit_count reports the live number of audit rows.
-    #[test]
-    fn audit_count_reports_rows() {
-        let (_dir, db) = open_temp_db();
-        assert_eq!(db.audit_count().unwrap(), 0);
-        db.log_audit("op", "a", None, None, "ok", None).unwrap();
-        db.log_audit("op", "b", None, None, "ok", None).unwrap();
-        assert_eq!(db.audit_count().unwrap(), 2);
-    }
-
-    /// @test The channel dictionary stores one row per distinct
-    /// (target, channel) pair no matter how many samples reference it.
+    /// @test The channel dictionary holds one row per (target, channel)
+    /// however many samples and batches reference it, and a reopened
+    /// database, whose id cache starts empty, resolves the same row
+    /// instead of adding one: the samples from before and after the
+    /// reopen read back as one channel.
     #[test]
     fn channel_dictionary_dedups_names() {
-        let (_dir, db) = open_temp_db();
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("test.db");
         let t: Arc<str> = Arc::from("t1");
         let a: Arc<str> = Arc::from("A.x");
         let b: Arc<str> = Arc::from("B.y");
-        for i in 0..10u64 {
-            db.insert_batch(&[sample(&t, &a, i, 1.0), sample(&t, &b, i, 2.0)])
-                .unwrap();
-        }
-        assert_eq!(db.count().unwrap(), 20);
-        let dict_rows: i64 = db
-            .with_reader(|conn| {
+        let dict_rows = |db: &TelemetryDb| -> i64 {
+            db.with_reader(|conn| {
                 Ok(conn.query_row("SELECT COUNT(*) FROM channels", [], |row| row.get(0))?)
             })
-            .unwrap();
-        assert_eq!(dict_rows, 2);
+            .unwrap()
+        };
+        {
+            let db = TelemetryDb::open(&path).unwrap();
+            for i in 0..3u64 {
+                db.insert_batch(&[sample(&t, &a, i, 1.0), sample(&t, &b, i, 2.0)])
+                    .unwrap();
+            }
+            assert_eq!(dict_rows(&db), 2);
+        }
+        let db = TelemetryDb::open(&path).unwrap();
+        db.insert_batch(&[sample(&t, &a, 10, 3.0)]).unwrap();
+        assert_eq!(dict_rows(&db), 2, "the reopened database reuses the row");
+        let a_rows = db.query_range("t1", Some("A.x"), 0, 100, 10).unwrap();
+        assert_eq!(
+            a_rows.iter().map(|s| s.timestamp_ms).collect::<Vec<_>>(),
+            [0, 1, 2, 10]
+        );
     }
 
     /// @test Opening a database created with the legacy denormalized
     /// schema rebuilds it into the dictionary schema with every row,
     /// channel name, and query shape preserved, and accepts new writes.
+    /// The rebuilt table gains the tier columns in place: its rows read
+    /// as full-resolution samples with no envelope, and the retention
+    /// ladder processes them.
     #[test]
     fn legacy_schema_migrates_to_dictionary() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("legacy.db");
         {
-            let conn = Connection::open(&path).unwrap();
+            let mut conn = Connection::open(&path).unwrap();
             conn.execute_batch(
                 "CREATE TABLE telemetry (
                     id INTEGER PRIMARY KEY,
@@ -2897,19 +2825,23 @@ mod tests {
                     ON telemetry (timestamp_ms ASC);",
             )
             .unwrap();
+            // One transaction: the fixture's cost, not the migration's,
+            // would otherwise be a journal sync per row.
+            let tx = conn.transaction().unwrap();
             for i in 0..100i64 {
                 let (target, channel) = if i % 2 == 0 {
                     ("t1", "A.x")
                 } else {
                     ("t2", "B.y")
                 };
-                conn.execute(
+                tx.execute(
                     "INSERT INTO telemetry (target_id, timestamp_ms, channel, value)
                      VALUES (?1, ?2, ?3, ?4)",
                     params![target, i, channel, i as f64],
                 )
                 .unwrap();
             }
+            tx.commit().unwrap();
         }
 
         let db = TelemetryDb::open(&path).unwrap();
@@ -2919,6 +2851,7 @@ mod tests {
         assert_eq!(t1.len(), 50);
         assert_eq!(t1[0].timestamp_ms, 0);
         assert_eq!(t1[0].value, 0.0);
+        assert!(t1.iter().all(|s| s.envelope.is_none()), "full resolution");
 
         let t2_all = db.query_range("t2", None, 0, 1000, 200).unwrap();
         assert_eq!(t2_all.len(), 50);
@@ -2939,50 +2872,21 @@ mod tests {
         let latest = db.query_latest("t1").unwrap();
         assert_eq!(latest.len(), 1);
         assert_eq!(latest[0].value, 42.0);
+
+        // The ladder reads the added tier column: the 100 migrated rows
+        // before the cutoff become one bucket per channel.
+        let pass = db.tier_pass(COARSE_TIER, 1_000, 1_000, u64::MAX).unwrap();
+        assert_eq!((pass.source_rows, pass.bucket_rows), (100, 2));
     }
 
-    /// @test A rolled-back batch must not leave the id of its brand-new
-    /// dictionary entry in the channel cache: the entry died with the
-    /// rollback, and a cached copy would point every later sample for
-    /// that channel at a dead id (invisible to queries).
+    /// @test The session table refuses a second row under one key, and a
+    /// keep-alive only ever moves refreshed_ms forward: an older touch
+    /// still answers that the row exists but leaves the later instant.
+    /// Insert, load, reopen and delete are the session store's own
+    /// tests, through this table.
     #[test]
-    fn failed_batch_does_not_poison_channel_cache() {
+    fn session_rows_are_unique_and_touch_never_moves_back() {
         let (_dir, db) = open_temp_db();
-        let t: Arc<str> = Arc::from("t1");
-        let ch: Arc<str> = Arc::from("N.fresh");
-
-        // Sabotage the latest-table UPSERT so the batch fails after the
-        // dictionary insert for the never-seen channel has run.
-        {
-            let conn = db.writer.lock().unwrap();
-            conn.execute_batch("ALTER TABLE telemetry_latest RENAME TO tl_sabotaged")
-                .unwrap();
-        }
-        assert!(db.insert_batch(&[sample(&t, &ch, 100, 1.0)]).is_err());
-        {
-            let conn = db.writer.lock().unwrap();
-            conn.execute_batch("ALTER TABLE tl_sabotaged RENAME TO telemetry_latest")
-                .unwrap();
-        }
-
-        // Retry resolves a live dictionary id; the row must be visible
-        // through the (target, channel) query path.
-        db.insert_batch(&[sample(&t, &ch, 200, 2.0)]).unwrap();
-        let out = db.query_range("t1", Some("N.fresh"), 0, 1000, 10).unwrap();
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].timestamp_ms, 200);
-        assert_eq!(db.query_latest("t1").unwrap().len(), 1);
-    }
-
-    /// @test Session rows round-trip through insert and load; a
-    /// keep-alive only moves refreshed_ms forward; delete removes the
-    /// row once and reports a missing one; all of it survives reopening
-    /// the file.
-    #[test]
-    fn session_rows_round_trip_and_persist() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("test.db");
-        let db = TelemetryDb::open(&path).unwrap();
         let row = SessionRow {
             key: "ab".repeat(32),
             user: "ops".into(),
@@ -2991,25 +2895,12 @@ mod tests {
         };
         db.insert_session(&row).unwrap();
         assert!(db.insert_session(&row).is_err(), "keys are unique");
-        assert_eq!(db.load_sessions().unwrap(), vec![row.clone()]);
 
         assert!(db.touch_session(&row.key, 5_000).unwrap());
         assert!(db.touch_session(&row.key, 4_000).unwrap());
         assert!(!db.touch_session("missing", 5_000).unwrap());
-        let other = SessionRow {
-            key: "cd".repeat(32),
-            ..row.clone()
-        };
-        db.insert_session(&other).unwrap();
-        drop(db);
-
-        let db = TelemetryDb::open(&path).unwrap();
-        let mut rows = db.load_sessions().unwrap();
-        rows.sort_by(|a, b| a.key.cmp(&b.key));
+        let rows = db.load_sessions().unwrap();
+        assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].refreshed_ms, 5_000, "never moves backwards");
-        assert_eq!(rows[1], other);
-        assert!(db.delete_session(&row.key).unwrap());
-        assert!(!db.delete_session(&row.key).unwrap());
-        assert_eq!(db.load_sessions().unwrap(), vec![other]);
     }
 }

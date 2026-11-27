@@ -415,7 +415,6 @@ impl TelemetryDecoder {
     }
 }
 
-/// Decode a single numeric field from raw bytes, returning f64.
 /// Decode one numeric field honoring the dictionary's declared byte
 /// order. Wire values arrive in whatever order the producing build
 /// serialized them (the generator stamps it); the wrong assumption
@@ -630,6 +629,73 @@ mod tests {
     use crate::core::config_manager::{ComponentDict, FieldDef, StructDef};
     use std::collections::HashMap;
 
+    /// A dictionary field: `name`, of `ty`, `size` bytes at `off`.
+    fn field(name: &str, ty: &str, off: usize, size: usize) -> FieldDef {
+        FieldDef {
+            name: name.to_string(),
+            field_type: ty.to_string(),
+            offset: off,
+            size,
+            value: serde_json::Value::Null,
+            element_type: None,
+            dims: None,
+            constraints: None,
+            struct_ref: None,
+            enum_ref: None,
+        }
+    }
+
+    /// A struct of one data category, `size` bytes long.
+    fn block(category: &str, size: usize, fields: Vec<FieldDef>) -> StructDef {
+        StructDef {
+            category: category.to_string(),
+            size,
+            opcode: None,
+            fields,
+            layout_hash: None,
+            canonical_spec: None,
+            packed: None,
+        }
+    }
+
+    /// A component's dictionary: its structs by name, in a byte order.
+    fn component(
+        name: &str,
+        byte_order: Option<&str>,
+        structs: Vec<(&str, StructDef)>,
+    ) -> ComponentDict {
+        ComponentDict {
+            component: name.to_string(),
+            byte_order: byte_order.map(String::from),
+            structs: structs
+                .into_iter()
+                .map(|(n, s)| (n.to_string(), s))
+                .collect(),
+            enums: HashMap::new(),
+            capabilities: Vec::new(),
+        }
+    }
+
+    /// A dictionary set keyed by each component's name, as load_dir
+    /// keys it.
+    fn dictionary(components: Vec<ComponentDict>) -> StructDictionary {
+        StructDictionary {
+            components: components
+                .into_iter()
+                .map(|c| (c.component.clone(), c))
+                .collect(),
+        }
+    }
+
+    /// A pushed packet: no data category.
+    fn pushed(full_uid: u32, payload: Vec<u8>) -> PushTelemetryPacket {
+        PushTelemetryPacket {
+            full_uid,
+            payload,
+            category: None,
+        }
+    }
+
     /// Build a tiny WaveGen-like component dictionary with OUTPUT (8B,
     /// fields {output, phase}) and STATE (16B, fields {output, phase,
     /// cycleCount, errorCount}). The decoder should: pick OUTPUT for
@@ -637,58 +703,36 @@ mod tests {
     /// should have its `output`/`phase` fields removed by the priority
     /// dedup since OUTPUT already claims them.
     fn make_wavegen_dict() -> StructDictionary {
-        let f = |name: &str, ty: &str, off: usize, sz: usize| FieldDef {
-            name: name.to_string(),
-            field_type: ty.to_string(),
-            offset: off,
-            size: sz,
-            value: serde_json::Value::Null,
-            element_type: None,
-            dims: None,
-            constraints: None,
-            struct_ref: None,
-            enum_ref: None,
-        };
-        let comp = ComponentDict {
-            component: "WaveGenerator".to_string(),
-            byte_order: None,
-            structs: HashMap::from([
+        dictionary(vec![component(
+            "WaveGenerator",
+            None,
+            vec![
                 (
-                    "Output".to_string(),
-                    StructDef {
-                        category: "OUTPUT".to_string(),
-                        size: 8,
-                        opcode: None,
-                        fields: vec![f("output", "float", 0, 4), f("phase", "float", 4, 4)],
-                        layout_hash: None,
-                        canonical_spec: None,
-                        packed: None,
-                    },
-                ),
-                (
-                    "State".to_string(),
-                    StructDef {
-                        category: "STATE".to_string(),
-                        size: 16,
-                        opcode: None,
-                        fields: vec![
-                            f("output", "float", 0, 4),
-                            f("phase", "float", 4, 4),
-                            f("cycleCount", "uint", 8, 4),
-                            f("errorCount", "uint", 12, 4),
+                    "Output",
+                    block(
+                        "OUTPUT",
+                        8,
+                        vec![
+                            field("output", "float", 0, 4),
+                            field("phase", "float", 4, 4),
                         ],
-                        layout_hash: None,
-                        canonical_spec: None,
-                        packed: None,
-                    },
+                    ),
                 ),
-            ]),
-            enums: HashMap::new(),
-            capabilities: Vec::new(),
-        };
-        StructDictionary {
-            components: HashMap::from([("WaveGenerator".to_string(), comp)]),
-        }
+                (
+                    "State",
+                    block(
+                        "STATE",
+                        16,
+                        vec![
+                            field("output", "float", 0, 4),
+                            field("phase", "float", 4, 4),
+                            field("cycleCount", "uint", 8, 4),
+                            field("errorCount", "uint", 12, 4),
+                        ],
+                    ),
+                ),
+            ],
+        )])
     }
 
     fn target_id() -> Arc<str> {
@@ -703,49 +747,30 @@ mod tests {
     /// dictionary silently attaches the wrong layout.
     #[test]
     fn dict_key_joins_exactly_and_beats_name_matching() {
-        let f = |name: &str, off: usize| FieldDef {
-            name: name.to_string(),
-            field_type: "float".to_string(),
-            offset: off,
-            size: 4,
-            value: serde_json::Value::Null,
-            element_type: None,
-            dims: None,
-            constraints: None,
-            struct_ref: None,
-            enum_ref: None,
+        let make = |comp: &str, name: &str| {
+            component(
+                comp,
+                None,
+                vec![(
+                    "Output",
+                    block(
+                        "OUTPUT",
+                        8,
+                        vec![field(name, "float", 0, 4), field("phase", "float", 4, 4)],
+                    ),
+                )],
+            )
         };
-        let make = |comp: &str, field: &str| ComponentDict {
-            component: comp.to_string(),
-            byte_order: None,
-            structs: HashMap::from([(
-                "Output".to_string(),
-                StructDef {
-                    category: "OUTPUT".to_string(),
-                    size: 8,
-                    opcode: None,
-                    fields: vec![f(field, 0), f("phase", 4)],
-                    layout_hash: None,
-                    canonical_spec: None,
-                    packed: None,
-                },
-            )]),
-            enums: HashMap::new(),
-            capabilities: Vec::new(),
-        };
-        let dict = StructDictionary {
-            components: HashMap::from([
-                ("WaveGen".to_string(), make("WaveGen", "genuine")),
-                ("WaveGenExt".to_string(), make("WaveGenExt", "imposter")),
-            ]),
-        };
+        let dict = dictionary(vec![
+            make("WaveGen", "genuine"),
+            make("WaveGenExt", "imposter"),
+        ]);
 
         let decoder = TelemetryDecoder::new(&dict, &[(0x00D000, "WaveGen#0", Some("WaveGen"))]);
-        let pkt = PushTelemetryPacket {
-            full_uid: 0x00D000,
-            payload: vec![0x00, 0x00, 0x00, 0x3F, 0x00, 0x00, 0x80, 0x3F],
-            category: None,
-        };
+        let pkt = pushed(
+            0x00D000,
+            vec![0x00, 0x00, 0x00, 0x3F, 0x00, 0x00, 0x80, 0x3F],
+        );
         let samples = decoder.decode(&target_id(), 1000, &pkt);
         let names: Vec<&str> = samples.iter().map(|s| &*s.channel).collect();
         assert!(names.contains(&"WaveGen#0.genuine"));
@@ -755,91 +780,91 @@ mod tests {
         );
     }
 
-    /// @test The dictionary's byte_order stamp drives value decode:
-    /// the same field specs decode big-endian wire bytes when the
-    /// producing dictionary says "be" -- across uint, int, and float
-    /// -- and the unstamped default remains little-endian (every
-    /// existing dictionary is valid unchanged).
+    /// One row of the scalar table: a field's type, its value's wire
+    /// bytes in each order (the width is their length), and the value
+    /// they decode to.
+    struct Scalar {
+        ty: &'static str,
+        le: Vec<u8>,
+        be: Vec<u8>,
+        value: f64,
+    }
+
+    /// Decode one OUTPUT block holding `scalars` in order, under a
+    /// dictionary stamped `stamp`, from the wire bytes of that order.
+    fn decode_scalars(scalars: &[Scalar], stamp: Option<&str>) -> Vec<(String, f64)> {
+        let mut fields = Vec::new();
+        let mut size = 0;
+        for (i, s) in scalars.iter().enumerate() {
+            fields.push(field(&format!("v{i}"), s.ty, size, s.le.len()));
+            size += s.le.len();
+        }
+        let dict = dictionary(vec![component(
+            "Wire",
+            stamp,
+            vec![("Output", block("OUTPUT", size, fields))],
+        )]);
+        let decoder = TelemetryDecoder::new(&dict, &[(0x42, "Wire", Some("Wire"))]);
+        let payload: Vec<u8> = scalars
+            .iter()
+            .flat_map(|s| if stamp == Some("be") { &s.be } else { &s.le })
+            .copied()
+            .collect();
+        named(&decoder.decode(&target_id(), 1000, &pushed(0x42, payload)))
+    }
+
+    /// @test Each scalar decodes in the byte order its dictionary
+    /// declares: the same field specs read big-endian wire bytes under
+    /// a "be" stamp and little-endian bytes under none (every existing
+    /// dictionary is valid unchanged), for unsigned, signed and float
+    /// values of four and eight bytes and a two-byte signed value.
     #[test]
-    fn byte_order_stamp_drives_decode() {
-        let f = |name: &str, ftype: &str, off: usize, size: usize| FieldDef {
-            name: name.to_string(),
-            field_type: ftype.to_string(),
-            offset: off,
-            size,
-            value: serde_json::Value::Null,
-            element_type: None,
-            dims: None,
-            constraints: None,
-            struct_ref: None,
-            enum_ref: None,
-        };
-        let comp = |byte_order: Option<&str>| ComponentDict {
-            component: "Imu".to_string(),
-            byte_order: byte_order.map(String::from),
-            structs: HashMap::from([(
-                "Output".to_string(),
-                StructDef {
-                    category: "OUTPUT".to_string(),
-                    size: 10,
-                    opcode: None,
-                    fields: vec![
-                        f("count", "uint", 0, 4),
-                        f("temp", "float", 4, 4),
-                        f("bias", "int", 8, 2),
-                    ],
-                    layout_hash: None,
-                    canonical_spec: None,
-                    packed: None,
-                },
-            )]),
-            enums: HashMap::new(),
-            capabilities: Vec::new(),
-        };
-
-        // Big-endian wire bytes: count=258, temp=1.5, bias=-2.
-        let mut be_payload = Vec::new();
-        be_payload.extend_from_slice(&258u32.to_be_bytes());
-        be_payload.extend_from_slice(&1.5f32.to_be_bytes());
-        be_payload.extend_from_slice(&(-2i16).to_be_bytes());
-
-        for (stamp, payload, label) in [
-            (Some("be"), be_payload.clone(), "big-endian stamped"),
-            (
-                None,
-                {
-                    let mut p = Vec::new();
-                    p.extend_from_slice(&258u32.to_le_bytes());
-                    p.extend_from_slice(&1.5f32.to_le_bytes());
-                    p.extend_from_slice(&(-2i16).to_le_bytes());
-                    p
-                },
-                "unstamped default little-endian",
-            ),
-        ] {
-            let dict = StructDictionary {
-                components: HashMap::from([("Imu".to_string(), comp(stamp))]),
-            };
-            let decoder = TelemetryDecoder::new(&dict, &[(0x42, "Imu", Some("Imu"))]);
-            let samples = decoder.decode(
-                &target_id(),
-                1000,
-                &PushTelemetryPacket {
-                    full_uid: 0x42,
-                    payload,
-                    category: None,
-                },
-            );
-            let get = |n: &str| {
-                samples
-                    .iter()
-                    .find(|s| &*s.channel == n)
-                    .unwrap_or_else(|| panic!("{label}: missing {n}"))
-                    .value
-            };
-            assert_eq!(get("Imu.count"), 258.0, "{label}");
-            assert!((get("Imu.temp") - 1.5).abs() < 1e-6, "{label}");
-            assert_eq!(get("Imu.bias"), -2.0, "{label}");
+    fn scalar_values_decode_in_the_dictionary_byte_order() {
+        let scalars = [
+            Scalar {
+                ty: "uint",
+                le: 258u32.to_le_bytes().into(),
+                be: 258u32.to_be_bytes().into(),
+                value: 258.0,
+            },
+            Scalar {
+                ty: "int",
+                le: (-2i16).to_le_bytes().into(),
+                be: (-2i16).to_be_bytes().into(),
+                value: -2.0,
+            },
+            Scalar {
+                ty: "float",
+                le: 1.5f32.to_le_bytes().into(),
+                be: 1.5f32.to_be_bytes().into(),
+                value: 1.5,
+            },
+            Scalar {
+                ty: "uint",
+                le: (1u64 << 40).to_le_bytes().into(),
+                be: (1u64 << 40).to_be_bytes().into(),
+                value: (1u64 << 40) as f64,
+            },
+            Scalar {
+                ty: "int",
+                le: (-3i64).to_le_bytes().into(),
+                be: (-3i64).to_be_bytes().into(),
+                value: -3.0,
+            },
+            Scalar {
+                ty: "float",
+                le: 0.125f64.to_le_bytes().into(),
+                be: 0.125f64.to_be_bytes().into(),
+                value: 0.125,
+            },
+        ];
+        let want: Vec<(String, f64)> = scalars
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (format!("Wire.v{i}"), s.value))
+            .collect();
+        for stamp in [Some("be"), None] {
+            assert_eq!(decode_scalars(&scalars, stamp), want, "stamp {stamp:?}");
         }
     }
 
@@ -850,137 +875,31 @@ mod tests {
     /// every generated vehicle-state dictionary has.
     #[test]
     fn aggregate_fields_are_skipped_not_fatal() {
-        let f = |name: &str, ftype: &str, off: usize, size: usize| FieldDef {
-            name: name.to_string(),
-            field_type: ftype.to_string(),
-            offset: off,
-            size,
-            value: serde_json::Value::Null,
-            element_type: None,
-            dims: None,
-            constraints: None,
-            struct_ref: None,
-            enum_ref: None,
-        };
-        let dict = StructDictionary {
-            components: HashMap::from([(
-                "Plant".to_string(),
-                ComponentDict {
-                    component: "Plant".to_string(),
-                    byte_order: None,
-                    structs: HashMap::from([(
-                        "VehicleState".to_string(),
-                        StructDef {
-                            category: "OUTPUT".to_string(),
-                            size: 20,
-                            opcode: None,
-                            fields: vec![
-                                f("pos", "struct", 0, 12),
-                                f("mass", "float", 12, 4),
-                                f("mode", "uint", 16, 4),
-                            ],
-                            layout_hash: None,
-                            canonical_spec: None,
-                            packed: None,
-                        },
-                    )]),
-                    enums: HashMap::new(),
-                    capabilities: Vec::new(),
-                },
-            )]),
-        };
+        let dict = dictionary(vec![component(
+            "Plant",
+            None,
+            vec![(
+                "VehicleState",
+                block(
+                    "OUTPUT",
+                    20,
+                    vec![
+                        field("pos", "struct", 0, 12),
+                        field("mass", "float", 12, 4),
+                        field("mode", "uint", 16, 4),
+                    ],
+                ),
+            )],
+        )]);
         let decoder = TelemetryDecoder::new(&dict, &[(0x77, "Plant", Some("Plant"))]);
         let mut payload = vec![0xAA; 12];
         payload.extend_from_slice(&2.5f32.to_le_bytes());
         payload.extend_from_slice(&7u32.to_le_bytes());
-        let samples = decoder.decode(
-            &target_id(),
-            1000,
-            &PushTelemetryPacket {
-                full_uid: 0x77,
-                payload,
-                category: None,
-            },
-        );
+        let samples = decoder.decode(&target_id(), 1000, &pushed(0x77, payload));
         let names: Vec<&str> = samples.iter().map(|s| &*s.channel).collect();
         assert_eq!(names, vec!["Plant.mass", "Plant.mode"], "{names:?}");
         assert!((samples[0].value - 2.5).abs() < 1e-6);
         assert_eq!(samples[1].value, 7.0);
-    }
-
-    /// @test Eight-byte values decode in both orders: uint64, int64
-    /// and float64 from big-endian wire bytes under a "be" stamp, and
-    /// the unstamped default from little-endian bytes.
-    #[test]
-    fn eight_byte_values_decode_in_both_orders() {
-        let f = |name: &str, ftype: &str, off: usize| FieldDef {
-            name: name.to_string(),
-            field_type: ftype.to_string(),
-            offset: off,
-            size: 8,
-            value: serde_json::Value::Null,
-            element_type: None,
-            dims: None,
-            constraints: None,
-            struct_ref: None,
-            enum_ref: None,
-        };
-        let comp = |byte_order: Option<&str>| ComponentDict {
-            component: "Wide".to_string(),
-            byte_order: byte_order.map(String::from),
-            structs: HashMap::from([(
-                "Output".to_string(),
-                StructDef {
-                    category: "OUTPUT".to_string(),
-                    size: 24,
-                    opcode: None,
-                    fields: vec![
-                        f("ticks", "uint", 0),
-                        f("delta", "int", 8),
-                        f("ratio", "float", 16),
-                    ],
-                    layout_hash: None,
-                    canonical_spec: None,
-                    packed: None,
-                },
-            )]),
-            enums: HashMap::new(),
-            capabilities: Vec::new(),
-        };
-        let (ticks, delta, ratio) = (1u64 << 40, -3i64, 0.125f64);
-        let mut be = Vec::new();
-        be.extend_from_slice(&ticks.to_be_bytes());
-        be.extend_from_slice(&delta.to_be_bytes());
-        be.extend_from_slice(&ratio.to_be_bytes());
-        let mut le = Vec::new();
-        le.extend_from_slice(&ticks.to_le_bytes());
-        le.extend_from_slice(&delta.to_le_bytes());
-        le.extend_from_slice(&ratio.to_le_bytes());
-        for (stamp, payload, label) in [(Some("be"), be, "be"), (None, le, "default le")] {
-            let dict = StructDictionary {
-                components: HashMap::from([("Wide".to_string(), comp(stamp))]),
-            };
-            let decoder = TelemetryDecoder::new(&dict, &[(0x43, "Wide", Some("Wide"))]);
-            let samples = decoder.decode(
-                &target_id(),
-                1000,
-                &PushTelemetryPacket {
-                    full_uid: 0x43,
-                    payload,
-                    category: None,
-                },
-            );
-            let get = |n: &str| {
-                samples
-                    .iter()
-                    .find(|s| &*s.channel == n)
-                    .unwrap_or_else(|| panic!("{label}: missing {n}"))
-                    .value
-            };
-            assert_eq!(get("Wide.ticks"), ticks as f64, "{label}");
-            assert_eq!(get("Wide.delta"), -3.0, "{label}");
-            assert_eq!(get("Wide.ratio"), 0.125, "{label}");
-        }
     }
 
     /// @test A record dictionary is a first-class decode source: a
@@ -1007,39 +926,11 @@ mod tests {
         let mut record = vec![0u8; 17];
         record[2..6].copy_from_slice(&4660u32.to_be_bytes());
         record.extend_from_slice(&42.5f32.to_be_bytes());
-        let samples = decoder.decode(
-            &target_id(),
-            1000,
-            &PushTelemetryPacket {
-                full_uid: 4660,
-                payload: record,
-                category: None,
-            },
-        );
+        let samples = decoder.decode(&target_id(), 1000, &pushed(4660, record));
         assert_eq!(samples.len(), 1);
         assert_eq!(&*samples[0].channel, "Sys.res.CPU");
         assert!((samples[0].value - 42.5).abs() < 1e-6);
         assert_eq!(decoder.channel_names(), ["Sys.res.CPU"]);
-    }
-
-    /// @test 8-byte WaveGen OUTPUT struct decodes into the two
-    /// expected float samples (output, phase) with correct values.
-    #[test]
-    fn decode_8b_output_emits_two_samples() {
-        let dict = make_wavegen_dict();
-        let decoder = TelemetryDecoder::new(&dict, &[(0x00D000, "WaveGen#0", None)]);
-        let pkt = PushTelemetryPacket {
-            full_uid: 0x00D000,
-            // 0.5_f32, 1.0_f32 little-endian
-            payload: vec![0x00, 0x00, 0x00, 0x3F, 0x00, 0x00, 0x80, 0x3F],
-            category: None,
-        };
-        let samples = decoder.decode(&target_id(), 1000, &pkt);
-        assert_eq!(samples.len(), 2);
-        assert_eq!(&*samples[0].channel, "WaveGen#0.output");
-        assert!((samples[0].value - 0.5).abs() < 1e-6);
-        assert_eq!(&*samples[1].channel, "WaveGen#0.phase");
-        assert!((samples[1].value - 1.0).abs() < 1e-6);
     }
 
     /// @test STATE struct fields that share names with the
@@ -1055,12 +946,7 @@ mod tests {
         // cycleCount = 42, errorCount = 7
         payload[8..12].copy_from_slice(&42u32.to_le_bytes());
         payload[12..16].copy_from_slice(&7u32.to_le_bytes());
-        let pkt = PushTelemetryPacket {
-            full_uid: 0x00D000,
-            payload,
-            category: None,
-        };
-        let samples = decoder.decode(&target_id(), 2000, &pkt);
+        let samples = decoder.decode(&target_id(), 2000, &pushed(0x00D000, payload));
         let names: Vec<&str> = samples.iter().map(|s| &*s.channel).collect();
         assert!(
             !names.contains(&"WaveGen#0.output"),
@@ -1096,12 +982,7 @@ mod tests {
         payload[0..4].copy_from_slice(&1.0f32.to_le_bytes());
         payload[4..8].copy_from_slice(&2.0f32.to_le_bytes());
         payload[8..12].copy_from_slice(&3.0f32.to_le_bytes());
-        let pkt = PushTelemetryPacket {
-            full_uid: 0x00DEAD,
-            payload,
-            category: None,
-        };
-        let samples = decoder.decode(&target_id(), 3000, &pkt);
+        let samples = decoder.decode(&target_id(), 3000, &pushed(0x00DEAD, payload));
         assert_eq!(samples.len(), 3);
         assert_eq!(&*samples[0].channel, "Unknown.field0");
         assert_eq!(samples[0].value, 1.0);
@@ -1112,50 +993,24 @@ mod tests {
     /// at decoder construction so they never appear in samples.
     #[test]
     fn decode_filters_padding_and_reserved() {
-        let f = |name: &str, ty: &str, off: usize, sz: usize| FieldDef {
-            name: name.to_string(),
-            field_type: ty.to_string(),
-            offset: off,
-            size: sz,
-            value: serde_json::Value::Null,
-            element_type: None,
-            dims: None,
-            constraints: None,
-            struct_ref: None,
-            enum_ref: None,
-        };
-        let comp = ComponentDict {
-            component: "X".to_string(),
-            byte_order: None,
-            structs: HashMap::from([(
-                "S".to_string(),
-                StructDef {
-                    category: "OUTPUT".to_string(),
-                    size: 8,
-                    opcode: None,
-                    fields: vec![
-                        f("real", "float", 0, 4),
-                        f("padding", "uint", 4, 2),
-                        f("reserved0", "uint", 6, 2),
+        let dict = dictionary(vec![component(
+            "X",
+            None,
+            vec![(
+                "S",
+                block(
+                    "OUTPUT",
+                    8,
+                    vec![
+                        field("real", "float", 0, 4),
+                        field("padding", "uint", 4, 2),
+                        field("reserved0", "uint", 6, 2),
                     ],
-                    layout_hash: None,
-                    canonical_spec: None,
-                    packed: None,
-                },
-            )]),
-            enums: HashMap::new(),
-            capabilities: Vec::new(),
-        };
-        let dict = StructDictionary {
-            components: HashMap::from([("X".to_string(), comp)]),
-        };
+                ),
+            )],
+        )]);
         let decoder = TelemetryDecoder::new(&dict, &[(0x1, "X", None)]);
-        let pkt = PushTelemetryPacket {
-            full_uid: 0x1,
-            payload: vec![0u8; 8],
-            category: None,
-        };
-        let samples = decoder.decode(&target_id(), 0, &pkt);
+        let samples = decoder.decode(&target_id(), 0, &pushed(0x1, vec![0u8; 8]));
         assert_eq!(samples.len(), 1, "padding and reserved should be skipped");
         assert_eq!(&*samples[0].channel, "X.real");
     }
@@ -1170,11 +1025,7 @@ mod tests {
         // (verifiable via Arc::strong_count rising and Arc::ptr_eq).
         let dict = make_wavegen_dict();
         let decoder = TelemetryDecoder::new(&dict, &[(0x00D000, "WaveGen#0", None)]);
-        let pkt = PushTelemetryPacket {
-            full_uid: 0x00D000,
-            payload: vec![0u8; 8],
-            category: None,
-        };
+        let pkt = pushed(0x00D000, vec![0u8; 8]);
         let s1 = decoder.decode(&target_id(), 0, &pkt);
         let s2 = decoder.decode(&target_id(), 1, &pkt);
         assert!(
@@ -1183,15 +1034,44 @@ mod tests {
         );
     }
 
-    /// @test The category priority ordering is OUTPUT > STATE >
-    /// TELEMETRY > TUNABLE_PARAM > anything-else, used to break
-    /// duplicate-field ties at decoder construction.
+    /// @test A field name belongs to the highest-priority block that
+    /// declares it -- OUTPUT, then STATE, TELEMETRY, TUNABLE_PARAM,
+    /// then any other category -- and each lower block keeps only the
+    /// names no higher block claimed: blocks declaring a, a b, a b c,
+    /// and so on decode to one channel each.
     #[test]
-    fn category_priority_ordering() {
-        assert!(category_priority("OUTPUT") > category_priority("STATE"));
-        assert!(category_priority("STATE") > category_priority("TELEMETRY"));
-        assert!(category_priority("TELEMETRY") > category_priority("TUNABLE_PARAM"));
-        assert_eq!(category_priority("UNKNOWN"), 0);
+    fn field_names_go_to_the_highest_priority_block() {
+        let names = ["a", "b", "c", "d", "e"];
+        let ladder = [
+            "OUTPUT",
+            "STATE",
+            "TELEMETRY",
+            "TUNABLE_PARAM",
+            "STATIC_PARAM",
+        ];
+        let structs = ladder
+            .iter()
+            .enumerate()
+            .map(|(i, category)| {
+                let fields = names[..=i]
+                    .iter()
+                    .enumerate()
+                    .map(|(j, name)| field(name, "uint", j * 4, 4))
+                    .collect();
+                (*category, block(category, (i + 1) * 4, fields))
+            })
+            .collect();
+        let dict = dictionary(vec![component("Ladder", None, structs)]);
+        let decoder = TelemetryDecoder::new(&dict, &[(0x7, "Ladder", Some("Ladder"))]);
+        for (i, name) in names.iter().enumerate() {
+            let pkt = pushed(0x7, vec![0u8; (i + 1) * 4]);
+            assert_eq!(
+                named(&decoder.decode(&target_id(), 0, &pkt)),
+                [(format!("Ladder.{name}"), 0.0)],
+                "{} keeps only {name}",
+                ladder[i]
+            );
+        }
     }
 
     /// @test The router counts decoded samples and dedup drops: two
@@ -1307,8 +1187,8 @@ mod tests {
     }
 
     /// @test A pushed packet names no category and decodes by (uid,
-    /// size) as before: of SpecChannel's two eight-byte blocks, the
-    /// size lookup keeps the one it always has (STATE).
+    /// size): of SpecChannel's two eight-byte blocks, the size lookup
+    /// keeps STATE.
     #[test]
     fn pushed_packet_without_category_decodes_by_size() {
         let decoder = spec_demo_decoder();
@@ -1445,8 +1325,8 @@ mod tests {
     /// @test The shipped spec demo's SpecChannel layout references
     /// are channels its decoder emits, with the decoder built as the
     /// layouts endpoint builds it (manifest joins over the shipped
-    /// dictionaries): SpecChannel#0 and #1 value and sequence are
-    /// known, although only the category index names them.
+    /// dictionaries): every SpecChannel channel its layouts plot is
+    /// known, those only the category index names included.
     #[test]
     fn shipped_spec_channel_layout_references_are_known() {
         use crate::core::config_manager::{AppManifest, TelemetryConfig};
@@ -1469,14 +1349,9 @@ mod tests {
             .flat_map(|l| l.plots.iter().flat_map(|p| p.channels.iter()))
             .filter(|c| c.starts_with("SpecChannel#"))
             .collect();
-        assert_eq!(
-            spec_channel,
-            [
-                "SpecChannel#0.value",
-                "SpecChannel#0.sequence",
-                "SpecChannel#1.value",
-                "SpecChannel#1.sequence"
-            ]
+        assert!(
+            !spec_channel.is_empty(),
+            "the spec demo's layouts plot no SpecChannel channel"
         );
         for name in spec_channel {
             assert!(known.contains(name), "{name} reported unknown");

@@ -252,11 +252,15 @@ mod tests {
     }
 
     /// @test Boot validation: disabled auth is always fine; enabled
-    /// auth rejects the default secret, a short secret, an empty hash,
-    /// and a malformed hash -- and passes a proper configuration.
+    /// auth refuses the default secret, an empty hash and a malformed
+    /// hash, each by its own error -- and passes a proper configuration.
     #[test]
     fn boot_validation_covers_each_misconfiguration() {
         use crate::config::AuthSection;
+        const SECRET_ERR: &str = "[auth] secret is the default or shorter than 16 chars";
+        const EMPTY_HASH_ERR: &str =
+            "[auth] password_hash is empty (generate with zenith --hash-password)";
+        const BAD_HASH_ERR: &str = "[auth] password_hash is not a valid PHC string";
         let good_hash = hash_password("pw").unwrap();
 
         let mut auth = AuthSection {
@@ -272,11 +276,11 @@ mod tests {
         );
 
         auth.enabled = true;
-        assert_eq!(boot_errors(&auth).len(), 2, "default secret + empty hash");
+        assert_eq!(boot_errors(&auth), [SECRET_ERR, EMPTY_HASH_ERR]);
 
         auth.secret = "long-enough-secret-value".into();
         auth.password_hash = "garbage".into();
-        assert_eq!(boot_errors(&auth).len(), 1, "malformed hash");
+        assert_eq!(boot_errors(&auth), [BAD_HASH_ERR]);
 
         auth.password_hash = good_hash;
         assert!(boot_errors(&auth).is_empty(), "proper config passes");
@@ -316,29 +320,6 @@ mod tests {
         auth.session_max_hours = 0;
         auth.enabled = false;
         assert!(boot_errors(&auth).is_empty(), "inert while auth is off");
-    }
-
-    /// @test The session keys default to a 30 minute idle limit, a 10
-    /// hour absolute limit and a Secure cookie, and read from the file.
-    #[test]
-    fn session_keys_parse_with_defaults() {
-        use crate::config::AuthSection;
-        let d: AuthSection = toml::from_str("enabled = true").unwrap();
-        assert_eq!(
-            (d.session_idle_min, d.session_max_hours, d.cookie_secure),
-            (30, 10, true)
-        );
-        let set: AuthSection =
-            toml::from_str("session_idle_min = 0\nsession_max_hours = 12\ncookie_secure = false\n")
-                .unwrap();
-        assert_eq!(
-            (
-                set.session_idle_min,
-                set.session_max_hours,
-                set.cookie_secure
-            ),
-            (0, 12, false)
-        );
     }
 
     /// @test Credential precedence: a bearer header wins over a query

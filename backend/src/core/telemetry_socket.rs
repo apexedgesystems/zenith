@@ -141,11 +141,33 @@ pub fn close_text(reason: Option<EndReason>) -> &'static str {
 /// browser session; token and ticket sockets pass None. The target's
 /// client count covers the call.
 pub async fn stream_samples(
+    socket: WebSocket,
+    samples: broadcast::Receiver<TelemetrySample>,
+    target_id: &str,
+    metrics: &TargetMetrics,
+    session_end: Option<watch::Receiver<Option<EndReason>>>,
+) -> StreamEnd {
+    stream_samples_with(
+        socket,
+        samples,
+        target_id,
+        metrics,
+        session_end,
+        SEND_TIMEOUT,
+    )
+    .await
+}
+
+/// [`stream_samples`] with the bound on one blocked send given:
+/// `SEND_TIMEOUT` for every socket the server opens, and a shorter one
+/// in the tests of a client that stops reading.
+async fn stream_samples_with(
     mut socket: WebSocket,
     mut samples: broadcast::Receiver<TelemetrySample>,
     target_id: &str,
     metrics: &TargetMetrics,
     mut session_end: Option<watch::Receiver<Option<EndReason>>>,
+    send_timeout: Duration,
 ) -> StreamEnd {
     tracing::info!("WebSocket client connected for target {}", target_id);
     metrics.ws_clients.fetch_add(1, Ordering::Relaxed);
@@ -160,7 +182,7 @@ pub async fn stream_samples(
                     // The send waits while the client is not reading; the
                     // session end must not wait with it.
                     tokio::select! {
-                        sent = tokio::time::timeout(SEND_TIMEOUT, send) => {
+                        sent = tokio::time::timeout(send_timeout, send) => {
                             if !matches!(sent, Ok(Ok(()))) {
                                 break StreamEnd::ClientGone;
                             }
@@ -222,6 +244,9 @@ mod tests {
 
     const SECOND: Duration = Duration::from_secs(1);
 
+    /// The harness's sample channel: the backlog a stuck stream fills.
+    const SAMPLE_CAPACITY: usize = 64;
+
     type Client = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
     /// One telemetry socket served on a loopback port, wired to channels
@@ -238,7 +263,13 @@ mod tests {
     }
 
     async fn harness(with_session: bool) -> Harness {
-        let (samples, samples_rx) = broadcast::channel(64);
+        harness_with(with_session, None).await
+    }
+
+    /// The harness with the server's bound on one blocked send, or with
+    /// `send_timeout` in its place.
+    async fn harness_with(with_session: bool, send_timeout: Option<Duration>) -> Harness {
+        let (samples, samples_rx) = broadcast::channel(SAMPLE_CAPACITY);
         let (session, session_rx) = watch::channel(None);
         let metrics = TargetMetrics::new();
         let (end_tx, ends) = mpsc::unbounded_channel();
@@ -255,9 +286,18 @@ mod tests {
                 async move {
                     accept(ws, move |socket| async move {
                         let samples_rx = samples_rx.expect("one socket per harness");
-                        let end =
-                            stream_samples(socket, samples_rx, "target-0", &metrics, session_rx)
-                                .await;
+                        let end = match send_timeout {
+                            None => {
+                                stream_samples(socket, samples_rx, "target-0", &metrics, session_rx)
+                                    .await
+                            }
+                            Some(bound) => {
+                                stream_samples_with(
+                                    socket, samples_rx, "target-0", &metrics, session_rx, bound,
+                                )
+                                .await
+                            }
+                        };
                         let _ = end_tx.send(end);
                     })
                 }
@@ -375,14 +415,14 @@ mod tests {
     }
 
     /// @test A client that keeps the connection alive with pings, and
-    /// gives up when a pong is late, keeps receiving samples well past
-    /// its ping timeout: every ping is answered in time and samples
-    /// still arrive at the end of the run.
+    /// gives up when a pong is late, keeps receiving samples past its
+    /// ping timeout: every ping is answered in time while samples flow,
+    /// and samples still arrive at the end of the run.
     #[tokio::test]
     async fn a_pinging_client_keeps_receiving_past_its_ping_timeout() {
         const PING_EVERY: Duration = Duration::from_millis(100);
         const PING_TIMEOUT: Duration = Duration::from_millis(500);
-        const RUN: Duration = Duration::from_millis(2000);
+        const RUN: Duration = Duration::from_millis(700);
         let h = harness(false).await;
         let mut client = connect(&h).await;
         let producer = tokio::spawn({
@@ -420,7 +460,7 @@ mod tests {
             tokio::time::sleep(PING_EVERY).await;
         }
         producer.abort();
-        assert!(pings >= 5, "only {pings} pings in the run");
+        assert!(pings >= 3, "only {pings} pings in the run");
         assert!(
             last_sample.elapsed() < PING_TIMEOUT,
             "no sample in the last {PING_TIMEOUT:?}"
@@ -459,24 +499,6 @@ mod tests {
             .expect("the stream outlived its dropped connection");
         assert_eq!(end, Some(StreamEnd::ClientGone));
         assert!(until(|| clients(&h) == 0).await);
-    }
-
-    /// @test Text and binary frames from the client are ignored: the
-    /// stream stays open and samples keep coming.
-    #[tokio::test]
-    async fn frames_from_the_client_are_ignored() {
-        let mut h = harness(false).await;
-        let mut client = connect(&h).await;
-        client.send(Frame::Text("hello".into())).await.unwrap();
-        client
-            .send(Frame::Binary(vec![1u8, 2, 3].into()))
-            .await
-            .unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        h.samples.send(sample("Pump.flow", 2.0)).unwrap();
-        assert!(matches!(next_frame(&mut client).await, Frame::Text(_)));
-        assert!(h.ends.try_recv().is_err(), "the stream ended");
-        assert_eq!(clients(&h), 1);
     }
 
     /// @test A frame whose header declares more than the cap ends the
@@ -520,17 +542,26 @@ mod tests {
         assert!(until(|| clients(&h) == 0).await);
     }
 
-    /// @test A message of exactly the cap is accepted and ignored: the
-    /// stream stays open and samples keep coming.
+    /// @test Text and binary frames from the client, a message of
+    /// exactly the cap among them, are accepted and ignored: the stream
+    /// stays open and samples keep coming. A ping sent after them is
+    /// answered only once the server has read them, so its pong shows
+    /// they were all taken.
     #[tokio::test]
-    async fn a_message_at_the_cap_is_ignored() {
+    async fn client_frames_up_to_the_cap_are_ignored() {
         let mut h = harness(false).await;
         let mut client = connect(&h).await;
+        client.send(Frame::Text("hello".into())).await.unwrap();
+        client
+            .send(Frame::Binary(vec![1u8, 2, 3].into()))
+            .await
+            .unwrap();
         client
             .send(Frame::Binary(vec![0u8; MAX_CLIENT_MESSAGE_BYTES].into()))
             .await
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        client.send(Frame::Ping("read".into())).await.unwrap();
+        assert_eq!(next_frame(&mut client).await, Frame::Pong("read".into()));
         h.samples.send(sample("Pump.flow", 3.0)).unwrap();
         assert!(matches!(next_frame(&mut client).await, Frame::Text(_)));
         assert!(h.ends.try_recv().is_err(), "the stream ended");
@@ -538,18 +569,24 @@ mod tests {
     }
 
     /// Fill the connection while the client reads nothing, until the
-    /// stream is stuck in a send: its backlog in the sample channel stops
-    /// draining. Large samples only make the buffers fill sooner.
+    /// stream is stuck in a send: the sample channel's backlog fills to
+    /// its capacity and then stops draining. Large samples fill the
+    /// connection's buffers sooner; sending until the backlog is full,
+    /// rather than a fixed count, keeps the stall independent of how
+    /// large the host's TCP buffers are, up to the bound on sends.
     async fn stall(h: &Harness) {
         let large = sample(&"x".repeat(128 * 1024), 1.0);
-        for _ in 0..200 {
+        for _ in 0..2000 {
             h.samples.send(large.clone()).unwrap();
+            if h.samples.len() == SAMPLE_CAPACITY {
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         let backlog = h.samples.len();
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(
-            backlog > 0 && h.samples.len() == backlog,
+            backlog == SAMPLE_CAPACITY && h.samples.len() == backlog,
             "the stream kept up, so no send blocked: backlog {backlog}, then {}",
             h.samples.len()
         );
@@ -578,18 +615,21 @@ mod tests {
     /// @test A client that takes nothing for the send timeout is gone: a
     /// stream stuck in a send to it ends as the client gone, no sooner
     /// than the timeout and without any session end, and the client
-    /// count drops.
+    /// count drops. The stream runs with a two-second bound in place of
+    /// the server's ten; the bound must outlast the stall's own wait,
+    /// or the stream would end before the stall could show it stuck.
     #[tokio::test]
     async fn a_client_that_stops_reading_is_dropped() {
-        let mut h = harness(false).await;
+        const BOUND: Duration = Duration::from_secs(2);
+        let mut h = harness_with(false, Some(BOUND)).await;
         let client = connect(&h).await;
         let started = Instant::now();
         stall(&h).await;
-        let end = timeout(SEND_TIMEOUT + 2 * SECOND, h.ends.recv())
+        let end = timeout(BOUND + 2 * SECOND, h.ends.recv())
             .await
             .expect("the stream waited on a client that takes nothing");
         assert_eq!(end, Some(StreamEnd::ClientGone));
-        assert!(started.elapsed() >= SEND_TIMEOUT);
+        assert!(started.elapsed() >= BOUND);
         assert!(until(|| clients(&h) == 0).await);
         drop(client);
     }

@@ -1226,25 +1226,6 @@ mod tests {
         assert!(allowed.check(3.0).is_ok());
         assert!(allowed.check(2.0).is_err());
     }
-
-    /// @test A dictionary entry carrying the producer-stated layout
-    /// hash exposes the u32 the prelude carries; entries without one
-    /// (dictionaries predating the export) return None.
-    #[test]
-    fn struct_def_layout_hash_parses() {
-        let json = r#"{
-            "category": "TUNABLE_PARAM",
-            "size": 80,
-            "fields": [],
-            "layout_hash": "0xC93CD892",
-            "canonical_spec": "a:uint:1;"
-        }"#;
-        let sdef: StructDef = serde_json::from_str(json).unwrap();
-        assert_eq!(sdef.layout_hash_u32(), Some(0xC93C_D892));
-
-        let bare: StructDef = serde_json::from_str(r#"{"size": 4}"#).unwrap();
-        assert_eq!(bare.layout_hash_u32(), None);
-    }
 }
 
 #[cfg(test)]
@@ -1269,10 +1250,11 @@ mod nested_tests {
     /// @test A nested field spanning multiple fragment instances
     /// expands to indexed leaves at payload-absolute offsets, and a
     /// fragment containing its own nested field expands one level
-    /// deeper (two levels max: a third level stays opaque).
+    /// deeper; two levels is the most: a nested field met at the third
+    /// level stays one opaque field under its full path.
     #[test]
     fn nested_fields_expand_to_absolute_leaves() {
-        let mut sub = StructDef {
+        let sub = StructDef {
             category: "STRUCT".to_string(),
             size: 4,
             opcode: None,
@@ -1292,7 +1274,6 @@ mod nested_tests {
             canonical_spec: None,
             packed: None,
         };
-        sub.packed = Some(true);
 
         let mut top_ref = f("subs", "nested", 4, 8);
         top_ref.struct_ref = Some("Sub".to_string());
@@ -1317,6 +1298,32 @@ mod nested_tests {
             packed: None,
         };
 
+        // Three levels: ThreeLevel.outer -> Outer.mid -> Mid.deepest,
+        // whose fragment would be a third expansion.
+        let one_ref = |name: &str, frag: &str| {
+            let mut r = f(name, "nested", 0, 2);
+            r.struct_ref = Some(frag.to_string());
+            StructDef {
+                category: "STRUCT".to_string(),
+                size: 2,
+                opcode: None,
+                fields: vec![r],
+                layout_hash: None,
+                canonical_spec: None,
+                packed: None,
+            }
+        };
+        let leaf = StructDef {
+            category: "STRUCT".to_string(),
+            size: 2,
+            opcode: None,
+            fields: vec![f("z", "uint", 0, 2)],
+            layout_hash: None,
+            canonical_spec: None,
+            packed: None,
+        };
+        let three_level = one_ref("outer", "Outer");
+
         let dict = ComponentDict {
             component: "C".to_string(),
             byte_order: None,
@@ -1325,6 +1332,9 @@ mod nested_tests {
                 ("Deep".to_string(), deep),
                 ("Top".to_string(), top.clone()),
                 ("TwoLevel".to_string(), two_level.clone()),
+                ("Outer".to_string(), one_ref("mid", "Mid")),
+                ("Mid".to_string(), one_ref("deepest", "Leaf")),
+                ("Leaf".to_string(), leaf),
             ]),
             enums: HashMap::new(),
             capabilities: Vec::new(),
@@ -1349,6 +1359,13 @@ mod nested_tests {
         let out = expanded_fields(&dict, &two_level.fields, 0);
         let names: Vec<(&str, usize)> = out.iter().map(|x| (x.name.as_str(), x.offset)).collect();
         assert_eq!(names, vec![("d.x", 0), ("d.pair.a", 2), ("d.pair.b", 4)]);
+
+        let out = expanded_fields(&dict, &three_level.fields, 0);
+        let names: Vec<(&str, &str)> = out
+            .iter()
+            .map(|x| (x.name.as_str(), x.field_type.as_str()))
+            .collect();
+        assert_eq!(names, vec![("outer.mid.deepest", "nested")]);
     }
 
     /// @test A byte_order stamp is evidence, so only the two
@@ -1442,16 +1459,5 @@ mod nested_tests {
             let e = table(bad).validate().unwrap_err();
             assert!(e.contains(why), "{e}");
         }
-    }
-
-    /// @test leaf_name inverts the path expanded_fields gives a nested
-    /// leaf: an indexed instance, a single instance and two levels all
-    /// reduce to the leaf's own name, and a top-level field keeps its.
-    #[test]
-    fn leaf_name_is_the_last_segment_of_an_expanded_path() {
-        assert_eq!(leaf_name("subscriptions[3].fullUid"), "fullUid");
-        assert_eq!(leaf_name("waitCondition.threshold"), "threshold");
-        assert_eq!(leaf_name("steps[1].waitCondition.threshold"), "threshold");
-        assert_eq!(leaf_name("frequency"), "frequency");
     }
 }

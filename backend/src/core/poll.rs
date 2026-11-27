@@ -82,8 +82,6 @@ pub fn spawn_polls(
 mod tests {
     use super::*;
     use crate::core::aproto_client::AprotoClient;
-    use crate::core::config_manager::StructDictionary;
-    use crate::core::telemetry::TelemetryDecoder;
     use crate::protocol::{aproto, slip};
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -145,13 +143,12 @@ mod tests {
         addr
     }
 
-    /// @test A polled read carries the category it asked for, and the
-    /// decoder names the block's fields by it: in the shipped spec demo
-    /// SpecChannel's OUTPUT and STATE are both eight bytes, and the
-    /// polled OUTPUT decodes as value and sequence, not as STATE's
-    /// elapsed and zeros.
+    /// @test A polled read asks for its row's category and publishes the
+    /// block as a packet stamped with that category, which is what lets
+    /// the decoder tell apart two blocks of one size (its own tests
+    /// select a block by the stamp).
     #[tokio::test]
-    async fn polled_read_carries_its_category_to_the_decoder() {
+    async fn polled_read_carries_its_category() {
         let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
         let addr = spawn_block_target(OUTPUT_BYTES.to_vec(), asked.clone()).await;
         let (push_tx, mut push_rx) = broadcast::channel(16);
@@ -178,26 +175,6 @@ mod tests {
         assert_eq!(pkt.payload, OUTPUT_BYTES);
         assert_eq!(pkt.category, Some(DataCategory::Output));
         assert_eq!(asked.lock().unwrap()[0], 4, "the read asked for OUTPUT");
-
-        let dicts = StructDictionary::load_dir(std::path::Path::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../targets/sil-spec-demo/structs"
-        )))
-        .unwrap();
-        let decoder =
-            TelemetryDecoder::new(&dicts, &[(0x00DA00, "SpecChannel", Some("SpecChannel"))]);
-        let named: Vec<(String, f64)> = decoder
-            .decode(&Arc::from("t"), 1, &pkt)
-            .iter()
-            .map(|s| (s.channel.to_string(), s.value))
-            .collect();
-        assert_eq!(
-            named,
-            [
-                ("SpecChannel.value".to_string(), 2.5),
-                ("SpecChannel.sequence".to_string(), 7.0)
-            ]
-        );
     }
 
     /// @test A row whose rate gives no usable period is skipped, not

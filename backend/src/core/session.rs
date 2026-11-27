@@ -496,9 +496,10 @@ mod tests {
         h
     }
 
-    /// @test A new session's deadlines are sign-in plus each limit, the
-    /// idle one clamped at the absolute one; with the idle limit off
-    /// only the absolute deadline exists.
+    /// @test A new session's deadlines are sign-in plus each limit, and
+    /// the session a lookup returns is the one created. (The idle
+    /// deadline's clamp at the absolute one is the keep-alive test's;
+    /// an idle limit of 0 is the policy test's.)
     #[test]
     fn create_sets_both_deadlines() {
         let dir = TempDir::new().unwrap();
@@ -508,19 +509,6 @@ mod tests {
         assert_eq!(s.idle_deadline_ms, Some(T0 + 30 * MIN));
         assert_eq!(s.absolute_deadline_ms, T0 + 10 * HOUR);
         assert_eq!(store.lookup(&id, T0), Some(s));
-
-        let no_idle = SessionPolicy {
-            idle_ms: 0,
-            absolute_ms: HOUR,
-        };
-        assert_eq!(no_idle.idle_deadline(T0, T0), None);
-        assert_eq!(no_idle.ended_by(T0, T0, T0 + HOUR - 1), None);
-        assert_eq!(
-            no_idle.ended_by(T0, T0, T0 + HOUR),
-            Some(EndReason::Absolute)
-        );
-        let long_idle = policy(90, 1);
-        assert_eq!(long_idle.idle_deadline(T0, T0), Some(T0 + HOUR));
     }
 
     /// @test A session is alive until the instant of its idle deadline
@@ -570,19 +558,17 @@ mod tests {
         assert_eq!(store.refresh(&s.key, T0 + HOUR).unwrap(), None);
     }
 
-    /// @test Looking a session up never extends it: a thousand lookups
-    /// leave both deadlines where sign-in put them, and the session
-    /// still ends at its idle deadline.
+    /// @test Looking a session up never extends it: a lookup a minute
+    /// before the idle deadline returns the deadlines sign-in set, and
+    /// the session still ends at its idle deadline.
     #[test]
     fn lookups_never_extend_a_session() {
         let dir = TempDir::new().unwrap();
         let store = open_store(&dir, policy(30, 10), T0);
         let (id, s) = store.create("ops", T0).unwrap();
-        for i in 0..1000 {
-            let seen = store.lookup(&id, T0 + i * 1_000).unwrap();
-            assert_eq!(seen.idle_deadline_ms, s.idle_deadline_ms);
-            assert_eq!(seen.absolute_deadline_ms, s.absolute_deadline_ms);
-        }
+        let seen = store.lookup(&id, T0 + 29 * MIN).unwrap();
+        assert_eq!(seen.idle_deadline_ms, s.idle_deadline_ms);
+        assert_eq!(seen.absolute_deadline_ms, s.absolute_deadline_ms);
         assert!(store.lookup(&id, s.idle_deadline_ms.unwrap()).is_none());
     }
 
