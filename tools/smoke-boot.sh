@@ -26,12 +26,20 @@
 #   - the entrypoint handed nothing over: the image's own data directory is
 #     already the account's, so a fresh named volume starts out owned by it;
 #   - GET /api/targets lists exactly the targets of the table below, each
-#     under its positional id;
+#     under its positional id, and each reads the state the table gives it
+#     once boot's auto-connect has run with no peer present: the two whose
+#     carriers bind and wait (cFS over UDP, F-prime over tcp-listen) read
+#     listening, the apex target, which dials and does not auto-connect,
+#     reads down;
 #   - each of them serves curated layouts with plotted channels, no more of
 #     them undecodable than its ceiling in the table;
 #   - each target the table marks as declaring a command catalog serves a
 #     non-empty one (quick commands or components);
-#   - GET / serves a page whose module script answers a JavaScript type.
+#   - GET / serves a page whose module script answers a JavaScript type;
+#   - the stop signal shuts it down in order: stopped as docker stop and
+#     compose stop it, zenith exits 0 within the stop timeout, logs its
+#     shutdown-complete line, and logs a disconnect for each target that
+#     was listening.
 #
 # Second, as the compose files run it (a read-only root, every capability
 # dropped but CHOWN, SETUID and SETGID), with a root-owned tmpfs at
@@ -106,18 +114,26 @@ readonly OWNER_LABEL="zenith-smoke-owner"
 # after the second lookup is left behind (see above).
 readonly LATE_CREATE_WAIT=2
 
+# The stop timeout, Docker's and compose's default: docker stop sends the
+# stop signal, then kills the container after this many seconds.
+readonly STOP_TIMEOUT=10
+
 # The demo targets the image bundles (deploy/config.toml), one per line as
-# id|name|ceiling|commands. Ids are positional in that file and key every
-# stored sample, so a published image keeps each target under its id. The
-# ceiling is the recorded number of plotted channels the bundled
+# id|name|ceiling|commands|state. Ids are positional in that file and key
+# every stored sample, so a published image keeps each target under its id.
+# The ceiling is the recorded number of plotted channels the bundled
 # dictionaries leave undecodable (target-0: the WaveGenerator fields the
 # decoder cannot place); any increase fails. commands is yes where the
-# bundled config declares a command catalog. Changing the bundled targets
-# changes this table with them.
+# bundled config declares a command catalog. state is what the target
+# reads once boot's auto-connect has run with no peer present: listening
+# for one that auto-connects on a carrier that binds and waits (udp,
+# tcp-listen), down for one that dials or does not auto-connect; the stop
+# must disconnect each listening one. Changing the bundled targets changes
+# this table with them.
 readonly -a BUNDLED_TARGETS=(
-  "target-0|Apex ops demo|8|yes"
-  "target-1|cFS cpu1|0|no"
-  "target-2|F-prime demo|0|no"
+  "target-0|Apex ops demo|8|yes|down"
+  "target-1|cFS cpu1|0|no|listening"
+  "target-2|F-prime demo|0|no|listening"
 )
 
 # Typed access for the jq filters: a field of the wrong type is an error,
@@ -126,6 +142,7 @@ readonly JQ_DEFS='
 def str: if type == "string" then . else error("a string expected, \(type) found") end;
 def arr: if type == "array" then . else error("an array expected, \(type) found") end;
 def obj: if type == "object" then . else error("an object expected, \(type) found") end;
+def bool: if type == "boolean" then . else error("a boolean expected, \(type) found") end;
 '
 
 # ==============================================================================
@@ -321,6 +338,32 @@ remove_container() {
   CONTAINER_ID=""
 }
 
+# Stop this boot's container as docker stop and compose stop do, with the
+# stop signal and the stop timeout, then remove it by its id. zenith must
+# exit 0 (137 is the kill after the timeout), log its shutdown-complete
+# line, and log a disconnect for each target the table marks listening.
+stop_container() {
+  local out code logs entry id state stopped=""
+  out=$(docker stop --time "$STOP_TIMEOUT" "$CONTAINER_ID" 2>&1) ||
+    fail "docker stop $NAME: $out"
+  code=$(docker container inspect --format '{{.State.ExitCode}}' "$CONTAINER_ID" 2>&1) ||
+    fail "container $NAME is gone after the stop: $code"
+  [[ "$code" == "0" ]] ||
+    fail "zenith exited $code on the stop signal, not 0$([[ "$code" == 137 ]] && echo ": killed after the ${STOP_TIMEOUT}s stop timeout")"
+  logs=$(docker logs "$CONTAINER_ID" 2>&1) || fail "docker logs $NAME: $logs"
+  grep -qF "Zenith shutdown complete" <<<"$logs" ||
+    fail "zenith exited on the stop signal without logging its shutdown-complete line"
+  for entry in "${BUNDLED_TARGETS[@]}"; do
+    IFS='|' read -r id _ _ _ state <<<"$entry"
+    [[ "$state" == "listening" ]] || continue
+    grep -qF "Disconnected target $id during shutdown" <<<"$logs" ||
+      fail "the shutdown logged no disconnect for $id, which was listening"
+    stopped+="${stopped:+, }$id"
+  done
+  log_ok "stop: exit 0 on the stop signal, shutdown complete, disconnected ${stopped:-none}"
+  remove_container
+}
+
 # Poll /api/health until it answers, the container stops, or the timeout
 # passes; a stopped container fails at once rather than at the deadline.
 wait_for_health() {
@@ -513,7 +556,7 @@ check_handovers() {
 check_targets() {
   local entry id name expected="" listed
   for entry in "${BUNDLED_TARGETS[@]}"; do
-    IFS='|' read -r id name _ _ <<<"$entry"
+    IFS='|' read -r id name _ _ _ <<<"$entry"
     expected+="$id=$name"$'\n'
   done
   expected="${expected%$'\n'}"
@@ -528,6 +571,33 @@ ${listed:-(none)}"
   log_ok "targets: the ${#BUNDLED_TARGETS[@]} bundled targets, each under its id"
 }
 
+# Each bundled target reads the state the table gives it, from
+# GET /api/targets: connected with a peer, listening while a listening
+# carrier waits for one, down otherwise. Boot's auto-connect runs in the
+# background, so the check polls until the states match or the timeout
+# passes.
+check_target_states() {
+  local entry id state expected="" listed start=$SECONDS
+  for entry in "${BUNDLED_TARGETS[@]}"; do
+    IFS='|' read -r id _ _ _ state <<<"$entry"
+    expected+="$id=$state"$'\n'
+  done
+  expected="${expected%$'\n'}"
+  while true; do
+    fetch_json /api/targets
+    read_json listed '.targets | arr | .[] | obj | "\(.id | str)=\(if (.connected | bool) then "connected" elif (.listening | bool) then "listening" else "down" end)"'
+    [[ "$listed" != "$expected" ]] || break
+    ((SECONDS - start < TIMEOUT)) ||
+      fail "the bundled targets do not read the states of the table within ${TIMEOUT}s
+expected:
+$expected
+read:
+${listed:-(none)}"
+    sleep 1
+  done
+  log_ok "target states: ${listed//$'\n'/, }"
+}
+
 # Every bundled target ships curated layouts with plotted channels; a target
 # without them (one with commands only, say) would need a rule of its own. A
 # target whose definition files did not load is listed all the same: it
@@ -538,7 +608,7 @@ ${listed:-(none)}"
 check_definitions() {
   local entry id name ceiling plotted unknown sample
   for entry in "${BUNDLED_TARGETS[@]}"; do
-    IFS='|' read -r id name ceiling _ <<<"$entry"
+    IFS='|' read -r id name ceiling _ _ <<<"$entry"
     fetch_json "/api/targets/$id/telemetry/layouts"
     read_json plotted '[.layouts | arr | .[] | obj | .plots | arr | .[] | obj | .channels | arr | .[] | str] | unique | length'
     read_json unknown '[.layouts | arr | .[] | obj | .unknown_channels | arr | .[] | str] | unique | length'
@@ -555,7 +625,7 @@ check_definitions() {
 check_commands() {
   local entry id name commands count
   for entry in "${BUNDLED_TARGETS[@]}"; do
-    IFS='|' read -r id name _ commands <<<"$entry"
+    IFS='|' read -r id name _ commands _ <<<"$entry"
     [[ "$commands" == "yes" ]] || continue
     fetch_json "/api/targets/$id/commands"
     read_json count '(.quickCommands | arr | length) + (.components | obj | length)'
@@ -603,10 +673,11 @@ wait_for_docker_health
 check_posture
 check_handovers 0
 check_targets
+check_target_states
 check_definitions
 check_commands
 check_console
-remove_container
+stop_container
 
 start_container "compose posture, root-owned tmpfs, --group-add $EXTRA_GID" \
   "${COMPOSE_FLAGS[@]}" --tmpfs "$DATA_DIR:mode=0755" --group-add "$EXTRA_GID"
@@ -623,4 +694,4 @@ wait_for_docker_health
 check_posture
 remove_container
 
-log_ok "PASS: $IMAGE boots its bundled config and serves version $DECLARED_VERSION, as a plain run, under the compose posture and as the account"
+log_ok "PASS: $IMAGE boots its bundled config, serves version $DECLARED_VERSION and stops in order, as a plain run, under the compose posture and as the account"
