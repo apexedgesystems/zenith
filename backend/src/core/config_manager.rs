@@ -510,10 +510,16 @@ impl StructDictionary {
 
 /// One field's value from a parameter block, read by its (type, size)
 /// in the dictionary's byte order. A type no numeric arm reads (an
-/// array, a string, a nested blob) comes back as hex. A bool reads as
-/// its byte, so a value other than 0 or 1 shows as it is.
+/// array, a string, a nested blob), and a float that is not finite
+/// (JSON has no NaN or infinity), comes back as the hex of its bytes,
+/// the form an update takes back unchanged. A bool reads as its byte,
+/// so a value other than 0 or 1 shows as it is.
 fn decode_field(data: &[u8], field: &FieldDef, big_endian: bool) -> serde_json::Value {
     let off = field.offset;
+    let as_hex = || {
+        let bytes = &data[off..off + field.size.min(data.len() - off)];
+        serde_json::json!(hex::encode(bytes))
+    };
     // The field's N bytes, least significant first.
     fn le<const N: usize>(data: &[u8], off: usize, big_endian: bool) -> [u8; N] {
         let mut bytes = [0u8; N];
@@ -532,15 +538,15 @@ fn decode_field(data: &[u8], field: &FieldDef, big_endian: bool) -> serde_json::
         ("int", 2) => serde_json::json!(i16::from_le_bytes(le(data, off, big_endian))),
         ("int", 4) => serde_json::json!(i32::from_le_bytes(le(data, off, big_endian))),
         ("int", 8) => serde_json::json!(i64::from_le_bytes(le(data, off, big_endian))),
-        ("float", 4) => serde_json::json!(f32::from_le_bytes(le(data, off, big_endian))),
-        ("float", 8) | ("double", 8) => {
-            serde_json::json!(f64::from_le_bytes(le(data, off, big_endian)))
-        }
-        _ => {
-            // Unknown type -- return hex
-            let bytes = &data[off..off + field.size.min(data.len() - off)];
-            serde_json::json!(hex::encode(bytes))
-        }
+        ("float", 4) => match f32::from_le_bytes(le(data, off, big_endian)) {
+            v if v.is_finite() => serde_json::json!(v),
+            _ => as_hex(),
+        },
+        ("float", 8) | ("double", 8) => match f64::from_le_bytes(le(data, off, big_endian)) {
+            v if v.is_finite() => serde_json::json!(v),
+            _ => as_hex(),
+        },
+        _ => as_hex(),
     }
 }
 

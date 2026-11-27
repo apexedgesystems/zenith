@@ -118,6 +118,12 @@ architecture review; work before that is the v0.0.1 tag.
   client sending bare hex digits gets a 400 and must add the prefix.
 - Tunables reads int64 and bool fields as numbers instead of hex, and
   reads and writes a big-endian dictionary's fields in that byte order.
+- Tunables applies a block holding arrays, strings or other fields it
+  shows as hex: each field takes back the hex form it was read as, so an
+  unedited block is written back byte for byte instead of the update
+  being refused. A float that is not finite also reads as hex.
+- A tunable float32 value beyond the type's range is refused, naming the
+  field, instead of being stored as infinity.
 - `zenith --hash-password` hashes the password as typed, edge spaces
   included, as sign-in compares it; only the line ending is removed.
 - An upload is checked as an RTS sequence only when it goes into a

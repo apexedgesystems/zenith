@@ -2262,14 +2262,19 @@ fn constraint_violations(
 }
 
 /// Encode one edited field into the payload buffer, in its dictionary's
-/// byte order (`big_endian`). A value the field
-/// cannot hold is refused with the reason, never written: the wrong
-/// JSON type, an integer outside the field's width (an unchecked cast
-/// would store 300 in a uint8 as 44), a bool other than 0 or 1, a
-/// string longer than its buffer, an array of the wrong length, or a
-/// (type, size) with no encoding. Callers fail the request naming the
-/// field: a value skipped here would upload the OLD value under a
-/// SUCCESS response, which reads as "applied" while changing nothing.
+/// byte order (`big_endian`). A field takes back what the parameter read
+/// returned for it: a number, or, for a field the read returns as hex
+/// (a string, an array, a shape it reads no number from, a float that
+/// is not finite), that hex form, written as the bytes it holds, so an
+/// unedited block is written back unchanged. A value the field cannot
+/// hold is refused with the reason, never written: the wrong JSON type,
+/// an integer outside the field's width (an unchecked cast would store
+/// 300 in a uint8 as 44), a bool other than 0 or 1, a float beyond
+/// float32's range for a float32, a string longer than its buffer, an
+/// array of the wrong length, or a (type, size) given neither a value
+/// nor its hex form. Callers fail the request naming the field: a value
+/// skipped here would upload the OLD value under a SUCCESS response,
+/// which reads as "applied" while changing nothing.
 fn encode_field(
     buf: &mut [u8],
     field: &crate::core::config_manager::FieldDef,
@@ -2321,27 +2326,36 @@ fn encode_field(
             Some(v @ (0 | 1)) => put(&[v as u8]),
             _ => return Err(format!("{value} is not a bool (0 or 1)")),
         },
-        ("float", 4) => {
-            let v = value
-                .as_f64()
-                .ok_or_else(|| format!("{value} is not a number"))?;
-            put(&(v as f32).to_le_bytes());
-        }
-        ("float", 8) | ("double", 8) => {
-            let v = value
-                .as_f64()
-                .ok_or_else(|| format!("{value} is not a number"))?;
-            put(&v.to_le_bytes());
-        }
+        ("float", 4) => match (value.as_f64(), hex_form(value, 4)) {
+            (Some(v), _) => {
+                let v = v as f32;
+                if !v.is_finite() {
+                    return Err(format!("{value} is outside float32's range"));
+                }
+                put(&v.to_le_bytes());
+            }
+            (None, Some(bytes)) => buf[off..off + 4].copy_from_slice(&bytes),
+            (None, None) => return Err(format!("{value} is not a number")),
+        },
+        ("float", 8) | ("double", 8) => match (value.as_f64(), hex_form(value, 8)) {
+            (Some(v), _) => put(&v.to_le_bytes()),
+            (None, Some(bytes)) => buf[off..off + 8].copy_from_slice(&bytes),
+            (None, None) => return Err(format!("{value} is not a number")),
+        },
         // Bounded string: fixed char buffer, NUL-padded. A value longer
         // than the field is refused, never truncated -- the packer on
         // the producing side errors the same way.
+        // The hex form of its n bytes is 2n characters, which no text
+        // that fits can be.
         ("string", n) => match value.as_str() {
             Some(s) if s.len() <= n => {
                 buf[off..off + n].fill(0);
                 buf[off..off + s.len()].copy_from_slice(s.as_bytes());
             }
-            Some(s) => return Err(format!("{} bytes do not fit {n}", s.len())),
+            Some(s) => match hex_form(value, n) {
+                Some(bytes) => buf[off..off + n].copy_from_slice(&bytes),
+                None => return Err(format!("{} bytes do not fit {n}", s.len())),
+            },
             None => return Err(format!("{value} is not a string")),
         },
         // Array: exact element count required; each element encodes by
@@ -2354,7 +2368,13 @@ fn encode_field(
                 .map(|d| d.iter().product::<usize>())
                 .unwrap_or(0);
             let Some(arr) = value.as_array() else {
-                return Err(format!("{value} is not an array"));
+                return match hex_form(value, total) {
+                    Some(bytes) => {
+                        buf[off..off + total].copy_from_slice(&bytes);
+                        Ok(())
+                    }
+                    None => Err(format!("{value} is not an array")),
+                };
             };
             if count == 0 || total % count != 0 {
                 return Err("the dictionary gives this array no element size".to_string());
@@ -2383,9 +2403,24 @@ fn encode_field(
                 encode_field(buf, &elem, v, big_endian).map_err(|e| format!("element {i}: {e}"))?;
             }
         }
-        (ty, _) => return Err(format!("a {size}-byte {ty} field has no encoding")),
+        (ty, _) => match hex_form(value, size) {
+            Some(bytes) => buf[off..off + size].copy_from_slice(&bytes),
+            None => {
+                return Err(format!(
+                    "a {size}-byte {ty} field takes only the hex form it reads as"
+                ))
+            }
+        },
     }
     Ok(())
+}
+
+/// The bytes `value` holds as a field's hex form: hex digits for exactly
+/// `size` bytes, the form the parameter read returns a field in when it
+/// reads no number from it.
+fn hex_form(value: &serde_json::Value, size: usize) -> Option<Vec<u8>> {
+    let bytes = hex::decode(value.as_str()?).ok()?;
+    (bytes.len() == size).then_some(bytes)
 }
 
 /* ----------------------------- Telemetry History ----------------------------- */
@@ -5321,10 +5356,10 @@ mod tests {
 
     /// @test A tunable value its field cannot hold is refused, never
     /// written: an integer outside its field's width in either
-    /// direction, a bool other than 0 or 1, a fraction for an integer,
-    /// and an array element out of range. The refusal names the value
-    /// and the range; each width's own limits encode exactly,
-    /// little-endian.
+    /// direction, a bool other than 0 or 1, a fraction for an integer, a
+    /// float32 beyond its range, and an array element out of range. The
+    /// refusal names the value and the range; each width's own limits
+    /// encode exactly, little-endian.
     #[test]
     fn tunable_values_outside_their_field_are_refused() {
         // A field, a value, and its bytes or a fragment of its refusal.
@@ -5403,6 +5438,21 @@ mod tests {
                 Err("-1 is not a bool (0 or 1)"),
             ),
             (field("uint", 1), json!(1.5), Err("1.5 is not an integer")),
+            (
+                field("float", 4),
+                json!(f32::MAX),
+                Ok(f32::MAX.to_le_bytes().to_vec()),
+            ),
+            (
+                field("float", 4),
+                json!(3.5e38),
+                Err("3.5e+38 is outside float32's range"),
+            ),
+            (
+                field("float", 4),
+                json!(-3.5e38),
+                Err("-3.5e+38 is outside float32's range"),
+            ),
         ];
         let pair: FieldDef = serde_json::from_value(json!({
             "name": "f", "type": "array", "offset": 0, "size": 2,
@@ -6403,5 +6453,139 @@ mod tests {
             assert_eq!(answer["deleted"], json!(deleted), "{body}");
             assert_eq!(server.db.count().unwrap(), left, "{body}");
         }
+    }
+
+    /* ---- What the read returns, the update takes back ---- */
+
+    /// @test Every field a tunable block reads takes the read's value
+    /// back and writes the block's own bytes: numbers as numbers, and a
+    /// field the read returns as hex (a string, an array, a shape it
+    /// reads no number from, a float that is not finite) as that hex,
+    /// so an unedited Apply rewrites the block unchanged in either byte
+    /// order, junk after a string's NUL included. Edits still go in as
+    /// values: text for a string, elements for an array.
+    #[test]
+    fn every_field_takes_back_what_the_read_returned() {
+        let fields = json!([
+            { "name": "count", "type": "uint", "offset": 0, "size": 2 },
+            { "name": "tag", "type": "string", "offset": 2, "size": 6 },
+            { "name": "taps", "type": "array", "offset": 8, "size": 8,
+              "element_type": "float", "dims": [2] },
+            { "name": "names", "type": "array", "offset": 16, "size": 8,
+              "element_type": "string", "dims": [2] },
+            { "name": "odd", "type": "uint", "offset": 24, "size": 3 },
+            { "name": "blob", "type": "nested", "offset": 27, "size": 5 },
+            { "name": "gain", "type": "float", "offset": 32, "size": 4 },
+            { "name": "scale", "type": "double", "offset": 36, "size": 8 },
+        ]);
+        // The block in the given byte order: each scalar's bytes, and
+        // each element's, ordered as a big-endian writer would.
+        let block = |big_endian: bool| {
+            let order = |le: &[u8]| {
+                let mut bytes = le.to_vec();
+                if big_endian {
+                    bytes.reverse();
+                }
+                bytes
+            };
+            let mut out = order(&0x0102u16.to_le_bytes());
+            out.extend(b"ab\0\x7f\x01\x02");
+            out.extend(order(&1.5f32.to_le_bytes()));
+            out.extend(order(&(-2.0f32).to_le_bytes()));
+            out.extend(b"x\0\0\0yz\0\0");
+            out.extend([1, 2, 3, 9, 8, 7, 6, 5]);
+            out.extend(order(&f32::NAN.to_le_bytes()));
+            out.extend(order(&f64::INFINITY.to_le_bytes()));
+            out
+        };
+
+        let mut refused = Vec::new();
+        for (stamp, big_endian) in [(None, false), (Some("le"), false), (Some("be"), true)] {
+            let bytes = block(big_endian);
+            assert_eq!(bytes.len(), 44);
+            let dicts = block_dicts(stamp, fields.clone(), 44);
+            let decoded = dicts
+                .decode_payload("Block", "BlockParams", &bytes)
+                .unwrap();
+            let mut written = vec![0u8; 44];
+            for field in &dicts.components["Block"].structs["BlockParams"].fields {
+                let value = &decoded[&field.name];
+                if let Err(e) = encode_field(&mut written, field, value, big_endian) {
+                    refused.push(format!("{stamp:?} {}: {e}", field.name));
+                }
+            }
+            if refused.is_empty() {
+                assert_eq!(written, bytes, "{stamp:?}: {decoded}");
+            }
+        }
+        assert!(refused.is_empty(), "read values refused: {refused:#?}");
+
+        let dicts = block_dicts(None, fields, 44);
+        let fields = &dicts.components["Block"].structs["BlockParams"].fields;
+        let mut edited = block(false);
+        encode_field(&mut edited, &fields[1], &json!("new"), false).unwrap();
+        assert_eq!(&edited[2..8], b"new\0\0\0");
+        encode_field(&mut edited, &fields[2], &json!([0.5, 4.0]), false).unwrap();
+        assert_eq!(&edited[8..12], 0.5f32.to_le_bytes());
+        assert_eq!(&edited[12..16], 4.0f32.to_le_bytes());
+        for (field, wrong) in [
+            (&fields[1], json!("0102030405")),
+            (&fields[2], json!("abcd")),
+            (&fields[4], json!("01")),
+        ] {
+            assert!(
+                encode_field(&mut edited, field, &wrong, false).is_err(),
+                "{}: {wrong} taken",
+                field.name
+            );
+        }
+    }
+
+    /// @test An unedited Apply of the shipped SpecProtoMax tunable block
+    /// (float, string and integer arrays, a bounded string, scalars of
+    /// every width) is accepted: every field goes back as the read
+    /// returned it, and the update goes on to the upload, which the
+    /// unconnected link refuses.
+    #[tokio::test]
+    async fn an_unedited_apply_of_the_shipped_spec_block_goes_to_the_upload() {
+        let text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../targets/sil-ops-demo/structs/SpecProtoMax.json"
+        ))
+        .unwrap();
+        let dict: ComponentDict = serde_json::from_str(&text).unwrap();
+        let dicts = StructDictionary {
+            components: HashMap::from([(dict.component.clone(), dict)]),
+        };
+        let mut raw = vec![0u8; 80];
+        raw[0..8].copy_from_slice(&2.5f64.to_le_bytes());
+        raw[24..28].copy_from_slice(&0.5f32.to_le_bytes());
+        for (i, tap) in [1.5f32, -2.0, 0.25].iter().enumerate() {
+            raw[36 + 4 * i..40 + 4 * i].copy_from_slice(&tap.to_le_bytes());
+        }
+        raw[52..55].copy_from_slice(b"abc");
+        raw[60..62].copy_from_slice(b"ab");
+        raw[64] = b'c';
+        raw[68..72].copy_from_slice(&[1, 2, 3, 4]);
+        raw[72] = 50;
+        raw[73] = (-3i8) as u8;
+        raw[74] = 1;
+        let fields = dicts
+            .decode_payload("SpecProtoMax", "SpecProtoMaxTunableParams", &raw)
+            .unwrap();
+
+        let server = Server::with_dicts(APEX_TARGET, dicts);
+        let (status, body) = server
+            .post(
+                "/api/targets/target-0/params/00D000/update",
+                json!({ "fields": fields, "raw_hex": hex::encode(&raw) }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        let audit = server.audit();
+        assert_eq!(
+            (audit[0].action.as_str(), audit[0].status.as_str()),
+            ("update_tprm", "err: not connected")
+        );
     }
 }
