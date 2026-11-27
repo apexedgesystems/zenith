@@ -4749,6 +4749,9 @@ async fn main() {
             hours => format!("{hours}h"),
         }
     );
+    if let Some(warning) = config::coarse_tier_stays_empty(&config.storage) {
+        tracing::warn!("{warning}");
+    }
     let retention_hours = config.storage.retention_hours;
     let audit_retention_days = config.storage.audit_retention_days;
     let fifo_strategy = config.storage.fifo_strategy;

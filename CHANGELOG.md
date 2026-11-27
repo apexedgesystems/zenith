@@ -63,6 +63,10 @@ architecture review; work before that is the v0.0.1 tag.
 - Release images are smoke-tested on each supported architecture before
   publication.
   ([#53](https://github.com/apexedgesystems/zenith/pull/53))
+- Boot warns when the retention ladder is on and `[storage]
+  retention_hours` (other than 0) ends at or before `[storage.tiers]
+  mid_horizon_hours`: telemetry is deleted before it reaches the coarse
+  tier, which stays empty. The warning names both values.
 
 ### Changed
 

@@ -856,6 +856,28 @@ pub fn duplicate_listen_port(targets: &[TargetSection]) -> Option<(u16, &str, &s
     None
 }
 
+/// The warning boot logs when the retention ladder cannot fill its
+/// coarse tier: rows reach that tier only once they are older than
+/// `mid_horizon_hours`, and time-based retention deletes every row
+/// older than `retention_hours` (0 keeps them all), so with tiers on, a
+/// retention window that ends at or before the horizon leaves the coarse
+/// tier empty. A warning, not a refusal: the configuration is valid,
+/// only its coarse tier is idle.
+pub fn coarse_tier_stays_empty(storage: &StorageSection) -> Option<String> {
+    let tiers = &storage.tiers;
+    let unreachable = tiers.enabled
+        && storage.retention_hours != 0
+        && tiers.mid_horizon_hours >= storage.retention_hours;
+    unreachable.then(|| {
+        format!(
+            "[storage] retention_hours = {} deletes telemetry before it reaches the coarse \
+             tier, which starts at [storage.tiers] mid_horizon_hours = {}: the coarse \
+             tier will stay empty",
+            storage.retention_hours, tiers.mid_horizon_hours
+        )
+    })
+}
+
 /// A retired key must not be ignored: serde drops unknown keys, so
 /// the retired spelling is still parsed and refused with the new
 /// name, which is the only way the operator learns why last week's
@@ -1577,6 +1599,52 @@ mod tests {
                 "{host:?} {port:?}"
             );
         }
+    }
+
+    /// @test With the retention ladder on, a retention window that
+    /// ends at or before the coarse tier's horizon is named at boot:
+    /// the warning carries both values and says the coarse tier will
+    /// stay empty. Tiers off, retention 0 (keep forever) and a window
+    /// past the horizon raise nothing.
+    #[test]
+    fn a_retention_window_inside_the_tier_horizon_is_warned_about() {
+        let storage =
+            |enabled: bool, retention_hours: u32, mid_horizon_hours: u32| StorageSection {
+                retention_hours,
+                tiers: TiersSection {
+                    enabled,
+                    mid_horizon_hours,
+                    ..TiersSection::default()
+                },
+                ..StorageSection::default()
+            };
+        let mut wrong = Vec::new();
+        for (enabled, retention, horizon, warned) in [
+            (true, 24, 24, true),
+            (true, 12, 24, true),
+            (true, 25, 24, false),
+            (true, 0, 24, false),
+            (false, 24, 24, false),
+        ] {
+            let warning = coarse_tier_stays_empty(&storage(enabled, retention, horizon));
+            if warning.is_some() != warned {
+                wrong.push(format!(
+                    "tiers {enabled}, retention {retention} h, horizon {horizon} h: {warning:?}"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+        assert_eq!(
+            coarse_tier_stays_empty(&StorageSection::default()),
+            None,
+            "the shipped defaults leave tiers off"
+        );
+        assert_eq!(
+            coarse_tier_stays_empty(&storage(true, 24, 24)).unwrap(),
+            "[storage] retention_hours = 24 deletes telemetry before it reaches the \
+             coarse tier, which starts at [storage.tiers] mid_horizon_hours = 24: \
+             the coarse tier will stay empty"
+        );
     }
 
     /// @test Two UDP targets on one listen port are named in the
