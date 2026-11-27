@@ -167,8 +167,10 @@ architecture review; work before that is the v0.0.1 tag.
 - Downsampling and the bearer-token login are audited: downsampling
   with the rows it converted, the login as a console sign-in is.
   ([#70](https://github.com/apexedgesystems/zenith/pull/70))
-- Shutdown waits, up to 5 s, for each target's sample writer to write
-  the samples it holds, instead of exiting with them unwritten.
+- Shutdown waits up to 5 s, one budget shared by every target's sample
+  writer, for the writers to write the samples they hold, instead of
+  exiting with them unwritten. A writer still writing then is left with
+  a warning and does not keep the process from exiting.
   ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - A trim with `count: 0` deletes nothing instead of a quarter of the
   target's samples.

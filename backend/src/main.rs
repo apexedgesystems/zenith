@@ -4504,21 +4504,31 @@ fn spawn_sample_writer(
     })
 }
 
-/// How long shutdown waits for the sample writers to write what they
-/// hold: a writer blocked on a busy database gives up after SQLite's
-/// busy timeout (5 s) anyway, and the rest of the shutdown must fit the
-/// container's stop timeout (10 s).
+/// How long shutdown waits, in all, for the sample writers to write what
+/// they hold: one budget shared by every target's writer, so the rest of
+/// the shutdown fits the container's stop timeout (10 s). A writer can
+/// outlast it: each batch it holds may wait out SQLite's busy timeout
+/// (5 s) on a busy database.
 const SAMPLE_WRITER_FLUSH_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// How often shutdown looks for sample writers that have finished.
+const SAMPLE_WRITER_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
 /// Take every target down at the stop signal: close connections, then
-/// let each sample writer write what it holds. The write guard covers
-/// only what needs it (closing connect admission, stopping the routers
-/// and polls, closing each target's sample channel, collecting each link
-/// and writer); it is dropped before waiting on any link mutex, which a
-/// connect in its dial or an upload can hold for seconds while every
-/// request needs the state's guard. A connect that completes after this
-/// sees `stopping` and tears its link down.
-async fn shut_down_targets(state: &AppState) {
+/// give the sample writers `writer_budget` to write what they hold. The
+/// write guard covers only what needs it (closing connect admission,
+/// stopping the routers and polls, closing each target's sample channel,
+/// collecting each link and writer); it is dropped before waiting on any
+/// link mutex, which a connect in its dial or an upload can hold for
+/// seconds while every request needs the state's guard. A connect that
+/// completes after this sees `stopping` and tears its link down.
+///
+/// Each writer is an OS thread, watched until it finishes or the budget
+/// runs out, and joined only once finished. One still running then is
+/// detached with a warning: joining it on the blocking pool would hold
+/// the runtime's teardown, which waits for every blocking task it
+/// started, past any budget.
+async fn shut_down_targets(state: &AppState, writer_budget: std::time::Duration) {
     let mut links = Vec::new();
     let mut routers = Vec::new();
     let mut writers = Vec::new();
@@ -4553,16 +4563,21 @@ async fn shut_down_targets(state: &AppState) {
     for router in routers {
         let _ = router.await;
     }
-    let flushed = tokio::time::timeout(SAMPLE_WRITER_FLUSH_LIMIT, async {
-        for writer in writers {
-            let _ = tokio::task::spawn_blocking(move || writer.join()).await;
-        }
-    })
-    .await;
-    if flushed.is_err() {
+    let deadline = tokio::time::Instant::now() + writer_budget;
+    while writers.iter().any(|w| !w.is_finished()) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + SAMPLE_WRITER_POLL))
+            .await;
+    }
+    let (finished, running): (Vec<_>, Vec<_>) = writers.into_iter().partition(|w| w.is_finished());
+    for writer in finished {
+        // Its function has returned, so the join is immediate.
+        let _ = writer.join();
+    }
+    if !running.is_empty() {
         tracing::warn!(
-            "sample writers still writing after {:?}; their last samples may be lost",
-            SAMPLE_WRITER_FLUSH_LIMIT
+            "{} sample writer(s) still writing after {:?}; their last samples may be lost",
+            running.len(),
+            writer_budget
         );
     }
 }
@@ -5198,7 +5213,7 @@ async fn main() {
             _ = ctrl_c => tracing::info!("Received SIGINT, shutting down"),
             _ = terminate => tracing::info!("Received SIGTERM, shutting down"),
         }
-        shut_down_targets(&shutdown_state).await;
+        shut_down_targets(&shutdown_state, SAMPLE_WRITER_FLUSH_LIMIT).await;
     });
 
     if let Err(e) = server.await {
@@ -6062,7 +6077,7 @@ mod tests {
 
         let apex = server.link("target-1").await;
         let held = apex.lock().await;
-        let mut shutdown = pin!(shut_down_targets(state));
+        let mut shutdown = pin!(shut_down_targets(state, SAMPLE_WRITER_FLUSH_LIMIT));
         assert!(shutdown.as_mut().poll(&mut cx()).is_pending());
         {
             let st = state
@@ -6679,13 +6694,54 @@ mod tests {
             blocker.execute_batch("ROLLBACK").unwrap();
         });
 
-        shut_down_targets(&server.state).await;
+        shut_down_targets(&server.state, SAMPLE_WRITER_FLUSH_LIMIT).await;
         assert_eq!(
             server.db.count().unwrap(),
             10,
             "shutdown returned before the writer wrote its samples"
         );
         release.join().unwrap();
+    }
+
+    /// @test The writers' budget bounds the process, not only the
+    /// shutdown call: with a stand-in writer that blocks 25 times its
+    /// budget, shutdown waits out the budget and returns, and the
+    /// runtime it ran on, dropped as main's is on return, ends at once
+    /// instead of waiting for the writer.
+    #[test]
+    fn a_writer_past_its_budget_does_not_hold_the_runtime() {
+        const BUDGET: Duration = Duration::from_millis(200);
+        const WRITER_BLOCKS: Duration = Duration::from_secs(5);
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let started = std::time::Instant::now();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let returned = runtime.block_on(async move {
+            let server = Server::new(APEX_TARGET);
+            let writer = std::thread::spawn(move || {
+                let _ = held.recv_timeout(WRITER_BLOCKS);
+            });
+            let mut st = server.state.write().await;
+            st.targets.get_mut("target-0").unwrap().sample_writer = Some(writer);
+            drop(st);
+            shut_down_targets(&server.state, BUDGET).await;
+            started.elapsed()
+        });
+        drop(runtime);
+        let ended = started.elapsed();
+        let _ = release.send(());
+
+        assert!(
+            returned >= BUDGET && returned < WRITER_BLOCKS / 2,
+            "shutdown returned after {returned:?}, its writers' budget {BUDGET:?}"
+        );
+        assert!(
+            ended < WRITER_BLOCKS / 2,
+            "the runtime ended after {ended:?}, held by a writer past its {BUDGET:?} budget"
+        );
     }
 
     /// @test A trim deletes the number of samples asked for, oldest
