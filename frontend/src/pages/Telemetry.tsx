@@ -117,11 +117,15 @@ export default function TelemetryPage({
     }
   }, [selectedLayout, layouts]);
 
-  // ---- DATA LAYER: Hybrid WS buffer + DB poll ----
+  // ---- DATA LAYER: live stream + history poll ----
   //
-  // Small windows (<= 2min): WS buffer provides smooth real-time data
-  // Large windows (> 2min): DB poll every 2s for full historical coverage
-  // No merge between the two -- chart reads from one source based on window size.
+  // Plotted channels come from the history poll (every 500 ms for a
+  // window up to a minute, every 2 s beyond): a channel with stored
+  // samples in the widest window any plot shows gets those samples in
+  // place of its points. Each stream flush appends the live samples
+  // newer than a plotted channel's last point, so the right edge moves
+  // between polls. Channels not plotted (the sidebar's values) read the
+  // live buffer.
 
   const batchRef = useRef<Sample[]>([]);
   const liveDataRef = useRef<ChannelData>({});
@@ -195,8 +199,8 @@ export default function TelemetryPage({
       };
     }
 
-    // Flush WS batch into liveDataRef and update state (for small
-    // windows); a stream with no sample for STALE_SAMPLE_AGE_MS stops
+    // Each flush moves the WS batch into liveDataRef and the chart
+    // state; a stream with no sample for STALE_SAMPLE_AGE_MS stops
     // reading as receiving.
     const flushTimer = window.setInterval(() => {
       if (receiving && Date.now() - lastSampleAt > STALE_SAMPLE_AGE_MS) {

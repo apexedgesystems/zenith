@@ -57,7 +57,7 @@ interface ExecSurface {
   opcodes: Record<string, string>;
 }
 
-/** Pack a u32 as 4-char little-endian hex. */
+/** Pack a u32 as little-endian hex: four bytes, eight hex digits. */
 function u32Hex(n: number): string {
   const buf = new ArrayBuffer(4);
   new DataView(buf).setUint32(0, n >>> 0, true);

@@ -269,9 +269,9 @@ function Shell() {
   const [page, setPage] = useState(window.location.pathname);
   const [selectedTarget, setSelectedTarget] = useState("target-0");
   // Server state via the shared query cache: one poller regardless of
-  // how many components need the target list, structural sharing in
-  // place of the old hand-rolled equality diffing, and errors surfaced
-  // instead of leaving the sidebar silently stale.
+  // how many components need the target list, structural sharing so an
+  // unchanged list keeps its identity, and errors surfaced instead of
+  // leaving the sidebar silently stale.
   const { notify, confirmDialog } = useDialogs();
   const targetsQuery = useTargets();
   const targets: Target[] = targetsQuery.data ?? [];
