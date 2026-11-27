@@ -39,7 +39,7 @@ jobs:
         run: docker compose build dev
 
       - name: Backend tests
-        run: docker compose run --rm -T dev bash -c 'cd backend && cargo test --lib --locked'
+        run: docker compose run --rm -T dev bash -c 'cd backend && cargo test --lib --bins --locked'
 
       - name: Frontend tests
         run: docker compose run --rm -T dev bash -c 'cd frontend && npm ci && npm run test'

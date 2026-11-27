@@ -71,10 +71,10 @@ dev: build
 ## Run backend + frontend tests
 test: test-backend test-frontend
 
-## Run backend unit tests
+## Run backend unit tests, the library's and the server binary's
 test-backend:
 	$(COMPOSE) run --rm -T dev bash -c \
-		'cd backend && CARGO_TARGET_DIR=target-test cargo test --lib'
+		'cd backend && CARGO_TARGET_DIR=target-test cargo test --lib --bins --locked'
 
 ## Run frontend unit tests (Vitest)
 test-frontend:

@@ -2,10 +2,11 @@
 //!
 //! REST API + WebSocket server for commanding and monitoring Apex CSF applications.
 
-mod config;
-mod core;
-mod protocol;
-mod storage;
+// The server runs on the library crate's modules: they compile once, in
+// the library, and their tests run in its harness. This import is what
+// `crate::config` and the other `crate::` paths below name, and this
+// binary's own test harness holds only tests written in this file.
+use zenith::{config, core, protocol, storage};
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
