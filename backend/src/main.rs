@@ -39,7 +39,9 @@ use crate::core::session::{EndReason, Session, SessionPolicy, SessionStatus, Ses
 use crate::core::telemetry::{self, TelemetrySample};
 use crate::core::telemetry_socket::{self, StreamEnd};
 use crate::core::tprm;
-use crate::core::transport::{unsupported_op, Protocol, ProtocolLink, PushTelemetryPacket};
+use crate::core::transport::{
+    connect_answer, unsupported_op, ConnectAnswer, Protocol, ProtocolLink, PushTelemetryPacket,
+};
 use crate::storage::telemetry_db::{DbError, TelemetryDb};
 
 /* ----------------------------- CLI ----------------------------- */
@@ -125,7 +127,8 @@ struct TargetState {
     /// hold for the duration of an upload.
     connected: Arc<std::sync::atomic::AtomicBool>,
     /// Lock-free view of the link's listening flag: a listening
-    /// carrier bound and waiting for its peer (false for dial-out).
+    /// carrier bound, waiting for its peer or serving it; `connected`
+    /// says which (false for dial-out).
     listening: Arc<std::sync::atomic::AtomicBool>,
     /// Pipeline counters shared by the router, DB writer, WebSocket
     /// subscribers, and the client's command accounting.
@@ -166,6 +169,10 @@ struct SharedState {
     /// Browser sessions. The store has its own lock: callers clone the
     /// Arc under a short guard and use it after dropping the guard.
     sessions: Arc<SessionStore>,
+    /// Set by the shutdown snapshot, under the write guard: from then
+    /// on no connect is admitted, and a connect that completes is torn
+    /// down instead of registering a router or polls.
+    stopping: bool,
 }
 
 /// Storage pressure measured by the maintenance loop: the configured
@@ -204,8 +211,9 @@ struct TargetInfo {
     host: String,
     port: u16,
     connected: bool,
-    /// A listening carrier bound and waiting for the target to dial
-    /// in: up from the operator's side, no peer yet.
+    /// A listening carrier (tcp-listen or udp) is bound: true while it
+    /// waits for its target and after the target dials in or is heard;
+    /// `connected` says which. False for links that dial out.
     listening: bool,
     /// Command-surface capabilities the target's dictionaries declare
     /// (e.g. "readback"). Empty for older dictionary sets.
@@ -652,20 +660,37 @@ async fn target_client(
     Ok((target.client.clone(), st.db.clone()))
 }
 
-/// Connect a target's client and attach its telemetry router.
-/// Returns Ok(true) on a fresh connect, Ok(false) if already connected.
+/// Connect a target's client and attach its telemetry router when the
+/// call brings the link up. The answer is `connect_answer`'s, from the
+/// link's state word before the call and what the call left: the
+/// link's state when connect returns, so it is true when given, and a
+/// 502 only if the link is already down again by then. An arm step
+/// that fails after the answer takes the link down after a 200;
+/// /api/targets has the settled state. Once shutdown has begun, no
+/// connect is admitted, and one that completes afterwards is torn down
+/// and refused (503) instead of registering a router or polls. A
+/// caller that waited for the link checks again once it holds it,
+/// so it never begins bring-up after shutdown began.
 ///
-/// The connected check and the TCP connect run under the client mutex
-/// (not the state guard), which gives the same TOCTOU protection the
-/// old hold-the-write-lock version had: a concurrent connect serializes
-/// on the mutex and sees is_connected() == true.
-async fn do_connect_target(state: &AppState, id: &str) -> Result<bool, (StatusCode, String)> {
+/// The state check and the connect run under the client mutex (not
+/// the state guard): a concurrent connect serializes on the mutex and
+/// finds the link already up. The completion is decided under the
+/// state's write guard, which the shutdown snapshot takes too, with the
+/// link still held; the link is held while the guard is awaited, never
+/// the reverse, so reads stay responsive.
+async fn do_connect_target(
+    state: &AppState,
+    id: &str,
+) -> Result<ConnectAnswer, (StatusCode, String)> {
     let (client, host, port) = {
         let st = state.read().await;
         let target = st
             .targets
             .get(id)
             .ok_or((StatusCode::NOT_FOUND, format!("Target '{}' not found", id)))?;
+        if st.stopping {
+            return Ok(ConnectAnswer::Refused);
+        }
         (
             target.client.clone(),
             target.config.host.clone(),
@@ -673,47 +698,69 @@ async fn do_connect_target(state: &AppState, id: &str) -> Result<bool, (StatusCo
         )
     };
 
-    {
-        let mut cli = client.lock().await;
-        // Already serving: a live session, or a listener waiting for
-        // one. Either way there is nothing to bring up and no router
-        // to replace.
-        if cli.is_connected() || cli.is_listening() {
-            return Ok(false);
-        }
-        cli.connect(&host, port)
-            .await
-            .map_err(|e| (StatusCode::BAD_GATEWAY, format!("Connect failed: {}", e)))?;
+    let mut cli = client.lock().await;
+    // A caller that waited here for the link, behind another connect,
+    // passed the entry check before shutdown may have begun: look
+    // again, under a short guard released before any bring-up.
+    let stopping = state.read().await.stopping;
+    if stopping {
+        return Ok(ConnectAnswer::Refused);
     }
+    // Up from our side (a live session, or a listener waiting for one):
+    // nothing to bring up and no router to replace, and the state stays
+    // what it was.
+    let state_before = cli.state_word();
+    if state_before.is_some() {
+        return Ok(connect_answer(state_before, Ok(state_before), false));
+    }
+    let after = cli
+        .connect(&host, port)
+        .await
+        .map(|()| cli.state_word())
+        .map_err(|e| e.to_string());
 
-    // Attach the telemetry router under a short write guard. Replacing
-    // the handle aborts any previous router so a reconnect can't leave
-    // two subscribers decoding the same push stream.
+    // Either this lands before the shutdown snapshot, which then stops
+    // the router and polls attached here and disconnects the link, or it
+    // sees shutdown begun and leaves nothing behind.
     let mut st = state.write().await;
-    if let Some(target) = st.targets.get_mut(id) {
-        let push_rx = target.push_tlm_tx.subscribe();
-        let handle = telemetry::spawn_router(
-            id.to_string(),
-            push_rx,
-            target.sample_tx.clone(),
-            target.struct_dicts.clone(),
-            target.manifest.clone(),
-            target.record_table.clone(),
-            target.metrics.clone(),
-        );
-        if let Some(old) = target._router_handle.replace(handle) {
-            old.abort();
+    let answer = connect_answer(state_before, after, st.stopping);
+    match answer {
+        ConnectAnswer::Refused => {
+            if cli.state_word().is_some() {
+                cli.disconnect();
+            }
         }
-        for h in target._poll_handles.drain(..) {
-            h.abort();
+        ConnectAnswer::BroughtUp(_) => {
+            // Replacing the handle aborts any previous router so a
+            // reconnect can't leave two subscribers decoding the same
+            // push stream.
+            if let Some(target) = st.targets.get_mut(id) {
+                let push_rx = target.push_tlm_tx.subscribe();
+                let handle = telemetry::spawn_router(
+                    id.to_string(),
+                    push_rx,
+                    target.sample_tx.clone(),
+                    target.struct_dicts.clone(),
+                    target.manifest.clone(),
+                    target.record_table.clone(),
+                    target.metrics.clone(),
+                );
+                if let Some(old) = target._router_handle.replace(handle) {
+                    old.abort();
+                }
+                for h in target._poll_handles.drain(..) {
+                    h.abort();
+                }
+                target._poll_handles = crate::core::poll::spawn_polls(
+                    &target.config.poll,
+                    target.client.clone(),
+                    target.push_tlm_tx.clone(),
+                );
+            }
         }
-        target._poll_handles = crate::core::poll::spawn_polls(
-            &target.config.poll,
-            target.client.clone(),
-            target.push_tlm_tx.clone(),
-        );
+        _ => {}
     }
-    Ok(true)
+    Ok(answer)
 }
 
 async fn list_targets(State(state): State<AppState>) -> Json<serde_json::Value> {
@@ -768,37 +815,32 @@ async fn connect_target(
         None => format!("{}:{}", host, port),
     };
 
-    match do_connect_target(&state, &id).await {
-        Ok(false) => Ok(Json(
-            serde_json::json!({"status": "already_connected", "target": id}),
-        )),
-        Ok(true) => {
-            record_audit(
-                &db_for_audit,
-                &actor.0,
-                "connect_target",
-                Some(&id),
-                Some(&details),
-                "ok",
-                Some(&ip_str),
-            );
-            Ok(Json(
-                serde_json::json!({"status": "connected", "target": id}),
-            ))
+    // A link found up was not touched, so nothing is audited for it.
+    let outcome = match do_connect_target(&state, &id).await {
+        Ok(ConnectAnswer::Already(status)) => {
+            return Ok(Json(serde_json::json!({"status": status, "target": id})));
         }
-        Err((code, err_msg)) => {
-            record_audit(
-                &db_for_audit,
-                &actor.0,
-                "connect_target",
-                Some(&id),
-                Some(&details),
-                &format!("err: {}", err_msg),
-                Some(&ip_str),
-            );
-            Err((code, err_msg))
+        Ok(ConnectAnswer::BroughtUp(status)) => Ok(status),
+        Ok(ConnectAnswer::Failed(err_msg)) => Err((StatusCode::BAD_GATEWAY, err_msg)),
+        Ok(ConnectAnswer::Refused) => {
+            Err((StatusCode::SERVICE_UNAVAILABLE, "shutting down".to_string()))
         }
-    }
+        Err(e) => Err(e),
+    };
+    let audit_status = match &outcome {
+        Ok(_) => "ok".to_string(),
+        Err((_, err_msg)) => format!("err: {}", err_msg),
+    };
+    record_audit(
+        &db_for_audit,
+        &actor.0,
+        "connect_target",
+        Some(&id),
+        Some(&details),
+        &audit_status,
+        Some(&ip_str),
+    );
+    outcome.map(|status| Json(serde_json::json!({"status": status, "target": id})))
 }
 
 async fn disconnect_target(
@@ -4757,6 +4799,7 @@ async fn main() {
         rate_limiter: Arc::new(RateLimiter::default()),
         storage_vitals,
         sessions,
+        stopping: false,
     }));
 
     // Honor `auto_connect = true` on each target. We dispatch the
@@ -4783,9 +4826,14 @@ async fn main() {
                     // a slow target must not hold the state write guard
                     // (5 s TCP timeout each) while the API serves requests.
                     match do_connect_target(&state_for_autoconnect, &id).await {
-                        Ok(true) => tracing::info!("auto_connect: {} connected", id),
-                        Ok(false) => {}
-                        Err((_, e)) => {
+                        Ok(ConnectAnswer::BroughtUp(status)) => {
+                            tracing::info!("auto_connect: {} {}", id, status)
+                        }
+                        Ok(ConnectAnswer::Already(_)) => {}
+                        Ok(ConnectAnswer::Refused) => {
+                            tracing::warn!("auto_connect: {} refused: shutting down", id);
+                        }
+                        Ok(ConnectAnswer::Failed(e)) | Err((_, e)) => {
                             tracing::warn!("auto_connect: {} failed: {}", id, e);
                         }
                     }
@@ -4843,17 +4891,34 @@ async fn main() {
             _ = terminate => tracing::info!("Received SIGTERM, shutting down"),
         }
 
-        // Disconnect all targets to flush telemetry and close connections
-        let mut st = shutdown_state.write().await;
-        for (id, target) in st.targets.iter_mut() {
-            if let Some(h) = target._router_handle.take() {
-                h.abort();
-            }
-            for h in target._poll_handles.drain(..) {
-                h.abort();
-            }
-            let mut cli = target.client.lock().await;
-            if cli.is_connected() {
+        // Disconnect all targets to flush telemetry and close connections.
+        // The write guard covers only what needs it (closing connect
+        // admission, stopping the routers and polls, collecting each
+        // link); it is dropped before waiting on any link mutex, which a
+        // connect in its dial or an upload can hold for seconds while
+        // every request needs the state's guard. A connect that completes
+        // after this sees `stopping` and tears its link down.
+        let links: Vec<(String, Arc<Mutex<ProtocolLink>>)> = {
+            let mut st = shutdown_state.write().await;
+            st.stopping = true;
+            st.targets
+                .iter_mut()
+                .map(|(id, target)| {
+                    if let Some(h) = target._router_handle.take() {
+                        h.abort();
+                    }
+                    for h in target._poll_handles.drain(..) {
+                        h.abort();
+                    }
+                    (id.clone(), target.client.clone())
+                })
+                .collect()
+        };
+        for (id, client) in links {
+            // Up from our side, peer or no peer: a listening link's
+            // socket and tasks end here too.
+            let mut cli = client.lock().await;
+            if cli.state_word().is_some() {
                 cli.disconnect();
                 tracing::info!("Disconnected target {} during shutdown", id);
             }

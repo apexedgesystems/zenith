@@ -107,6 +107,17 @@ architecture review; work before that is the v0.0.1 tag.
 
 ### Fixed
 
+- UDP targets show listening until first contact, and TCP targets no
+  longer falsely remain connected after an immediate hangup or a
+  disconnect racing an incoming session. Clients of the connect
+  endpoint must accept `listening` / `already_listening` for waiting
+  links. ([#68](https://github.com/apexedgesystems/zenith/pull/68))
+- A shutdown that starts while a target's connect is still dialing, or
+  its upload is running, keeps the API answering while it waits for
+  that link, instead of stalling every request until the link frees.
+  A connect asked for, or completing, once shutdown has begun is
+  refused (503).
+  ([#68](https://github.com/apexedgesystems/zenith/pull/68))
 - Tunable updates to nested structs carry the layout hash the vehicle
   verifies when their dictionary exports none.
   ([#50](https://github.com/apexedgesystems/zenith/pull/50))

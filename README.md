@@ -136,7 +136,7 @@ ELF ident) decode correctly with zero configuration.
 
 - Live target list with connection state dots (green connected; amber
   listening, for a tcp-listen target waiting for its deployment to
-  dial in; grey down)
+  dial in or a UDP target not yet heard from; grey down)
 - **Per-target storage strip** -- shows samples + bytes per target
 - **Right-click target menu**: Connect / Disconnect, Copy address,
   **Auto-reconnect toggle** (persisted across browser sessions),
@@ -152,7 +152,7 @@ ELF ident) decode correctly with zero configuration.
 | Frontend      | React 19, TypeScript strict, Canvas API                                                    |
 | Storage       | SQLite (WAL mode) with read connection pool (1 writer + N readers)                         |
 | Protocol      | APROTO over TCP + SLIP framing                                                             |
-| Tests         | `cargo test --lib` (208 unit tests) + Vitest with React Testing Library (128 unit tests)   |
+| Tests         | `cargo test --lib` (223 unit tests) + Vitest with React Testing Library (135 unit tests)   |
 | Benches       | criterion + pprof flamegraphs                                                              |
 | Auth          | Console sign-in with server-side sessions; JWT bearer tokens for API clients (default off) |
 | Rate limiting | Per-IP token bucket on POST endpoints (when auth is on)                                    |
@@ -359,8 +359,8 @@ make run
 | `make stop`          | Stop the running container                                                                                      |
 | `make dev`           | Build + run in foreground (logs to stdout)                                                                      |
 | `make test`          | Run **both** backend and frontend test suites                                                                   |
-| `make test-backend`  | Backend only: `cargo test --lib` (currently 208 unit tests)                                                     |
-| `make test-frontend` | Frontend only: `vitest run` (currently 128 unit tests)                                                          |
+| `make test-backend`  | Backend only: `cargo test --lib` (currently 223 unit tests)                                                     |
+| `make test-frontend` | Frontend only: `vitest run` (currently 135 unit tests)                                                          |
 | `make bench`         | Run criterion benches (`protocol`, `storage`, `decoder`)                                                        |
 | `make format`        | Run every pre-commit hook over the repo; the formatters fix in place                                            |
 | `make format-check`  | The same hooks; fails, showing the diff, when any of them changes a file (CI mode)                              |
@@ -443,8 +443,9 @@ A target's definition fully describes its transport: the protocol
 (`aproto-slip`, `ccsds-spp`, `slip+ccsds-spp`, `tm+ccsds-spp`,
 `tm+ccsds-spp+records`, `raw-slip`), the
 carrier (`tcp` dials host:port and reads the stream; `udp` binds
-`listen_port` for inbound datagrams and sends outbound ones to
-host:port; `tcp-listen` binds `listen_port` on every interface and accepts
+`listen_port` on every interface for inbound datagrams and sends
+outbound ones to host:port, listening until its first datagram, from
+any sender, and connected from then on; `tcp-listen` binds `listen_port` on every interface and accepts
 the target dialing in -- the push-to-ground pattern, with the
 connected state tracking the live session, not the bound listener), and an optional `connect_init`
 sequence -- a generated
@@ -540,7 +541,7 @@ DELETE /api/auth/session                         # Sign out; ends the session, c
 # Targets
 GET    /api/targets
 POST   /api/targets/add                          # Add an aproto-slip target at runtime (dir optional)
-POST   /api/targets/{id}/connect
+POST   /api/targets/{id}/connect                 # Its state as connect returns: connected or listening (already_ if it was up); 502 if down again by then
 POST   /api/targets/{id}/disconnect
 POST   /api/targets/{id}/remove
 POST   /api/targets/{id}/restart                 # Restart executive (deferred ACK before execve)

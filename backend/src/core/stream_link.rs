@@ -41,7 +41,11 @@ pub enum Carrier {
     /// Bind listen_port for inbound datagrams; host:port is where
     /// outbound (init-step) datagrams go. listen_port 0 =
     /// OS-assigned, useful only when the peer replies to the source
-    /// address.
+    /// address. No handshake: the link is listening from bind, and
+    /// connected once any datagram arrives, routable or not and from
+    /// any sender (the socket is bound on every interface and UDP
+    /// carries no identity) -- the transport-level sign of a live
+    /// peer, as a handshake is for TCP.
     Udp { listen_port: u16 },
     /// Accept the target dialing IN to listen_port -- the
     /// push-to-ground pattern: some flight stacks initiate the
@@ -436,10 +440,18 @@ pub struct StreamLink {
     /// stream and some targets treat that as a hangup); reaped on
     /// disconnect or the next connect.
     init_handle: Option<tokio::task::JoinHandle<()>>,
+    /// Tasks being retired: those a disconnect aborted, and those a
+    /// connect aborted but has not yet seen finish (a connect dropped
+    /// while it waits leaves them here). The next connect waits for
+    /// them before it starts a new connection.
+    retired: Vec<tokio::task::JoinHandle<()>>,
+    /// A live peer: a dialed stream, an accepted session, or a UDP
+    /// target heard since bind.
     connected: Arc<AtomicBool>,
-    /// Bound and accepting (listening carriers only): true from bind
-    /// until the listener task ends. Status endpoints read this
-    /// without the link mutex, like `connected`.
+    /// Bound and waiting for, or serving, the target (the listening
+    /// carriers, tcp-listen and udp): true from bind until the task
+    /// serving the socket ends. Status endpoints read this without
+    /// the link mutex, like `connected`.
     listening: Arc<AtomicBool>,
     /// Generation counter, the shared link discipline: a
     /// stale reader must not clear a newer connection's flag.
@@ -466,10 +478,59 @@ impl InitSender {
     }
 }
 
+/// Clears a listening link's two flags when the task serving its
+/// socket ends, however it ends: a receive or accept error, an abort
+/// (disconnect, a failed init step, the retirement a connect waits
+/// for), a panic. Held by every serving task that stores a flag, the
+/// UDP reader and the tcp-listen accept loop, so a store that lands
+/// after a disconnect cleared the flags (a datagram or a dial racing
+/// it) is undone when the abort ends the task. A connect waits for a
+/// retired task before it starts the next generation, so the guard
+/// runs while its own generation is current; the generation check is a
+/// second line, so a guard that ran late would still leave a newer
+/// connection's flags alone.
+struct ServingGuard {
+    connected: Arc<AtomicBool>,
+    listening: Arc<AtomicBool>,
+    generation: Arc<AtomicU64>,
+    gen: u64,
+}
+
+impl Drop for ServingGuard {
+    fn drop(&mut self) {
+        if self.generation.load(Ordering::Acquire) == self.gen {
+            self.connected.store(false, Ordering::Release);
+            self.listening.store(false, Ordering::Release);
+        }
+    }
+}
+
+/// First contact on a UDP link: mark the target heard while this
+/// generation is current, and log it. Out of line and cold, so the
+/// per-datagram loop carries only the branch that skips it. The log
+/// names the bound port, not the sender: keeping the sender's address
+/// live past that branch costs every datagram.
+#[cold]
+#[inline(never)]
+fn first_contact(
+    connected: &AtomicBool,
+    generation: &AtomicU64,
+    gen: u64,
+    port: u16,
+    proto_name: &'static str,
+) {
+    if generation.load(Ordering::Acquire) == gen {
+        connected.store(true, Ordering::Release);
+    }
+    tracing::info!("{proto_name} target heard on :{port}");
+}
+
 /// Run the init sequence beside the (already running) reader: honor
 /// each step's delay, send its bytes, and on any send failure tear
-/// the whole link down -- half-armed is worse than down. Returns
-/// None when there is nothing to run.
+/// the whole link down -- half-armed is worse than down. Aborting the
+/// reader also ends a UDP link's waiting state: its guard clears
+/// `listening` as the abort lands. Returns None when there is nothing
+/// to run.
 fn spawn_init(
     steps: Vec<InitStep>,
     mut sender: InitSender,
@@ -528,6 +589,7 @@ impl StreamLink {
             listening: Arc::new(AtomicBool::new(false)),
             reader_handle: None,
             init_handle: None,
+            retired: Vec::new(),
             connected: Arc::new(AtomicBool::new(false)),
             generation: Arc::new(AtomicU64::new(0)),
         }
@@ -544,18 +606,30 @@ impl StreamLink {
     pub async fn connect(&mut self, host: &str, port: u16) -> Result<(), ClientError> {
         let addr = format!("{}:{}", host, port);
         // A listener that is already bound and serving is the
-        // connection: bouncing it would refuse any peer dialing in
-        // during the rebind, and the connect contract is idempotent.
+        // connection: bouncing it would refuse a peer dialing in, or
+        // drop its datagrams, during the rebind, and the connect
+        // contract is idempotent.
         if self.is_listening() {
             return Ok(());
         }
-        // A stale reader or a still-parked init task from a previous
-        // connection must not outlive this one.
-        if let Some(h) = self.reader_handle.take() {
+        // Retire the previous connection before this one exists, so no
+        // task of it can run -- or touch the flags -- once the new
+        // generation is visible, and its socket is closed before this
+        // bind. Every task the link still owns (this connection's
+        // reader and init runner, and any a disconnect or an
+        // interrupted connect left) is asked to stop before the first
+        // wait, and stays owned by the link until it has finished: a
+        // connect dropped while it waits leaves the rest for the next
+        // connect. A task stopped by the abort resolves with a
+        // cancellation error, the expected outcome.
+        self.retired.extend(self.reader_handle.take());
+        self.retired.extend(self.init_handle.take());
+        for h in &self.retired {
             h.abort();
         }
-        if let Some(h) = self.init_handle.take() {
-            h.abort();
+        while let Some(h) = self.retired.last_mut() {
+            let _ = h.await;
+            self.retired.pop();
         }
         let gen = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
         let conn_flag = self.connected.clone();
@@ -573,26 +647,24 @@ impl StreamLink {
             let spec = self.spec.clone();
             let init = self.init.clone();
             let push_tx = self.push_tlm_tx.clone();
-            let listening = self.listening.clone();
-            listening.store(true, Ordering::Release);
+            self.listening.store(true, Ordering::Release);
+            let guard = ServingGuard {
+                connected: conn_flag.clone(),
+                listening: self.listening.clone(),
+                generation: gen_flag.clone(),
+                gen,
+            };
             let handle = tokio::spawn(async move {
-                // Cleared however the loop ends: accept failure, or a
-                // newer generation superseding this listener.
-                struct ListenGuard(Arc<AtomicBool>);
-                impl Drop for ListenGuard {
-                    fn drop(&mut self) {
-                        self.0.store(false, Ordering::Release);
-                    }
-                }
-                let _guard = ListenGuard(listening);
+                // Both flags cleared however the loop ends: an accept
+                // failure, an abort, a newer generation superseding
+                // this listener. A session's own end clears only
+                // `connected`, and the loop goes back to accepting.
+                let _guard = guard;
                 loop {
                     let (stream, peer) = match listener.accept().await {
                         Ok(x) => x,
                         Err(e) => {
                             tracing::error!("{proto_name} accept error: {e}");
-                            if gen_flag.load(Ordering::Acquire) == gen {
-                                conn_flag.store(false, Ordering::Release);
-                            }
                             break;
                         }
                     };
@@ -678,6 +750,13 @@ impl StreamLink {
                     .map_err(ClientError::Connect)?;
                 stream.set_nodelay(true)?;
                 let (mut rd, wr) = stream.into_split();
+                // A dialed stream has its peer from the handshake on.
+                // Marked before the reader and the init runner start:
+                // either clears the flag when the stream ends or a
+                // step fails, possibly at once, and that clear must be
+                // the last word.
+                self.connected.store(true, Ordering::Release);
+                tracing::info!("Connected ({proto_name}) to {addr}");
                 let handle = tokio::spawn(async move {
                     let mut buf = vec![0u8; 65536];
                     loop {
@@ -716,21 +795,40 @@ impl StreamLink {
                         .map_err(ClientError::Connect)?,
                 );
                 let rx_sock = sock.clone();
+                let port = sock.local_addr().map_or(listen_port, |a| a.port());
+                // Nothing to wait for at bind: the link listens, and
+                // its first datagram, from any sender, makes it
+                // connected.
+                self.listening.store(true, Ordering::Release);
+                let guard = ServingGuard {
+                    connected: conn_flag.clone(),
+                    listening: self.listening.clone(),
+                    generation: gen_flag.clone(),
+                    gen,
+                };
                 let handle = tokio::spawn(async move {
+                    let _guard = guard;
                     let mut buf = vec![0u8; 65536];
+                    // First contact sets `connected` once; every later
+                    // datagram pays one branch on this local, no atomic.
+                    let mut heard = false;
                     loop {
                         match rx_sock.recv_from(&mut buf).await {
-                            Ok((n, _src)) => ingest.feed(&buf[..n]),
-                            Err(e) => {
-                                if gen_flag.load(Ordering::Acquire) == gen {
-                                    conn_flag.store(false, Ordering::Release);
+                            Ok((n, _src)) => {
+                                if !heard {
+                                    heard = true;
+                                    first_contact(&conn_flag, &gen_flag, gen, port, proto_name);
                                 }
+                                ingest.feed(&buf[..n]);
+                            }
+                            Err(e) => {
                                 tracing::error!("{proto_name} udp recv error: {e}");
                                 break;
                             }
                         }
                     }
                 });
+                tracing::info!("Listening ({proto_name}) on :{port} for the target at {addr}");
                 (
                     handle,
                     InitSender::Udp {
@@ -751,20 +849,23 @@ impl StreamLink {
             reader_handle.abort_handle(),
             proto_name,
         );
-        self.connected.store(true, Ordering::Release);
         self.reader_handle = Some(reader_handle);
-        tracing::info!("Connected ({proto_name}) to {addr}");
         Ok(())
     }
 
+    /// Tear the link down: clear both flags and abort the reader and
+    /// the init runner. The aborted tasks are kept for the next
+    /// connect, which waits for them to finish before it starts a new
+    /// connection.
     pub fn disconnect(&mut self) {
         self.connected.store(false, Ordering::Release);
         self.listening.store(false, Ordering::Release);
-        if let Some(h) = self.reader_handle.take() {
+        for h in [self.reader_handle.take(), self.init_handle.take()]
+            .into_iter()
+            .flatten()
+        {
             h.abort();
-        }
-        if let Some(h) = self.init_handle.take() {
-            h.abort();
+            self.retired.push(h);
         }
         tracing::info!("Disconnected ({})", self.protocol.name());
     }
@@ -773,8 +874,9 @@ impl StreamLink {
         self.connected.load(Ordering::Acquire)
     }
 
-    /// A tcp-listen link whose listener task is alive: bound and
-    /// accepting, whether or not a peer is attached right now.
+    /// A listening link (tcp-listen or udp) whose serving task is
+    /// alive: bound, whether or not the target is attached or heard
+    /// yet.
     pub fn is_listening(&self) -> bool {
         self.listening.load(Ordering::Acquire)
             && self
@@ -865,6 +967,41 @@ mod tests {
             .await
             .expect("packet within deadline")
             .unwrap()
+    }
+
+    /// Poll `done` every 10 ms for up to 2 s; true once it holds.
+    async fn wait_until(mut done: impl FnMut() -> bool) -> bool {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !done() {
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        true
+    }
+
+    /// `connect`, bounded: a connect that cannot finish retiring the
+    /// previous connection fails the test instead of hanging it.
+    async fn connect_within(
+        link: &mut StreamLink,
+        host: &str,
+        port: u16,
+    ) -> Result<(), ClientError> {
+        tokio::time::timeout(std::time::Duration::from_secs(5), link.connect(host, port))
+            .await
+            .expect("connect returns within 5 s")
+    }
+
+    /// One datagram from `sock` within 2 s: its bytes and its source.
+    async fn recv_datagram(sock: &tokio::net::UdpSocket) -> (Vec<u8>, std::net::SocketAddr) {
+        let mut buf = [0u8; 256];
+        let (n, src) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), sock.recv_from(&mut buf))
+                .await
+                .expect("datagram within deadline")
+                .unwrap();
+        (buf[..n].to_vec(), src)
     }
 
     /// @test THE protocol-agnosticism proof, now across FOUR stream
@@ -995,7 +1132,8 @@ mod tests {
     /// and telemetry datagrams flowing back parse through the same
     /// SPP pipeline the TCP carrier uses. The fake target verifies
     /// the init bytes arrive verbatim before it emits anything --
-    /// downlink-silent-until-armed, enforced.
+    /// downlink-silent-until-armed, enforced -- and the link reads
+    /// connected only once that first datagram is heard.
     #[tokio::test]
     async fn udp_carrier_arms_then_receives() {
         let arm: Vec<u8> = vec![0x18, 0x80, 0xC0, 0x00, 0x00, 0x11, 0x06, 0x00];
@@ -1031,11 +1169,541 @@ mod tests {
         link.connect(&target_addr.ip().to_string(), target_addr.port())
             .await
             .unwrap();
-        assert!(link.is_connected());
+        assert!(!link.is_connected(), "armed is not heard");
 
         let pkt = recv_one(&mut push_rx).await;
         assert_eq!(pkt.full_uid, 0x00D000);
         assert_eq!(pkt.payload, vec![7, 7, 7, 7]);
+        assert!(link.is_connected(), "the first datagram is first contact");
+        link.disconnect();
+    }
+
+    /// @test A UDP link with no peer reports what it knows: bound and
+    /// armed is listening, not connected, on the methods and on the
+    /// lock-free handles the status endpoints read. The init step
+    /// still goes out at bind, and neither sending it nor waiting is
+    /// hearing the target.
+    #[tokio::test]
+    async fn udp_link_listens_until_the_target_is_heard() {
+        let target = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let (push_tx, _) = broadcast::channel(4);
+        let mut link = StreamLink::new(
+            Protocol::CcsdsSpp,
+            PipelineSpec::Spp {
+                apid_map: HashMap::new(),
+            },
+            Carrier::Udp { listen_port: 0 },
+            vec![InitStep {
+                name: "enable downlink".into(),
+                delay_ms: 0,
+                bytes: vec![0xA5],
+            }],
+            push_tx,
+        );
+        let connected = link.connected_handle();
+        let listening = link.listening_handle();
+        link.connect(&target_addr.ip().to_string(), target_addr.port())
+            .await
+            .unwrap();
+        assert!(link.is_listening(), "a bound UDP link is listening");
+        assert!(!link.is_connected(), "nothing has been heard");
+        assert!(listening.load(Ordering::Acquire));
+        assert!(!connected.load(Ordering::Acquire));
+
+        let (arm, _) = recv_datagram(&target).await;
+        assert_eq!(arm, vec![0xA5], "the init step goes out at bind");
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(link.is_listening() && listening.load(Ordering::Acquire));
+        assert!(
+            !link.is_connected() && !connected.load(Ordering::Acquire),
+            "sending the init step and waiting are not hearing the target"
+        );
+        link.disconnect();
+    }
+
+    /// @test Any datagram is first contact, routable or not: a target
+    /// sending what its definition cannot route (here an unmapped
+    /// address) is reachable and talking -- a definition fault the
+    /// unroutable warning names -- so the link reads connected, keeps
+    /// listening, and the stream goes on.
+    #[tokio::test]
+    async fn udp_any_datagram_is_first_contact() {
+        let target = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let (push_tx, mut push_rx) = broadcast::channel(16);
+        let mut link = StreamLink::new(
+            Protocol::CcsdsSpp,
+            PipelineSpec::Spp {
+                apid_map: HashMap::from([(0x0D0u16, 0x00D000u32)]),
+            },
+            Carrier::Udp { listen_port: 0 },
+            vec![InitStep {
+                name: "hello".into(),
+                delay_ms: 0,
+                bytes: b"HI".to_vec(),
+            }],
+            push_tx,
+        );
+        link.connect(&target_addr.ip().to_string(), target_addr.port())
+            .await
+            .unwrap();
+        // The init step's source is the link's socket: reply there.
+        let (_, link_addr) = recv_datagram(&target).await;
+        assert!(!link.is_connected(), "armed, nothing heard yet");
+
+        target
+            .send_to(&ccsds_spp::pack(0x111, 1, &[1, 2, 3, 4]), link_addr)
+            .await
+            .unwrap();
+        assert!(
+            wait_until(|| link.is_connected()).await,
+            "an unroutable datagram is still the target heard"
+        );
+        assert!(link.is_listening(), "first contact keeps the socket bound");
+        assert!(
+            push_rx.try_recv().is_err(),
+            "the unmapped address routes nothing"
+        );
+
+        target
+            .send_to(&ccsds_spp::pack(0x0D0, 2, &[5, 6]), link_addr)
+            .await
+            .unwrap();
+        let pkt = recv_one(&mut push_rx).await;
+        assert_eq!(pkt.payload, vec![5, 6], "the stream goes on");
+        link.disconnect();
+    }
+
+    /// @test Disconnect ends the waiting state: neither flag is left
+    /// set, on the methods or the lock-free handles, and a datagram
+    /// that reaches the closing socket afterward does not mark the
+    /// target connected or route anything.
+    #[tokio::test]
+    async fn udp_disconnect_while_listening_clears_both_flags() {
+        let target = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let (push_tx, mut push_rx) = broadcast::channel(16);
+        let mut link = StreamLink::new(
+            Protocol::CcsdsSpp,
+            PipelineSpec::Spp {
+                apid_map: HashMap::from([(0x0D0u16, 0x00D000u32)]),
+            },
+            Carrier::Udp { listen_port: 0 },
+            vec![InitStep {
+                name: "hello".into(),
+                delay_ms: 0,
+                bytes: b"HI".to_vec(),
+            }],
+            push_tx,
+        );
+        let connected = link.connected_handle();
+        let listening = link.listening_handle();
+        link.connect(&target_addr.ip().to_string(), target_addr.port())
+            .await
+            .unwrap();
+        let (_, link_addr) = recv_datagram(&target).await;
+        assert!(
+            link.is_listening() && !link.is_connected(),
+            "waiting for the target"
+        );
+
+        link.disconnect();
+        assert!(!link.is_listening() && !listening.load(Ordering::Acquire));
+        assert!(!link.is_connected() && !connected.load(Ordering::Acquire));
+        // Sent before this task yields, so the socket is still open
+        // and the datagram queues on it; the aborted reader must never
+        // read it.
+        let late = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        late.send_to(&ccsds_spp::pack(0x0D0, 1, &[9]), link_addr)
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert!(
+            !link.is_connected() && !connected.load(Ordering::Acquire),
+            "a late datagram does not connect a disconnected link"
+        );
+        assert!(!listening.load(Ordering::Acquire));
+        assert!(
+            push_rx.try_recv().is_err(),
+            "nothing routes after disconnect"
+        );
+    }
+
+    /// @test A failed init step tears a waiting UDP link down: the
+    /// first step reaches the target, the second cannot be sent (it
+    /// is larger than any IPv4 datagram), and the link is left with
+    /// neither flag set, on the methods or the lock-free handles.
+    #[tokio::test]
+    async fn udp_failed_init_step_clears_both_flags() {
+        let target = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let (push_tx, _) = broadcast::channel(4);
+        let mut link = StreamLink::new(
+            Protocol::CcsdsSpp,
+            PipelineSpec::Spp {
+                apid_map: HashMap::new(),
+            },
+            Carrier::Udp { listen_port: 0 },
+            vec![
+                InitStep {
+                    name: "accepted".into(),
+                    delay_ms: 0,
+                    bytes: vec![0xAA],
+                },
+                InitStep {
+                    name: "refused".into(),
+                    delay_ms: 100,
+                    bytes: vec![0xBB; 65536],
+                },
+            ],
+            push_tx,
+        );
+        let connected = link.connected_handle();
+        let listening = link.listening_handle();
+        link.connect(&target_addr.ip().to_string(), target_addr.port())
+            .await
+            .unwrap();
+        assert!(
+            link.is_listening() && !link.is_connected(),
+            "waiting for the target"
+        );
+        let (first, _) = recv_datagram(&target).await;
+        assert_eq!(first, vec![0xAA]);
+
+        assert!(
+            wait_until(|| !listening.load(Ordering::Acquire)).await,
+            "a failed init step ends the waiting state"
+        );
+        assert!(!link.is_listening());
+        assert!(!link.is_connected() && !connected.load(Ordering::Acquire));
+        link.disconnect();
+    }
+
+    /// @test The generation check, the second line behind retirement:
+    /// a serving guard or a first contact from a retired generation
+    /// leaves a newer connection's flags alone, while the current
+    /// generation's own serving task sets `connected` on first contact
+    /// and clears both flags as it ends.
+    #[test]
+    fn stale_generation_never_touches_newer_flags() {
+        let connected = Arc::new(AtomicBool::new(false));
+        let listening = Arc::new(AtomicBool::new(true));
+        let generation = Arc::new(AtomicU64::new(1));
+        let guard = |gen| ServingGuard {
+            connected: connected.clone(),
+            listening: listening.clone(),
+            generation: generation.clone(),
+            gen,
+        };
+
+        // A newer connection, generation 2, is bound and waiting.
+        let stale = guard(1);
+        generation.store(2, Ordering::SeqCst);
+        first_contact(&connected, &generation, 1, 0, "test");
+        assert!(
+            !connected.load(Ordering::Acquire),
+            "a retired reader's first contact does not connect a newer link"
+        );
+        first_contact(&connected, &generation, 2, 0, "test");
+        assert!(connected.load(Ordering::Acquire));
+        drop(stale);
+        assert!(
+            connected.load(Ordering::Acquire) && listening.load(Ordering::Acquire),
+            "a retired task's guard does not clear a newer link"
+        );
+        drop(guard(2));
+        assert!(!connected.load(Ordering::Acquire) && !listening.load(Ordering::Acquire));
+    }
+
+    /// @test Connect after disconnect waits for the retired tasks: the
+    /// reader and init runner a disconnect aborted have finished when
+    /// the next connect returns, so the old socket is closed and the
+    /// same fixed port binds again, every round, for both listening
+    /// carriers.
+    #[tokio::test]
+    async fn reconnect_waits_for_the_retired_tasks() {
+        // The target binds first, so it cannot be given a probed port.
+        let target = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let host = target_addr.ip().to_string();
+        let udp_port = std::net::UdpSocket::bind("0.0.0.0:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let tcp_port = std::net::TcpListener::bind("0.0.0.0:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        for carrier in [
+            Carrier::Udp {
+                listen_port: udp_port,
+            },
+            Carrier::TcpListen {
+                listen_port: tcp_port,
+            },
+        ] {
+            let (push_tx, _) = broadcast::channel(4);
+            let mut link = StreamLink::new(
+                Protocol::CcsdsSpp,
+                PipelineSpec::Spp {
+                    apid_map: HashMap::new(),
+                },
+                carrier,
+                vec![InitStep {
+                    name: "hello".into(),
+                    delay_ms: 0,
+                    bytes: vec![0x01],
+                }],
+                push_tx,
+            );
+            connect_within(&mut link, &host, target_addr.port())
+                .await
+                .unwrap();
+            for round in 0..20 {
+                let retired: Vec<_> = [link.reader_handle.as_ref(), link.init_handle.as_ref()]
+                    .into_iter()
+                    .flatten()
+                    .map(|h| h.abort_handle())
+                    .collect();
+                link.disconnect();
+                if let Err(e) = connect_within(&mut link, &host, target_addr.port()).await {
+                    panic!("{carrier:?} round {round}: the same port did not bind again: {e}");
+                }
+                assert!(
+                    retired.iter().all(|h| h.is_finished()),
+                    "{carrier:?} round {round}: a retired task outlived the next connect"
+                );
+                assert!(link.is_listening(), "{carrier:?} round {round}");
+            }
+            link.disconnect();
+        }
+    }
+
+    /// @test A connect dropped while it waits for a retiring task loses
+    /// none of them: after a disconnect, every task the connect was
+    /// retiring has been asked to stop before the first wait and stays
+    /// owned by the link, and the next connect finishes the retirement
+    /// before it starts a new connection. Stand-ins, queued ahead of the
+    /// link's own aborted tasks: one parked at an await, first in line,
+    /// which an abort ends at once; two inside their exit paths, blocking
+    /// their workers where an abort cannot stop them until released,
+    /// after which each records the generation it sees and reaches an
+    /// await, where a requested abort ends it.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cancelled_connect_leaves_its_retiring_tasks_to_the_next() {
+        let target = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let host = target_addr.ip().to_string();
+        let (push_tx, _) = broadcast::channel(4);
+        let mut link = StreamLink::new(
+            Protocol::CcsdsSpp,
+            PipelineSpec::Spp {
+                apid_map: HashMap::new(),
+            },
+            Carrier::Udp { listen_port: 0 },
+            vec![InitStep {
+                name: "hello".into(),
+                delay_ms: 0,
+                bytes: vec![0x01],
+            }],
+            push_tx,
+        );
+        connect_within(&mut link, &host, target_addr.port())
+            .await
+            .unwrap();
+        let old: Vec<_> = [link.reader_handle.as_ref(), link.init_handle.as_ref()]
+            .into_iter()
+            .flatten()
+            .map(|h| h.abort_handle())
+            .collect();
+        let first = link.generation.load(Ordering::Acquire);
+
+        let parked = tokio::spawn(std::future::pending::<()>());
+        let parked_task = parked.abort_handle();
+        link.retired.push(parked);
+        let entered = Arc::new(std::sync::Barrier::new(3));
+        let release = Arc::new(std::sync::Barrier::new(3));
+        let mut stand_ins = Vec::new();
+        for _ in 0..2 {
+            let seen = Arc::new(std::sync::Mutex::new(None));
+            let ran_on = Arc::new(AtomicBool::new(false));
+            let generation = link.generation.clone();
+            let (entered, release) = (entered.clone(), release.clone());
+            let (seen_task, ran_on_task) = (seen.clone(), ran_on.clone());
+            link.retired.push(tokio::spawn(async move {
+                entered.wait();
+                release.wait();
+                *seen_task.lock().unwrap() = Some(generation.load(Ordering::Acquire));
+                tokio::task::yield_now().await;
+                ran_on_task.store(true, Ordering::Release);
+            }));
+            stand_ins.push((seen, ran_on));
+        }
+        let entered_test = entered.clone();
+        tokio::task::spawn_blocking(move || {
+            entered_test.wait();
+        })
+        .await
+        .unwrap();
+        // A listening link is not connected again; the disconnect hands
+        // the next connect its aborted reader and init runner too.
+        link.disconnect();
+
+        // Observations are kept and asserted after the release, so a
+        // failure ends the test instead of leaving the stand-ins blocked.
+        let interrupted = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            link.connect(&host, target_addr.port()),
+        )
+        .await
+        .is_err();
+        let kept = link.retired.len();
+        let generation_then = link.generation.load(Ordering::Acquire);
+        let parked_stopped = wait_until(|| parked_task.is_finished()).await;
+
+        let port = target_addr.port();
+        let reconnect = async move {
+            connect_within(&mut link, &host, port).await.unwrap();
+            link
+        };
+        let release_stand_ins = async move {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            tokio::task::spawn_blocking(move || {
+                release.wait();
+            })
+            .await
+            .unwrap();
+        };
+        let (mut link, ()) = tokio::join!(reconnect, release_stand_ins);
+
+        assert!(interrupted, "connect waits for the stand-ins");
+        assert_eq!(kept, 3, "the tasks not yet awaited stay owned by the link");
+        assert_eq!(
+            generation_then, first,
+            "nothing started by the dropped connect"
+        );
+        assert!(
+            parked_stopped,
+            "a retiring task was not asked to stop before the first wait"
+        );
+        for (seen, ran_on) in &stand_ins {
+            assert_eq!(
+                *seen.lock().unwrap(),
+                Some(first),
+                "a retiring task ran after the next connection started"
+            );
+            assert!(
+                !ran_on.load(Ordering::Acquire),
+                "a retiring task was never asked to stop"
+            );
+        }
+        assert!(old.iter().all(|h| h.is_finished()));
+        assert!(link.retired.is_empty());
+        assert_eq!(link.generation.load(Ordering::Acquire), first + 1);
+        assert!(link.is_listening());
+        link.disconnect();
+    }
+
+    /// @test Under a datagram flood a reconnect starts clean: round
+    /// after round, a UDP link that has heard nothing since its bind
+    /// reads listening and not connected, while the reader it retired
+    /// was busy with the flood on the old socket. Multi-threaded, so
+    /// the retiring reader runs beside the reconnect. A round whose new
+    /// socket the kernel gave the retired port, which the flood still
+    /// aims at, proves nothing and is not asserted; every round
+    /// re-aims.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn udp_reconnect_under_a_flood_starts_clean() {
+        let target = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target.local_addr().unwrap();
+        let host = target_addr.ip().to_string();
+        let (push_tx, _) = broadcast::channel(16);
+        let mut link = StreamLink::new(
+            Protocol::CcsdsSpp,
+            PipelineSpec::Spp {
+                apid_map: HashMap::from([(0x0D0u16, 0x00D000u32)]),
+            },
+            Carrier::Udp { listen_port: 0 },
+            vec![InitStep {
+                name: "hello".into(),
+                delay_ms: 0,
+                bytes: b"HI".to_vec(),
+            }],
+            push_tx,
+        );
+        // Two senders flood whichever port `aim` names (0: hold), until
+        // `stop`, which a guard sets however the test ends.
+        let aim = Arc::new(std::sync::atomic::AtomicU16::new(0));
+        let stop = Arc::new(AtomicBool::new(false));
+        struct StopOnDrop(Arc<AtomicBool>);
+        impl Drop for StopOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Relaxed);
+            }
+        }
+        let floods: Vec<_> = (0..2)
+            .map(|_| {
+                let (aim, stop) = (aim.clone(), stop.clone());
+                std::thread::spawn(move || {
+                    let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+                    let pkt = ccsds_spp::pack(0x0D0, 1, &[0xA5; 14]);
+                    while !stop.load(Ordering::Relaxed) {
+                        match aim.load(Ordering::Relaxed) {
+                            0 => std::thread::yield_now(),
+                            port => {
+                                let _ = sock.send_to(&pkt, ("127.0.0.1", port));
+                            }
+                        }
+                    }
+                })
+            })
+            .collect();
+        let stop_floods = StopOnDrop(stop);
+
+        connect_within(&mut link, &host, target_addr.port())
+            .await
+            .unwrap();
+        let (_, mut link_addr) = recv_datagram(&target).await;
+        let mut conclusive = 0;
+        for round in 0..100 {
+            aim.store(link_addr.port(), Ordering::Relaxed);
+            assert!(
+                wait_until(|| link.is_connected()).await,
+                "round {round}: the flood is heard"
+            );
+            link.disconnect();
+            connect_within(&mut link, &host, target_addr.port())
+                .await
+                .unwrap();
+            // The flood still hits the retired port; nothing has been
+            // sent to the new socket unless it was given that port.
+            let clean = || {
+                link.listening_handle().load(Ordering::Acquire)
+                    && !link.connected_handle().load(Ordering::Acquire)
+            };
+            let clean_at_connect = clean();
+            let (_, next) = recv_datagram(&target).await;
+            let clean_after_init = clean();
+            if next.port() != link_addr.port() {
+                conclusive += 1;
+                assert!(clean_at_connect, "round {round}: right after connect");
+                assert!(
+                    clean_after_init,
+                    "round {round}: once the init step has gone out"
+                );
+            }
+            link_addr = next;
+        }
+        assert!(
+            conclusive >= 20,
+            "only {conclusive} rounds bound a fresh port"
+        );
+        drop(stop_floods);
+        for f in floods {
+            f.join().unwrap();
+        }
         link.disconnect();
     }
 
@@ -1075,6 +1743,138 @@ mod tests {
         let pkt = recv_one(&mut push_rx).await;
         assert_eq!(pkt.full_uid, 0xAB);
         assert_eq!(pkt.payload, vec![1, 2, 3]);
+        link.disconnect();
+    }
+
+    /// @test The TCP dial carrier keeps its meaning: connected from
+    /// the handshake, before any byte arrives, and never listening.
+    #[tokio::test]
+    async fn tcp_dial_is_connected_from_the_handshake_and_never_listens() {
+        let addr = serve_bytes(Vec::new()).await;
+        let (push_tx, _) = broadcast::channel(4);
+        let mut link = StreamLink::new(
+            Protocol::RawSlip,
+            PipelineSpec::SlipRaw { uid: Some(1) },
+            Carrier::Tcp,
+            Vec::new(),
+            push_tx,
+        );
+        link.connect(&addr.ip().to_string(), addr.port())
+            .await
+            .unwrap();
+        assert!(link.is_connected() && link.connected_handle().load(Ordering::Acquire));
+        assert!(!link.is_listening() && !link.listening_handle().load(Ordering::Acquire));
+        link.disconnect();
+    }
+
+    /// Larger than a loopback socket's send buffer (4 MiB at most under
+    /// Linux defaults), so no single write takes it whole.
+    const PAST_A_SEND_BUFFER: usize = 8 << 20;
+
+    /// Dials per case in the tests of a stream that ends at once.
+    const DIAL_ROUNDS: usize = 50;
+
+    /// A peer that accepts every dial and hangs up at once.
+    async fn hang_up_on_every_dial() -> std::net::SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = listener.accept().await {
+                drop(sock);
+            }
+        });
+        addr
+    }
+
+    /// @test A dialed stream whose peer hangs up at once reads down.
+    /// The store that marks it connected comes before the reader
+    /// starts, so the reader's clear at end of stream is the last
+    /// word even when it runs beside connect on another worker. Two
+    /// cases, each dialed repeatedly: no init sequence, and a first
+    /// step delayed past the round. That step keeps the runner from
+    /// clearing the flag itself, and copying its large payload for
+    /// the runner is work connect does after the reader has started:
+    /// a window in which a store made after the tasks start would
+    /// land after the reader's clear and leave a dead link connected.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tcp_dial_whose_peer_hangs_up_at_once_reads_down() {
+        let addr = hang_up_on_every_dial().await;
+        let quiet = InitStep {
+            name: "quiet".into(),
+            delay_ms: 60_000,
+            bytes: vec![0; PAST_A_SEND_BUFFER],
+        };
+        for (case, init) in [
+            ("no init sequence", Vec::new()),
+            ("a quiet first step", vec![quiet]),
+        ] {
+            let (push_tx, _) = broadcast::channel(4);
+            let mut link = StreamLink::new(
+                Protocol::RawSlip,
+                PipelineSpec::SlipRaw { uid: Some(1) },
+                Carrier::Tcp,
+                init,
+                push_tx,
+            );
+            for round in 0..DIAL_ROUNDS {
+                link.connect(&addr.ip().to_string(), addr.port())
+                    .await
+                    .unwrap();
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+                while link.is_connected() && tokio::time::Instant::now() < deadline {
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+                assert!(
+                    !link.is_connected(),
+                    "{case}, round {round}: the peer hung up, yet the link reads connected"
+                );
+            }
+            link.disconnect();
+        }
+    }
+
+    /// @test A dial whose first init step cannot be sent reads down.
+    /// The peer hangs up at once and the step is larger than a send
+    /// buffer, so its send cannot complete and fails on the peer's
+    /// reset; the runner's teardown, like the reader's clear, comes
+    /// after the store and is the last word. A runner that finished
+    /// is one whose send failed: after its last step it parks.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tcp_dial_whose_first_init_step_cannot_be_sent_reads_down() {
+        let addr = hang_up_on_every_dial().await;
+        let (push_tx, _) = broadcast::channel(4);
+        let mut link = StreamLink::new(
+            Protocol::RawSlip,
+            PipelineSpec::SlipRaw { uid: Some(1) },
+            Carrier::Tcp,
+            vec![InitStep {
+                name: "refused".into(),
+                delay_ms: 0,
+                bytes: vec![0; PAST_A_SEND_BUFFER],
+            }],
+            push_tx,
+        );
+        let runner_finished =
+            |link: &StreamLink| link.init_handle.as_ref().is_some_and(|h| h.is_finished());
+        for round in 0..DIAL_ROUNDS {
+            link.connect(&addr.ip().to_string(), addr.port())
+                .await
+                .unwrap();
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+            while (link.is_connected() || !runner_finished(&link))
+                && tokio::time::Instant::now() < deadline
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            assert!(
+                runner_finished(&link),
+                "round {round}: the first step went out; the runner did not fail"
+            );
+            assert!(
+                !link.is_connected(),
+                "round {round}: the first init step failed, yet the link reads connected"
+            );
+        }
         link.disconnect();
     }
 
@@ -1433,6 +2233,42 @@ mod tests {
         assert!(link.is_connected() && link.is_listening());
         link.disconnect();
         assert!(!link.is_listening(), "disconnect stops the listener");
+    }
+
+    /// @test A tcp-listen link whose serving task ends with a session
+    /// attached reads neither flag: the guard clears both, as it does
+    /// for the UDP reader, so a disconnect racing an accept settles to
+    /// neither instead of a dead link that reads connected with no
+    /// listener.
+    #[tokio::test]
+    async fn tcp_listen_serving_task_ending_clears_both_flags() {
+        let probe = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let (push_tx, _) = broadcast::channel(4);
+        let mut link = StreamLink::new(
+            Protocol::CcsdsSpp,
+            PipelineSpec::Spp {
+                apid_map: HashMap::new(),
+            },
+            Carrier::TcpListen { listen_port: port },
+            Vec::new(),
+            push_tx,
+        );
+        connect_within(&mut link, "0.0.0.0", 0).await.unwrap();
+        let _peer = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        assert!(
+            wait_until(|| link.is_connected()).await,
+            "the session attached"
+        );
+        let (connected, listening) = (link.connected_handle(), link.listening_handle());
+        link.reader_handle.as_ref().unwrap().abort();
+        assert!(
+            wait_until(|| !connected.load(Ordering::Acquire) && !listening.load(Ordering::Acquire))
+                .await,
+            "the serving task ended mid-session, yet a flag is still set"
+        );
+        link.disconnect();
     }
 
     /// @test Without a configured raw_uid, raw frames drop instead of

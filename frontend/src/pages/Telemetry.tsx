@@ -35,9 +35,11 @@ export default function TelemetryPage({
   const [connected, setConnected] = useState(false);
   // `connected` above means samples are arriving on the live stream; the
   // link itself can be up with nothing to push, and that is not "off".
+  // Neither is a listening link, bound and waiting for its target.
   const { data: targets } = useTargets();
-  const linkUp =
-    targets?.find((t) => t.id === selectedTarget)?.connected ?? false;
+  const link = targets?.find((t) => t.id === selectedTarget);
+  const linkUp = link?.connected ?? false;
+  const linkListening = !linkUp && (link?.listening ?? false);
   const [sampleCount, setSampleCount] = useState(0);
   const [pickerFilter, setPickerFilter] = useState("");
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
@@ -677,7 +679,9 @@ export default function TelemetryPage({
                   : "var(--color-ok)"
                 : linkUp
                   ? "var(--color-text-secondary)"
-                  : "var(--color-crit)",
+                  : linkListening
+                    ? "var(--color-warn)"
+                    : "var(--color-crit)",
             }}
           >
             <div
@@ -689,13 +693,17 @@ export default function TelemetryPage({
                     : "var(--color-ok)"
                   : linkUp
                     ? "var(--color-text-muted)"
-                    : "var(--color-crit)",
+                    : linkListening
+                      ? "var(--color-warn)"
+                      : "var(--color-crit)",
               }}
             />
             {!connected
               ? linkUp
                 ? "No data"
-                : "Off"
+                : linkListening
+                  ? "Listening"
+                  : "Off"
               : paused
                 ? "Paused"
                 : "Live"}
@@ -917,7 +925,9 @@ export default function TelemetryPage({
                 ? "Waiting for channels..."
                 : linkUp
                   ? "Connected -- no telemetry arriving"
-                  : "Not connected"}
+                  : linkListening
+                    ? "Listening for the target"
+                    : "Not connected"}
             </div>
           )}
         </div>

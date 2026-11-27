@@ -928,7 +928,9 @@ export default function DashboardPage({
             color: "var(--color-text-muted)",
           }}
         >
-          Connect to view health data
+          {isListening
+            ? "Health data appears once the target connects"
+            : "Connect to view health data"}
         </div>
       ) : null}
 
