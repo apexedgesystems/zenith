@@ -32,14 +32,15 @@ architecture review; work before that is the v0.0.1 tag.
   (`0x10`, `Infinity`). A tunable update refuses an integer outside its
   field's range (300 for a uint8 used to be written as 44), a bool other
   than 0 or 1, and a float32 beyond its range (written as infinity).
-  Enter a value the field holds; Raw Mode still sends a payload as
-  typed in hex.
+  Tunables refuses a 64-bit integer that is not a whole decimal or `0x`
+  number in its field's range, such as `1e3` or `1.0`. Enter a value the
+  field holds; Raw Mode still sends a payload as typed in hex.
   ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - API clients: a tunable read, `GET /api/targets/{id}/params/{uid}`,
   gives each 8-byte integer field (int64 and uint64) as a string holding
-  its exact decimal value, `"18446744073709551615"`, instead of a number,
-  which a browser's JSON rounds past 2^53. An update takes such a field
-  as that string, a `0x` hex string or a JSON integer, each read
+  its exact decimal value, `"18446744073709551615"`, instead of a
+  number, which a browser's JSON rounds past 2^53. An update takes such
+  a field as that string, a `0x` hex string or a JSON integer, each read
   exactly; a fraction, an exponent, a value outside the type or a
   hex-bytes string is refused with 400 naming the field, and a string of
   digits is always decimal.
@@ -147,9 +148,8 @@ architecture review; work before that is the v0.0.1 tag.
   `audit_retention_days = 0` keeps the audit log, instead of deleting
   all of it every minute.
   ([#70](https://github.com/apexedgesystems/zenith/pull/70))
-- Tunables shows bool and int64 fields as values instead of hex (an
-  int64 exactly, as Breaking describes), and reads and writes a
-  big-endian dictionary's fields in that byte order.
+- Tunables shows bool and int64 fields as values instead of hex, and
+  reads and writes a big-endian dictionary's fields in that byte order.
   ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - Tunables applies a block holding arrays, strings or other fields it
   shows as hex instead of refusing the update: each such field takes
@@ -160,6 +160,14 @@ architecture review; work before that is the v0.0.1 tag.
   whatever its type: a double, which the server could read back a unit
   in the last place off, now keeps its bytes too. A bool holding a value
   other than 0 or 1 is refused instead, as Breaking describes.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- Tunables keeps 64-bit integer fields exact: an unedited Apply writes
+  back the value read, and a value typed past 2^53 is written as typed
+  instead of rounded, including in nested and variable-length blocks.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- Tunables shows field types, and checks 64-bit edits, for a component
+  with more than one tunable struct, such as the executive, from the
+  struct its values were read with.
   ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - `zenith --hash-password` hashes the password as typed, edge spaces
   included, as sign-in compares it; only the line ending is removed.
@@ -207,8 +215,9 @@ architecture review; work before that is the v0.0.1 tag.
   Listening or No data instead.
   ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - Tunables shows and applies only the selected component's values: a
-  slow read of the component left behind no longer replaces them, and
-  Apply writes to the component the values were read from.
+  slow read, or a slow apply's answer, for the component left behind no
+  longer replaces them, and Apply writes to the component the values
+  were read from.
   ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - The chart's hover readout shows no value for a channel before its
   first sample or after its last, instead of extrapolating one.
