@@ -152,7 +152,7 @@ ELF ident) decode correctly with zero configuration.
 | Frontend      | React 19, TypeScript strict, Canvas API                                                    |
 | Storage       | SQLite (WAL mode) with read connection pool (1 writer + N readers)                         |
 | Protocol      | APROTO over TCP + SLIP framing                                                             |
-| Tests         | `cargo test --lib --bins` (199 + 21 tests) + Vitest with React Testing Library (104 tests) |
+| Tests         | `cargo test --lib --bins` (202 + 25 tests) + Vitest with React Testing Library (104 tests) |
 | Benches       | criterion + pprof flamegraphs                                                              |
 | Auth          | Console sign-in with server-side sessions; JWT bearer tokens for API clients (default off) |
 | Rate limiting | Per-IP token bucket on POST endpoints (when auth is on)                                    |
@@ -361,7 +361,7 @@ make run
 | `make stop`          | Stop the running container                                                                                      |
 | `make dev`           | Build + run in foreground (logs to stdout)                                                                      |
 | `make test`          | Run **both** backend and frontend test suites                                                                   |
-| `make test-backend`  | Backend only: the library's and the server's tests (currently 199 + 21)                                         |
+| `make test-backend`  | Backend only: the library's and the server's tests (currently 202 + 25)                                         |
 | `make test-frontend` | Frontend only: `vitest run` (currently 104 tests)                                                               |
 | `make coverage`      | Both suites once, instrumented; per-file tables and reports in `coverage/` (see docs/TESTING.md)                |
 | `make bench`         | Run criterion benches (`protocol`, `storage`, `decoder`)                                                        |
