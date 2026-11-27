@@ -1,5 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, screen } from "@testing-library/react";
+import {
+  json,
+  renderWithQuery,
+  stubFetch,
+  target,
+  type FetchStub,
+} from "../test/helpers";
 
 /* The telemetry page's live stream, driven through a fake WebSocket:
  * a close with the session-end code is not a dropped link and must not
@@ -29,8 +36,7 @@ class FakeSocket {
   }
 }
 
-const json = (v: unknown) => new Response(JSON.stringify(v), { status: 200 });
-let calls: string[] = [];
+let server: FetchStub;
 let stop: (() => void) | null = null;
 /** The link state the target list reports for target-0; null answers
  *  the target list read with 404, so the link reads as down. */
@@ -42,25 +48,17 @@ async function renderPage() {
   vi.resetModules();
   const { session } = await import("../api/session");
   const { DialogProvider } = await import("../components/dialogs");
-  const { QueryClient, QueryClientProvider } = await import(
-    "@tanstack/react-query"
-  );
   const { default: TelemetryPage } = await import("./Telemetry");
-  // The page reads the target list through a query hook; the fake
-  // server answers it from `linkConnected`.
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
   stop = session.start(new EventTarget());
   await act(async () => {
     await vi.advanceTimersByTimeAsync(0); // the session answers: auth off
   });
-  render(
-    <QueryClientProvider client={queryClient}>
-      <DialogProvider>
-        <TelemetryPage selectedTarget="target-0" />
-      </DialogProvider>
-    </QueryClientProvider>,
+  // The page reads the target list through a query hook; the fake
+  // server answers it from `linkConnected`.
+  renderWithQuery(
+    <DialogProvider>
+      <TelemetryPage selectedTarget="target-0" />
+    </DialogProvider>,
   );
   await act(async () => {
     await vi.advanceTimersByTimeAsync(0);
@@ -68,46 +66,31 @@ async function renderPage() {
 }
 
 const sessionReads = () =>
-  calls.filter((c) => c === "GET /api/auth/session").length;
+  server.calls().filter((c) => c === "GET /api/auth/session").length;
 
 beforeEach(() => {
   vi.useFakeTimers();
   FakeSocket.opened = [];
-  calls = [];
   linkConnected = null;
   linkListening = false;
   vi.stubGlobal("WebSocket", FakeSocket);
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const path = String(input);
-      calls.push(`${init?.method ?? "GET"} ${path}`);
-      if (path === "/api/auth/session") return json({ auth_enabled: false });
-      if (path.endsWith("/telemetry/layouts")) return json({ layouts: [] });
-      if (path === "/api/targets" && linkConnected !== null) {
-        return json({
-          targets: [
-            {
-              id: "target-0",
-              name: "Target",
-              host: "127.0.0.1",
-              port: 9000,
-              connected: linkConnected,
-              listening: linkListening,
-            },
-          ],
-        });
-      }
-      return new Response("not found", { status: 404 });
-    }),
-  );
+  server = stubFetch(({ path }) => {
+    if (path === "/api/auth/session") return json({ auth_enabled: false });
+    if (path.endsWith("/telemetry/layouts")) return json({ layouts: [] });
+    if (path === "/api/targets" && linkConnected !== null) {
+      return json({
+        targets: [
+          target({ connected: linkConnected, listening: linkListening }),
+        ],
+      });
+    }
+    return undefined;
+  });
 });
 
 afterEach(() => {
   stop?.();
   stop = null;
-  vi.useRealTimers();
-  vi.unstubAllGlobals();
 });
 
 describe("Telemetry page live stream", () => {
@@ -148,12 +131,6 @@ describe("Telemetry page status", () => {
     value: 1.5,
   };
 
-  it("reads No data while the link is up and no sample has arrived", async () => {
-    linkConnected = true;
-    await renderPage();
-    expect(screen.getByText("No data")).toBeInTheDocument();
-  });
-
   it("reads Live from the first sample on the stream", async () => {
     linkConnected = true;
     await renderPage();
@@ -179,9 +156,14 @@ describe("Telemetry page status", () => {
     expect(screen.getByText("Live")).toBeInTheDocument();
   });
 
-  it("reads Off while the link is down", async () => {
-    linkConnected = false;
+  it("reads Off once the target list reports the link down", async () => {
+    linkConnected = true;
     await renderPage();
+    expect(screen.getByText("No data")).toBeInTheDocument();
+    linkConnected = false;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_100); // past the next target list read
+    });
     expect(screen.getByText("Off")).toBeInTheDocument();
     expect(screen.queryByText("No data")).not.toBeInTheDocument();
   });

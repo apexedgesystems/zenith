@@ -1,5 +1,5 @@
-/* Pure helpers for working with the Target list. Extracted from App.tsx
-   so they can be unit-tested in isolation. */
+/* A target as the target list serves it, and the byte and count
+   formatters the sidebar and the Storage page share. */
 import type { HealthRule } from "./health";
 
 export interface Target {
@@ -30,29 +30,4 @@ export function formatCount(n: number): string {
   if (n < 1000) return String(n);
   if (n < 1_000_000) return `${(n / 1000).toFixed(1)}K`;
   return `${(n / 1_000_000).toFixed(1)}M`;
-}
-
-/**
- * Shallow-equal two target arrays by the fields the UI actually uses.
- * Used by the targets-polling effect to skip state updates when the
- * server response hasn't changed -- avoids re-rendering every page on
- * the 3-second poll interval.
- */
-export function targetsEqual(a: Target[], b: Target[]): boolean {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) {
-    const x = a[i];
-    const y = b[i];
-    if (
-      x.id !== y.id ||
-      x.name !== y.name ||
-      x.host !== y.host ||
-      x.port !== y.port ||
-      x.connected !== y.connected ||
-      (x.listening ?? false) !== (y.listening ?? false)
-    ) {
-      return false;
-    }
-  }
-  return true;
 }

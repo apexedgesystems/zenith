@@ -1,11 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { healthKey, isBadValue, type HealthRule } from "./health";
-
-describe("healthKey", () => {
-  it("lowercases and strips underscores", () => {
-    expect(healthKey("Last_Cmd_Result")).toBe("lastcmdresult");
-  });
-});
+import { isBadValue, type HealthRule } from "./health";
 
 describe("isBadValue", () => {
   const rules: HealthRule[] = [
@@ -16,9 +10,10 @@ describe("isBadValue", () => {
     { field: "temp", op: "gt", value: 85 },
     { field: "fuel", op: "le", value: 5 },
   ];
-  it("treats a bare-name rule as nonzero-bad", () => {
+  it("treats a bare-name rule as nonzero-bad, whatever the field's case and underscores", () => {
     expect(isBadValue("is_slipping", 0, rules)).toBe(false);
     expect(isBadValue("is_slipping", 1, rules)).toBe(true);
+    expect(isBadValue("Is_Slipping", 1, rules)).toBe(true);
   });
   it("evaluates each comparison at its boundary", () => {
     expect(isBadValue("last_cmd_result", 1, rules)).toBe(false);

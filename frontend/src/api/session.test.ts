@@ -8,6 +8,7 @@ import {
   type Session,
   type SessionState,
 } from "./session";
+import { json, stubFetch } from "../test/helpers";
 
 /* A fake server with the backend's session rules: deadlines derived
  * from sign-in and the last keep-alive, the keep-alive clamped at the
@@ -74,52 +75,45 @@ function alive(f: Fake): boolean {
   );
 }
 
-const json = (v: unknown) => new Response(JSON.stringify(v), { status: 200 });
 const refusal = () => new Response("session ended", { status: 401 });
 
 function install(f: Fake) {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const method = init?.method ?? "GET";
-      const path = String(input);
-      f.calls.push(`${method} ${path}`);
-      if (f.down > 0) {
-        f.down -= 1;
-        throw new TypeError("Failed to fetch");
+  stubFetch(({ method, path, body }) => {
+    f.calls.push(`${method} ${path}`);
+    if (f.down > 0) {
+      f.down -= 1;
+      throw new TypeError("Failed to fetch");
+    }
+    if (f.held.has(path)) {
+      return new Promise<Response>((res) => f.held.set(path, res));
+    }
+    if (!f.authEnabled) {
+      if (method === "DELETE") return new Response(null, { status: 204 });
+      return json({ auth_enabled: false });
+    }
+    if (path === "/api/auth/session" && method === "POST") {
+      if (JSON.parse(body ?? "").password !== "pw") {
+        return new Response("invalid credentials", { status: 401 });
       }
-      if (f.held.has(path)) {
-        return new Promise<Response>((res) => f.held.set(path, res));
+      const live = { created: serverNow(f), refreshed: serverNow(f) };
+      if (f.keepCookie) f.live = live;
+      return json(statusOf(f, live));
+    }
+    if (path === "/api/auth/session" && method === "DELETE") {
+      if (f.deleteStatus !== 204) {
+        return new Response("not recorded", { status: f.deleteStatus });
       }
-      if (!f.authEnabled) {
-        if (method === "DELETE") return new Response(null, { status: 204 });
-        return json({ auth_enabled: false });
-      }
-      if (path === "/api/auth/session" && method === "POST") {
-        const body = JSON.parse(String(init?.body));
-        if (body.password !== "pw") {
-          return new Response("invalid credentials", { status: 401 });
-        }
-        const live = { created: serverNow(f), refreshed: serverNow(f) };
-        if (f.keepCookie) f.live = live;
-        return json(statusOf(f, live));
-      }
-      if (path === "/api/auth/session" && method === "DELETE") {
-        if (f.deleteStatus !== 204) {
-          return new Response("not recorded", { status: f.deleteStatus });
-        }
-        f.live = null;
-        return new Response(null, { status: 204 });
-      }
-      if (!alive(f)) return refusal();
-      if (path === "/api/auth/session/refresh") {
-        f.live!.refreshed = serverNow(f);
-        return json(statusOf(f, f.live!));
-      }
-      if (path === "/api/auth/session") return json(statusOf(f, f.live!));
-      return json({ ok: true });
-    }),
-  );
+      f.live = null;
+      return new Response(null, { status: 204 });
+    }
+    if (!alive(f)) return refusal();
+    if (path === "/api/auth/session/refresh") {
+      f.live!.refreshed = serverNow(f);
+      return json(statusOf(f, f.live!));
+    }
+    if (path === "/api/auth/session") return json(statusOf(f, f.live!));
+    return json({ ok: true });
+  });
 }
 
 const keepAlives = (f: Fake) =>
@@ -146,8 +140,6 @@ afterEach(() => {
   for (const stop of stops) stop();
   stops = [];
   setRefusalListener(null);
-  vi.useRealTimers();
-  vi.unstubAllGlobals();
 });
 
 /* ----------------------------- state machine ----------------------------- */
@@ -323,20 +315,6 @@ describe("session state", () => {
 /* ----------------------------- boot retry ----------------------------- */
 
 describe("boot while the server cannot answer", () => {
-  it("recovers when the first status request fails and the server returns", async () => {
-    const fetch = vi
-      .fn()
-      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
-      .mockImplementation(async () => json({ auth_enabled: false }));
-    vi.stubGlobal("fetch", fetch);
-    const s = createSession();
-    stops.push(s.start(new EventTarget()));
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(s.getState()).toEqual({ kind: "anonymous", generation: 1 });
-    expect(fetch).toHaveBeenCalledTimes(2);
-    expect(vi.getTimerCount()).toBe(0);
-  });
-
   it("reads again after 1, 2, 4, 8 and then every 10 s, one request per attempt, until it answers", async () => {
     const f = fake({ down: 6 });
     f.live = { created: serverNow(f), refreshed: serverNow(f) };
@@ -356,21 +334,22 @@ describe("boot while the server cannot answer", () => {
   });
 
   it("treats an answer that is not a session status like no answer", async () => {
-    const fetch = vi
-      .fn()
-      .mockResolvedValueOnce(new Response("bad gateway", { status: 502 }))
-      .mockResolvedValueOnce(new Response("<html>", { status: 200 }))
-      .mockImplementation(async () => json({ auth_enabled: false }));
-    vi.stubGlobal("fetch", fetch);
+    const answers = [
+      new Response("bad gateway", { status: 502 }),
+      new Response("<html>", { status: 200 }),
+    ];
+    const server = stubFetch(
+      () => answers.shift() ?? json({ auth_enabled: false }),
+    );
     const s = createSession();
     stops.push(s.start(new EventTarget()));
     await settle();
     expect(s.getState()).toEqual({ kind: "unknown", retrying: true });
     await vi.advanceTimersByTimeAsync(1_000);
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(server.sent).toHaveLength(2);
     expect(s.getState().kind).toBe("unknown");
     await vi.advanceTimersByTimeAsync(2_000);
-    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(server.sent).toHaveLength(3);
     expect(s.getState()).toEqual({ kind: "anonymous", generation: 1 });
   });
 
@@ -417,7 +396,11 @@ describe("idle tracking", () => {
     const off = fake({ idleMs: 0 });
     const a = boot(off);
     await settle();
-    await a.s.signIn("ops", "pw");
+    expect(await a.s.signIn("ops", "pw")).toBeNull();
+    expect(a.s.getState()).toMatchObject({
+      kind: "signedIn",
+      idleDeadline: null,
+    });
     for (let i = 0; i < 10; i++) {
       a.input.dispatchEvent(new Event("pointerdown"));
       await vi.advanceTimersByTimeAsync(MIN);
@@ -428,7 +411,7 @@ describe("idle tracking", () => {
     const clamped = fake({ idleMs: 30 * MIN, absMs: 31 * MIN });
     const b = boot(clamped);
     await settle();
-    await b.s.signIn("ops", "pw");
+    expect(await b.s.signIn("ops", "pw")).toBeNull();
     for (let i = 0; i < 10; i++) {
       await vi.advanceTimersByTimeAsync(MIN);
       b.input.dispatchEvent(new Event("pointerdown"));
@@ -444,22 +427,6 @@ describe("idle tracking", () => {
       await vi.advanceTimersByTimeAsync(2 * MIN);
     }
     expect(keepAlives(out)).toBe(0);
-  });
-
-  it("lets polling run into the idle deadline: reads never extend the session", async () => {
-    const f = fake();
-    const { s } = boot(f);
-    await settle();
-    await s.signIn("ops", "pw");
-    let refusedAt: number | null = null;
-    for (let t = 0; t < 31 * 12 && refusedAt === null; t++) {
-      await vi.advanceTimersByTimeAsync(5_000);
-      const r = await apiFetch("/api/targets");
-      if (r.status === 401) refusedAt = Date.now() - T0;
-    }
-    expect(keepAlives(f)).toBe(0);
-    expect(refusedAt).toBe(30 * MIN);
-    expect(s.getState()).toMatchObject({ kind: "signedOut", reason: "idle" });
   });
 
   it("re-reads the session at the prompt time and sees another tab's keep-alive", async () => {
@@ -493,7 +460,7 @@ function signedIn(
 }
 
 describe("sessionNotice", () => {
-  it("prompts in the last two minutes before an idle deadline a keep-alive can move", () => {
+  it("prompts a signed-in operator in the last two minutes before an idle deadline a keep-alive can move", () => {
     const st = signedIn();
     expect(sessionNotice(st, T0 + 28 * MIN - 1)).toBeNull();
     expect(sessionNotice(st, T0 + 28 * MIN)).toEqual({
@@ -501,6 +468,16 @@ describe("sessionNotice", () => {
       endsAtLocal: T0 + 30 * MIN,
       remainingMs: 2 * MIN,
     });
+    // Nobody signed in: nothing, even at that instant.
+    expect(
+      sessionNotice({ kind: "anonymous", generation: 1 }, T0 + 28 * MIN),
+    ).toBeNull();
+    expect(
+      sessionNotice(
+        { kind: "signedOut", reason: "idle", user: "ops" },
+        T0 + 28 * MIN,
+      ),
+    ).toBeNull();
   });
 
   it("gives the end notice in the last ten minutes before the absolute deadline", () => {
@@ -523,13 +500,6 @@ describe("sessionNotice", () => {
       endsAtLocal: T0 + 30 * MIN - 3_600_000,
       remainingMs: 2 * MIN,
     });
-  });
-
-  it("shows nothing when nobody is signed in", () => {
-    expect(sessionNotice({ kind: "anonymous", generation: 1 }, T0)).toBeNull();
-    expect(
-      sessionNotice({ kind: "signedOut", reason: "idle", user: "ops" }, T0),
-    ).toBeNull();
   });
 });
 

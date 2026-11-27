@@ -1,15 +1,13 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { act, render, screen, waitFor, within } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import { act, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { json, renderWithQuery, stubFetch, target } from "./test/helpers";
 
 /* The session gate, end to end in the DOM. Every test loads a fresh
  * module graph, so each gets its own session owner and choke point. */
 
-type Handler = (method: string, path: string) => Response;
-
-const json = (v: unknown, status = 200) =>
-  new Response(JSON.stringify(v), { status });
+/** The fake server: an answer, or undefined for a 404. */
+type Handler = (method: string, path: string) => Response | undefined;
 
 const live = {
   auth_enabled: true,
@@ -20,43 +18,25 @@ const live = {
 };
 
 /** Answers for the data the shell polls with no targets configured. */
-function data(path: string): Response {
+function data(path: string): Response | undefined {
   if (path === "/api/targets") return json({ targets: [] });
   if (path === "/api/metrics") return json({ targets: {} });
-  return new Response("not found", { status: 404 });
+  return undefined;
 }
 
 async function renderApp(handler: Handler) {
   vi.resetModules();
-  const calls: string[] = [];
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      const method = init?.method ?? "GET";
-      const path = String(input);
-      calls.push(`${method} ${path}`);
-      return handler(method, path);
-    }),
-  );
+  const server = stubFetch(({ method, path }) => handler(method, path));
   const { default: App } = await import("./App");
   const { DialogProvider } = await import("./components/dialogs");
   const { apiFetch } = await import("./api/apiFetch");
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  render(
-    <QueryClientProvider client={client}>
-      <DialogProvider>
-        <App />
-      </DialogProvider>
-    </QueryClientProvider>,
+  renderWithQuery(
+    <DialogProvider>
+      <App />
+    </DialogProvider>,
   );
-  return { calls, apiFetch };
+  return { calls: server.calls, apiFetch };
 }
-
-afterEach(() => {
-  vi.unstubAllGlobals();
-});
 
 describe("App session gate", () => {
   it("with auth on and no session shows only the login page and asks for no data", async () => {
@@ -66,7 +46,7 @@ describe("App session gate", () => {
     expect(await screen.findByLabelText("Password")).toBeInTheDocument();
     expect(screen.queryByRole("link", { name: "Dashboard" })).toBeNull();
     await act(() => new Promise((r) => setTimeout(r, 200)));
-    expect(calls).toEqual(["GET /api/auth/session"]);
+    expect(calls()).toEqual(["GET /api/auth/session"]);
   });
 
   it("with auth off renders the shell after one session call and never a login", async () => {
@@ -81,7 +61,7 @@ describe("App session gate", () => {
     await act(() => new Promise((r) => setTimeout(r, 200)));
     expect(screen.queryByLabelText("Password")).toBeNull();
     expect(screen.queryByRole("button", { name: "Sign out" })).toBeNull();
-    expect(calls.filter((c) => c.includes("/api/auth/"))).toEqual([
+    expect(calls().filter((c) => c.includes("/api/auth/"))).toEqual([
       "GET /api/auth/session",
     ]);
   });
@@ -108,51 +88,13 @@ describe("App session gate", () => {
       ),
     ).toBeInTheDocument();
     expect(screen.queryByText("Connecting to the server")).toBeNull();
-    expect(calls.filter((c) => c.includes("/api/auth/"))).toEqual([
+    expect(calls().filter((c) => c.includes("/api/auth/"))).toEqual([
       "GET /api/auth/session",
       "GET /api/auth/session",
     ]);
   });
 
-  it("signed in, shows who and a way to sign out", async () => {
-    await renderApp((_method, path) =>
-      path === "/api/auth/session" ? json(live) : data(path),
-    );
-    expect(
-      await screen.findByRole("button", { name: "Sign out" }),
-    ).toBeInTheDocument();
-    expect(screen.getByText("ops")).toBeInTheDocument();
-  });
-
-  it("when the session ends under the shell, signs in again over it without resending", async () => {
-    let ended = false;
-    const { calls, apiFetch } = await renderApp((method, path) => {
-      if (ended && !(path === "/api/auth/session" && method === "POST")) {
-        return new Response("session ended", { status: 401 });
-      }
-      return path === "/api/auth/session" ? json(live) : data(path);
-    });
-    await screen.findByRole("button", { name: "Sign out" });
-    ended = true;
-    await act(async () => {
-      await apiFetch("/api/targets/t/command", { method: "POST" });
-    });
-    const dialog = await screen.findByRole("dialog", { name: "Sign in again" });
-    expect(
-      within(dialog).getByText(/Your session ended\./),
-    ).toBeInTheDocument();
-    // The shell is still mounted underneath, out of view.
-    const nav = screen.getByText("Dashboard", { selector: "a" });
-    expect(nav).toBeInTheDocument();
-    expect(nav).not.toBeVisible();
-    await waitFor(() =>
-      expect(
-        calls.filter((c) => c === "POST /api/targets/t/command"),
-      ).toHaveLength(1),
-    );
-  });
-
-  it("keeps the page unreadable under the sign-in form, with what was typed, and shows it again after signing in", async () => {
+  it("shows who is signed in; when the session ends, keeps the page unreadable under the sign-in form, with what was typed, and shows it again after signing in", async () => {
     let ended = false;
     const { apiFetch } = await renderApp((method, path) => {
       if (path === "/api/auth/session" && method === "POST") {
@@ -163,6 +105,7 @@ describe("App session gate", () => {
       return path === "/api/auth/session" ? json(live) : data(path);
     });
     await screen.findByRole("button", { name: "Sign out" });
+    expect(screen.getByText("ops")).toBeInTheDocument();
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "+ Add Target" }));
     const typed = screen.getByPlaceholderText("Name");
@@ -174,6 +117,9 @@ describe("App session gate", () => {
     });
     const dialog = await screen.findByRole("dialog", { name: "Sign in again" });
     expect(dialog).toBeVisible();
+    expect(
+      within(dialog).getByText(/Your session ended\./),
+    ).toBeInTheDocument();
     // Nothing of the page can be read or reached while signed out...
     expect(screen.queryByRole("link", { name: "Dashboard" })).toBeNull();
     expect(screen.getByText("Dashboard", { selector: "a" })).not.toBeVisible();
@@ -219,7 +165,7 @@ describe("App session gate", () => {
       ).toBeNull(),
     );
     expect(
-      calls.filter((c) => c === "POST /api/auth/session/refresh"),
+      calls().filter((c) => c === "POST /api/auth/session/refresh"),
     ).toHaveLength(1);
   });
 
@@ -243,25 +189,17 @@ describe("App session gate", () => {
 
 describe("App sidebar link state", () => {
   it("names each target's link state on its dot, whatever the carrier", async () => {
-    const target = (id: string, connected: boolean, listening: boolean) => ({
-      id,
-      name: id,
-      host: "127.0.0.1",
-      port: 1234,
-      connected,
-      listening,
-    });
     await renderApp((_method, path) => {
       if (path.startsWith("/api/auth/")) return json({ auth_enabled: false });
       if (path === "/api/targets") {
         return json({
           targets: [
             // Heard, its socket still bound: connected wins.
-            target("target-0", true, true),
+            target({ id: "target-0", connected: true, listening: true }),
             // Bound and waiting: a tcp-listen peer that has not dialed
             // in, or a UDP target not yet heard.
-            target("target-1", false, true),
-            target("target-2", false, false),
+            target({ id: "target-1", listening: true }),
+            target({ id: "target-2" }),
           ],
         });
       }

@@ -1,8 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { beforeEach, describe, expect, it } from "vitest";
+import { screen } from "@testing-library/react";
 import { DialogProvider } from "../components/dialogs";
 import OperationsPage from "./Operations";
+import { json, renderWithQuery, stubFetch, target } from "../test/helpers";
 
 /* What the operations page says before it has a live target, for the
  * link state the target list reports. Every other read answers 404. */
@@ -10,42 +10,20 @@ import OperationsPage from "./Operations";
 let link = { connected: false, listening: false };
 
 function renderPage() {
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  render(
-    <QueryClientProvider client={client}>
-      <DialogProvider>
-        <OperationsPage selectedTarget="target-1" />
-      </DialogProvider>
-    </QueryClientProvider>,
+  renderWithQuery(
+    <DialogProvider>
+      <OperationsPage selectedTarget="target-1" />
+    </DialogProvider>,
   );
 }
 
 beforeEach(() => {
   link = { connected: false, listening: false };
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async (input: RequestInfo | URL) => {
-      if (String(input) === "/api/targets") {
-        const target = {
-          id: "target-1",
-          name: "Target",
-          host: "127.0.0.1",
-          port: 1234,
-          ...link,
-        };
-        return new Response(JSON.stringify({ targets: [target] }), {
-          status: 200,
-        });
-      }
-      return new Response("not found", { status: 404 });
-    }),
+  stubFetch(({ path }) =>
+    path === "/api/targets"
+      ? json({ targets: [target({ id: "target-1", ...link })] })
+      : undefined,
   );
-});
-
-afterEach(() => {
-  vi.unstubAllGlobals();
 });
 
 describe("Operations page link state", () => {

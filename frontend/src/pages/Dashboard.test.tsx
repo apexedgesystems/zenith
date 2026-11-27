@@ -1,45 +1,27 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { beforeEach, describe, expect, it } from "vitest";
+import { screen } from "@testing-library/react";
 import DashboardPage from "./Dashboard";
+import { renderWithQuery, stubFetch, target } from "../test/helpers";
 
 /* The dashboard's header and empty state for each link state. Every
  * data read answers 404, so the link state alone decides what shows. */
 
-const target = (connected: boolean, listening: boolean) => ({
-  id: "target-1",
-  name: "Target",
-  host: "127.0.0.1",
-  port: 1234,
-  connected,
-  listening,
-});
-
-function renderDashboard(t: ReturnType<typeof target>) {
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
-  render(
-    <QueryClientProvider client={client}>
-      <DashboardPage selectedTarget="target-1" targets={[t]} />
-    </QueryClientProvider>,
+function renderDashboard(connected: boolean, listening: boolean) {
+  renderWithQuery(
+    <DashboardPage
+      selectedTarget="target-1"
+      targets={[target({ id: "target-1", connected, listening })]}
+    />,
   );
 }
 
 beforeEach(() => {
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async () => new Response("not found", { status: 404 })),
-  );
-});
-
-afterEach(() => {
-  vi.unstubAllGlobals();
+  stubFetch();
 });
 
 describe("Dashboard link state", () => {
   it("shows a waiting link as listening and does not ask to connect it", () => {
-    renderDashboard(target(false, true));
+    renderDashboard(false, true);
     expect(screen.getByText("Listening for the target")).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Disconnect" }),
@@ -52,14 +34,14 @@ describe("Dashboard link state", () => {
   });
 
   it("asks to connect a disconnected target", () => {
-    renderDashboard(target(false, false));
+    renderDashboard(false, false);
     expect(screen.getByText("Disconnected")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Connect" })).toBeInTheDocument();
     expect(screen.getByText("Connect to view health data")).toBeInTheDocument();
   });
 
   it("reads a heard target as connected while its socket stays bound", () => {
-    renderDashboard(target(true, true));
+    renderDashboard(true, true);
     expect(screen.getByText("Connected")).toBeInTheDocument();
     expect(screen.queryByText("Listening for the target")).toBeNull();
     expect(
