@@ -4256,6 +4256,41 @@ fn spawn_sample_writer(
     });
 }
 
+/// Take every target down at the stop signal, closing connections. The
+/// write guard covers only what needs it (closing connect admission,
+/// stopping the routers and polls, collecting each link); it is dropped
+/// before waiting on any link mutex, which a connect in its dial or an
+/// upload can hold for seconds while every request needs the state's
+/// guard. A connect that completes after this sees `stopping` and tears
+/// its link down.
+async fn shut_down_targets(state: &AppState) {
+    let links: Vec<(String, Arc<Mutex<ProtocolLink>>)> = {
+        let mut st = state.write().await;
+        st.stopping = true;
+        st.targets
+            .iter_mut()
+            .map(|(id, target)| {
+                if let Some(h) = target._router_handle.take() {
+                    h.abort();
+                }
+                for h in target._poll_handles.drain(..) {
+                    h.abort();
+                }
+                (id.clone(), target.client.clone())
+            })
+            .collect()
+    };
+    for (id, client) in links {
+        // Up from our side, peer or no peer: a listening link's
+        // socket and tasks end here too.
+        let mut cli = client.lock().await;
+        if cli.state_word().is_some() {
+            cli.disconnect();
+            tracing::info!("Disconnected target {} during shutdown", id);
+        }
+    }
+}
+
 /// Time-based retention, the maintenance loop's safety net under the
 /// size cap: telemetry older than `retention_hours` goes, with its
 /// latest values. 0 keeps telemetry forever, as `audit_retention_days
@@ -4878,39 +4913,7 @@ async fn main() {
             _ = ctrl_c => tracing::info!("Received SIGINT, shutting down"),
             _ = terminate => tracing::info!("Received SIGTERM, shutting down"),
         }
-
-        // Disconnect all targets to flush telemetry and close connections.
-        // The write guard covers only what needs it (closing connect
-        // admission, stopping the routers and polls, collecting each
-        // link); it is dropped before waiting on any link mutex, which a
-        // connect in its dial or an upload can hold for seconds while
-        // every request needs the state's guard. A connect that completes
-        // after this sees `stopping` and tears its link down.
-        let links: Vec<(String, Arc<Mutex<ProtocolLink>>)> = {
-            let mut st = shutdown_state.write().await;
-            st.stopping = true;
-            st.targets
-                .iter_mut()
-                .map(|(id, target)| {
-                    if let Some(h) = target._router_handle.take() {
-                        h.abort();
-                    }
-                    for h in target._poll_handles.drain(..) {
-                        h.abort();
-                    }
-                    (id.clone(), target.client.clone())
-                })
-                .collect()
-        };
-        for (id, client) in links {
-            // Up from our side, peer or no peer: a listening link's
-            // socket and tasks end here too.
-            let mut cli = client.lock().await;
-            if cli.state_word().is_some() {
-                cli.disconnect();
-                tracing::info!("Disconnected target {} during shutdown", id);
-            }
-        }
+        shut_down_targets(&shutdown_state).await;
     });
 
     if let Err(e) = server.await {
@@ -4927,6 +4930,11 @@ async fn main() {
 mod tests {
     use super::*;
 
+    use std::future::Future;
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
+    use std::time::Duration;
+
     use axum::body::Body;
     use axum::extract::connect_info::MockConnectInfo;
     use serde_json::json;
@@ -4934,6 +4942,7 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::core::config_manager::{ComponentDict, FieldDef};
+    use crate::core::transport::StateWord;
     use crate::storage::telemetry_db::AuditEntry;
 
     /// Where every test request comes from.
@@ -5042,6 +5051,31 @@ mod tests {
             entries.reverse();
             entries
         }
+
+        async fn link(&self, id: &str) -> Arc<Mutex<ProtocolLink>> {
+            self.state.read().await.targets[id].client.clone()
+        }
+    }
+
+    /// A request with the given headers and, when there is one, a JSON
+    /// body.
+    fn request(
+        method: Method,
+        uri: &str,
+        headers: &[(&str, &str)],
+        body: Option<serde_json::Value>,
+    ) -> axum::http::Request<Body> {
+        let mut builder = axum::http::Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        match body {
+            Some(json) => builder
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json.to_string())),
+            None => builder.body(Body::empty()),
+        }
+        .unwrap()
     }
 
     /// One target as boot builds it, its link not connected.
@@ -5384,5 +5418,452 @@ mod tests {
             (status, body.as_str()),
             (StatusCode::BAD_REQUEST, "Invalid fullUid: 0xZZ")
         );
+    }
+
+    /* ---- Connect admission and shutdown ---- */
+
+    /// A context whose waker does nothing: the admission tests poll a
+    /// connect by hand, so each step it takes is one the test chose.
+    fn cx() -> Context<'static> {
+        Context::from_waker(Waker::noop())
+    }
+
+    /// A server with one apex target dialing `peer`, a loopback listener
+    /// nobody accepts on, and one poll row, so a connect that brings the
+    /// link up also starts a poll.
+    fn dialing_server() -> (std::net::TcpListener, Server) {
+        let peer = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        peer.set_nonblocking(true).unwrap();
+        let port = peer.local_addr().unwrap().port();
+        let server = Server::new(&format!(
+            r#"
+            [[targets]]
+            name = "apex"
+            host = "127.0.0.1"
+            port = {port}
+            [[targets.poll]]
+            uid = "0x00D000"
+            category = 4
+            rate_hz = 1.0
+            "#
+        ));
+        (peer, server)
+    }
+
+    /// Whether the target dialed `peer`: a connection its link opened is
+    /// queued for accept within moments of the connect returning.
+    async fn dialed(peer: &std::net::TcpListener) -> bool {
+        for _ in 0..50 {
+            match peer.accept() {
+                Ok(_) => return true,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    tokio::time::sleep(Duration::from_millis(1)).await
+                }
+                Err(e) => panic!("accept: {e}"),
+            }
+        }
+        false
+    }
+
+    /// @test Once shutdown has begun no connect is admitted: the entry
+    /// check refuses at once, without waiting for the link (held here,
+    /// as an upload holds it), and the target is never dialed.
+    #[tokio::test]
+    async fn a_connect_asked_for_once_shutdown_began_is_refused_at_entry() {
+        let (peer, server) = dialing_server();
+        server.state.write().await.stopping = true;
+        let link = server.link("target-0").await;
+        let held = link.lock().await;
+
+        let answer = pin!(do_connect_target(&server.state, "target-0")).poll(&mut cx());
+        assert!(
+            matches!(answer, Poll::Ready(Ok(ConnectAnswer::Refused))),
+            "{answer:?}"
+        );
+        drop(held);
+        assert!(!dialed(&peer).await, "a refused connect dialed the target");
+    }
+
+    /// @test A connect that waited for the link behind another caller
+    /// looks again once it holds it: shutdown began while it waited, so
+    /// it is refused and never dials, although it passed the entry check.
+    #[tokio::test]
+    async fn a_connect_that_waited_for_the_link_is_refused_once_shutdown_began() {
+        let (peer, server) = dialing_server();
+        let link = server.link("target-0").await;
+        let held = link.lock().await;
+
+        let mut connect = pin!(do_connect_target(&server.state, "target-0"));
+        assert!(
+            connect.as_mut().poll(&mut cx()).is_pending(),
+            "the connect did not wait for the link"
+        );
+        server.state.write().await.stopping = true;
+        drop(held);
+
+        assert_eq!(connect.await, Ok(ConnectAnswer::Refused));
+        assert!(
+            !dialed(&peer).await,
+            "the connect dialed once shutdown began"
+        );
+        assert_eq!(link.lock().await.state_word(), None);
+    }
+
+    /// @test A connect that completes after shutdown began is torn down
+    /// and refused: it passed both checks before shutdown began and
+    /// dialed, shutdown began before it finished, and it finds that under
+    /// the write guard, so it takes the link it brought up down again
+    /// and registers no router and no poll.
+    #[tokio::test]
+    async fn a_connect_completing_after_shutdown_began_is_torn_down_and_refused() {
+        let (peer, server) = dialing_server();
+        let state = &server.state;
+        let link = server.link("target-0").await;
+
+        // Park the connect at its second check: the link is held while
+        // it passes the entry check, the state's write guard while it
+        // takes the link.
+        let held = link.lock().await;
+        let mut connect = pin!(do_connect_target(state, "target-0"));
+        assert!(connect.as_mut().poll(&mut cx()).is_pending());
+        let guard = state.write().await;
+        drop(held);
+        assert!(connect.as_mut().poll(&mut cx()).is_pending());
+
+        // Release the second check with a writer queued behind it, the
+        // shutdown snapshot's stand-in: the connect reads shutdown not
+        // begun and dials, and the writer gets the guard before the
+        // connect's completion asks for it.
+        drop(guard);
+        let mut shutdown = pin!(state.write());
+        assert!(shutdown.as_mut().poll(&mut cx()).is_pending());
+        assert!(connect.as_mut().poll(&mut cx()).is_pending());
+        let Poll::Ready(mut st) = shutdown.as_mut().poll(&mut cx()) else {
+            panic!("the shutdown stand-in never got the guard");
+        };
+        st.stopping = true;
+        drop(st);
+
+        assert_eq!(connect.await, Ok(ConnectAnswer::Refused));
+        assert!(dialed(&peer).await, "the connect never dialed");
+        assert_eq!(
+            link.lock().await.state_word(),
+            None,
+            "the link it brought up is still up"
+        );
+        let st = state.read().await;
+        let target = &st.targets["target-0"];
+        assert!(target._router_handle.is_none(), "a router was registered");
+        assert!(target._poll_handles.is_empty(), "a poll was registered");
+    }
+
+    /// A task standing in for a router or a poll, and a receiver that
+    /// resolves once the task is cancelled and dropped.
+    fn stand_in() -> (
+        tokio::task::JoinHandle<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let (alive, gone) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _alive = alive;
+            std::future::pending::<()>().await
+        });
+        (task, gone)
+    }
+
+    /// @test The shutdown snapshot closes connect admission and stops
+    /// every target's router and polls under the write guard, then takes
+    /// each link that is up from our side down, waiting for a link an
+    /// upload holds without holding the guard, so requests are served
+    /// meanwhile. A listening link ends; a link never brought up stays
+    /// down; a connect asked for afterwards is refused.
+    #[tokio::test]
+    async fn shutdown_closes_admission_and_takes_every_link_down() {
+        let server = Server::new(
+            r#"
+            [[targets]]
+            name = "listener"
+            host = "127.0.0.1"
+            port = 9
+            protocol = "ccsds-spp"
+            carrier = "udp"
+            listen_port = 0
+            [[targets]]
+            name = "apex"
+            host = "127.0.0.1"
+            port = 9
+            "#,
+        );
+        let state = &server.state;
+        let listener = server.link("target-0").await;
+        listener.lock().await.connect("127.0.0.1", 9).await.unwrap();
+        assert_eq!(
+            listener.lock().await.state_word(),
+            Some(StateWord::Listening)
+        );
+        let (router, router_gone) = stand_in();
+        let (poll, poll_gone) = stand_in();
+        {
+            let mut st = state.write().await;
+            let target = st.targets.get_mut("target-0").unwrap();
+            target._router_handle = Some(router);
+            target._poll_handles.push(poll);
+        }
+
+        let apex = server.link("target-1").await;
+        let held = apex.lock().await;
+        let mut shutdown = pin!(shut_down_targets(state));
+        assert!(shutdown.as_mut().poll(&mut cx()).is_pending());
+        {
+            let st = state
+                .try_read()
+                .expect("the shutdown holds the state's guard while it waits for a link");
+            assert!(st.stopping);
+            assert!(st
+                .targets
+                .values()
+                .all(|t| t._router_handle.is_none() && t._poll_handles.is_empty()));
+        }
+        drop(held);
+        shutdown.await;
+
+        for (task, gone) in [("router", router_gone), ("poll", poll_gone)] {
+            let dropped = tokio::time::timeout(Duration::from_secs(1), gone).await;
+            assert!(matches!(dropped, Ok(Err(_))), "the {task} was not stopped");
+        }
+        assert_eq!(listener.lock().await.state_word(), None);
+        assert_eq!(apex.lock().await.state_word(), None);
+        assert_eq!(
+            do_connect_target(state, "target-1").await,
+            Ok(ConnectAnswer::Refused)
+        );
+    }
+
+    /* ---- Auth middleware ---- */
+
+    const SECRET: &str = "a-test-secret-of-decent-length";
+
+    /// Auth on, one apex target.
+    fn auth_on() -> String {
+        format!(
+            r#"
+            [auth]
+            enabled = true
+            secret = "{SECRET}"
+            username = "ops"
+            {APEX_TARGET}
+            "#
+        )
+    }
+
+    /// @test The auth middleware, through the server's router with auth
+    /// on. The open routes answer without a credential: health, the
+    /// bearer login, and signing in and out at the session door (the
+    /// session's status is no door). A protected route refuses no
+    /// credential, a malformed bearer token, a bearer token sent as a
+    /// query ticket, an unknown session cookie, and a bad bearer token
+    /// even beside a live cookie (the first credential present decides).
+    /// A bearer token, a session cookie (writing only from the console's
+    /// own origin) and a socket ticket on the telemetry socket pass, and
+    /// each write is audited under its credential's subject.
+    #[tokio::test]
+    async fn the_auth_middleware_admits_each_credential_only_where_it_belongs() {
+        let server = Server::new(&auth_on());
+        let now = chrono::Utc::now().timestamp();
+        let token = crate::core::auth::mint_token("api-client", SECRET, now).unwrap();
+        let bearer = format!("Bearer {token}");
+        let ticket = crate::core::auth::mint_ws_ticket("api-client", SECRET, now).unwrap();
+        let sessions = server.state.read().await.sessions.clone();
+        let (id, _) = sessions.create("ops", now_ms()).unwrap();
+        let cookie = format!("{}={id}", crate::core::session::COOKIE_NAME);
+        let upgrade = [
+            ("connection", "upgrade"),
+            ("upgrade", "websocket"),
+            ("sec-websocket-version", "13"),
+            ("sec-websocket-key", "AAAAAAAAAAAAAAAAAAAAAA=="),
+        ];
+        let socket =
+            |credential: &str| format!("/api/targets/target-0/telemetry/live?ticket={credential}");
+        let nobody = || Some(json!({ "username": "nobody", "password": "x" }));
+        let disconnect = "/api/targets/target-0/disconnect";
+        let (get, post) = (Method::GET, Method::POST);
+
+        type Row = (
+            &'static str,
+            axum::http::Request<Body>,
+            StatusCode,
+            &'static str,
+        );
+        let rows: Vec<Row> = vec![
+            (
+                "health is open",
+                request(get.clone(), "/api/health", &[], None),
+                StatusCode::OK,
+                "\"status\"",
+            ),
+            (
+                "the bearer login is open",
+                request(post.clone(), "/api/auth/login", &[], nobody()),
+                StatusCode::UNAUTHORIZED,
+                "Invalid credentials",
+            ),
+            (
+                "signing in needs no session",
+                request(post.clone(), "/api/auth/session", &[], nobody()),
+                StatusCode::UNAUTHORIZED,
+                "invalid credentials",
+            ),
+            (
+                "signing out needs no session",
+                request(Method::DELETE, "/api/auth/session", &[], None),
+                StatusCode::NO_CONTENT,
+                "",
+            ),
+            (
+                "the session's status is no door",
+                request(get.clone(), "/api/auth/session", &[], None),
+                StatusCode::UNAUTHORIZED,
+                "missing token or session",
+            ),
+            (
+                "no credential",
+                request(get.clone(), "/api/targets", &[], None),
+                StatusCode::UNAUTHORIZED,
+                "missing token or session",
+            ),
+            (
+                "a malformed bearer token",
+                request(
+                    get.clone(),
+                    "/api/targets",
+                    &[("authorization", "Bearer not-a-token")],
+                    None,
+                ),
+                StatusCode::UNAUTHORIZED,
+                "invalid token",
+            ),
+            (
+                "a bearer token as a query ticket",
+                request(get.clone(), &socket(&token), &upgrade, None),
+                StatusCode::UNAUTHORIZED,
+                "query credentials must be ws tickets",
+            ),
+            (
+                "an unknown session cookie",
+                request(
+                    get.clone(),
+                    "/api/targets",
+                    &[("cookie", "zenith_session=unknown")],
+                    None,
+                ),
+                StatusCode::UNAUTHORIZED,
+                "session ended or unknown",
+            ),
+            (
+                "a bad bearer token beside a live cookie",
+                request(
+                    get.clone(),
+                    "/api/targets",
+                    &[("authorization", "Bearer not-a-token"), ("cookie", &cookie)],
+                    None,
+                ),
+                StatusCode::UNAUTHORIZED,
+                "invalid token",
+            ),
+            (
+                "a bearer token",
+                request(
+                    get.clone(),
+                    "/api/targets",
+                    &[("authorization", &bearer)],
+                    None,
+                ),
+                StatusCode::OK,
+                "\"targets\"",
+            ),
+            (
+                "a session cookie",
+                request(get.clone(), "/api/targets", &[("cookie", &cookie)], None),
+                StatusCode::OK,
+                "\"targets\"",
+            ),
+            (
+                "a session write from another site",
+                request(
+                    post.clone(),
+                    disconnect,
+                    &[("cookie", &cookie), ("sec-fetch-site", "cross-site")],
+                    None,
+                ),
+                StatusCode::FORBIDDEN,
+                "cross-origin request with a session cookie refused",
+            ),
+            (
+                "a session write from the console",
+                request(
+                    post.clone(),
+                    disconnect,
+                    &[("cookie", &cookie), ("sec-fetch-site", "same-origin")],
+                    None,
+                ),
+                StatusCode::OK,
+                "disconnected",
+            ),
+            (
+                "a bearer write",
+                request(
+                    post.clone(),
+                    disconnect,
+                    &[("authorization", &bearer)],
+                    None,
+                ),
+                StatusCode::OK,
+                "disconnected",
+            ),
+            (
+                "a ticket on the telemetry socket",
+                request(get.clone(), &socket(&ticket), &upgrade, None),
+                StatusCode::UPGRADE_REQUIRED,
+                "",
+            ),
+        ];
+        for (label, request, status, fragment) in rows {
+            let (got, body) = server.call(request).await;
+            assert_eq!(got, status, "{label}: {body}");
+            assert!(body.contains(fragment), "{label}: {body}");
+        }
+
+        let audited: Vec<(String, String, String)> = server
+            .audit()
+            .into_iter()
+            .map(|e| (e.actor, e.action, e.status))
+            .collect();
+        let expected = [
+            ("(unknown user)", "sign_in", "err: invalid credentials"),
+            ("ops", "disconnect_target", "ok"),
+            ("api-client", "disconnect_target", "ok"),
+        ]
+        .map(|(actor, action, status)| (actor.into(), action.into(), status.into()));
+        assert_eq!(audited, expected);
+    }
+
+    /// @test With auth off the middleware passes every request as the
+    /// anonymous operator: no credential is asked for, and a write is
+    /// audited under "operator".
+    #[tokio::test]
+    async fn with_auth_off_every_request_is_the_operator() {
+        let server = Server::new(APEX_TARGET);
+        let (status, body) = server
+            .call(request(
+                Method::POST,
+                "/api/targets/target-0/disconnect",
+                &[],
+                None,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let audit = server.audit();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].actor, "operator");
     }
 }
