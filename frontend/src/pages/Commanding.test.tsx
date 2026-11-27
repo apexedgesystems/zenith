@@ -122,6 +122,26 @@ describe("encodeField", () => {
     ]);
   });
 
+  it("reads float and double input in decimal notation only", () => {
+    expectRows([
+      ["float", "+1.5", "0000c03f"],
+      ["float", ".5", "0000003f"],
+      ["float", "2.", "00000040"],
+      ["float", "2.5e3", "00401c45"],
+      ["double", "-1E-1", "9a9999999999b9bf"],
+    ]);
+    expectRefused([
+      ["float", "0x10"],
+      ["float", "0b101"],
+      ["float", "0o17"],
+      ["double", "0x10"],
+      ["double", "0b101"],
+      ["double", "0o17"],
+      ["float", "1.2.3"],
+      ["float", "1e"],
+    ]);
+  });
+
   it("refuses input that is not a finite binary32, naming the field and the value", () => {
     for (const value of ["ten", "Infinity", "NaN", "1e39"]) {
       const e = encodeField({ name: "a_m", type: "float" }, value);

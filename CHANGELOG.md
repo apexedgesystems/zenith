@@ -159,9 +159,12 @@ architecture review; work before that is the v0.0.1 tag.
 - Dashboard health cards for individual components load: the console
   asks for them with the uid and opcode in the hex form the command
   route reads.
-- Command forms refuse a blank field, and an integer that is not a
-  whole decimal or 0x number within its field's range, instead of
-  sending 0 or a truncated value.
+- Command forms refuse a blank field, an integer that is not a whole
+  decimal or 0x number within its field's range, and a floating-point
+  value not written in decimal notation, instead of sending 0 or a
+  truncated value.
+- A library swap whose file cannot be read is logged as failed on the
+  Operations page instead of staying pending.
 - UDP targets show listening until first contact, and TCP targets no
   longer falsely remain connected after an immediate hangup or a
   disconnect racing an incoming session. Clients of the connect

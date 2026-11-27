@@ -98,12 +98,18 @@ export type EncodedField =
   | { ok: true; hex: string }
   | { ok: false; error: string };
 
+/** A number in decimal notation: an optional sign, digits with an
+ *  optional point (or a point and digits), an optional exponent.
+ *  Number() alone also reads 0x, 0b and 0o literals and Infinity. */
+const DECIMAL_NUMBER = /^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i;
+
 /** Encode one typed form field little-endian. An unsigned integer is a
  *  whole number in range for its width, in decimal or 0x hex; float and
- *  double are the IEEE 754 binary32 and binary64 of a finite number. A
- *  blank field, any other input and any other catalog type are refused,
- *  so the form never sends a value the operator did not enter, or bytes
- *  that do not match the field's layout. */
+ *  double are the IEEE 754 binary32 and binary64 of a finite number in
+ *  decimal notation. A blank field, any other input and any other
+ *  catalog type are refused, so the form never sends a value the
+ *  operator did not enter, or bytes that do not match the field's
+ *  layout. */
 export function encodeField(
   field: CommandFieldDef,
   value: string,
@@ -142,12 +148,12 @@ export function encodeField(
     case "float":
     case "double": {
       if (text === "") return blank;
-      const n = Number(text);
+      const n = DECIMAL_NUMBER.test(text) ? Number(text) : NaN;
       const single = field.type === "float";
       if (!Number.isFinite(single ? Math.fround(n) : n)) {
         return {
           ok: false,
-          error: `field '${field.name}': '${value}' is not a finite ${field.type}`,
+          error: `field '${field.name}': '${value}' is not a finite ${field.type} in decimal notation, such as -1.5 or 2.5e3`,
         };
       }
       const buf = new ArrayBuffer(single ? 4 : 8);

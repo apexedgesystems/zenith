@@ -456,7 +456,12 @@ export default function OperationsPage({
     try {
       const encoded = await fileToBase64(swapFile);
       if ("error" in encoded) {
-        void notify(encoded.error, "Library swap");
+        // Nothing was sent: the row ends as the refusal, not pending.
+        const message = encoded.error;
+        setAudit((prev) =>
+          prev.map((e) => (e.id === id ? { ...e, status: "err", message } : e)),
+        );
+        void notify(message, "Library swap");
         return;
       }
       const base64 = encoded.base64;
