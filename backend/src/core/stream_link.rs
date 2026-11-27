@@ -1687,6 +1687,51 @@ mod tests {
         link.disconnect();
     }
 
+    /// @test A dial whose first init step cannot be sent reads down.
+    /// The peer hangs up at once and the step is larger than a send
+    /// buffer, so its send cannot complete and fails on the peer's
+    /// reset; the runner's teardown, like the reader's clear, comes
+    /// after the store and is the last word. A runner that finished
+    /// is one whose send failed: after its last step it parks.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn tcp_dial_whose_first_init_step_cannot_be_sent_reads_down() {
+        let addr = hang_up_on_every_dial().await;
+        let (push_tx, _) = broadcast::channel(4);
+        let mut link = StreamLink::new(
+            Protocol::RawSlip,
+            PipelineSpec::SlipRaw { uid: Some(1) },
+            Carrier::Tcp,
+            vec![InitStep {
+                name: "refused".into(),
+                delay_ms: 0,
+                bytes: vec![0; PAST_A_SEND_BUFFER],
+            }],
+            push_tx,
+        );
+        let runner_finished =
+            |link: &StreamLink| link.init_handle.as_ref().is_some_and(|h| h.is_finished());
+        for round in 0..DIAL_ROUNDS {
+            link.connect(&addr.ip().to_string(), addr.port())
+                .await
+                .unwrap();
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+            while (link.is_connected() || !runner_finished(&link))
+                && tokio::time::Instant::now() < deadline
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            assert!(
+                runner_finished(&link),
+                "round {round}: the first step went out; the runner did not fail"
+            );
+            assert!(
+                !link.is_connected(),
+                "round {round}: the first init step failed, yet the link reads connected"
+            );
+        }
+        link.disconnect();
+    }
+
     /// @test Init steps run in order and honor their delays: the
     /// fake target timestamps both datagrams and the second must
     /// arrive after the first by at least the declared delay (minus
