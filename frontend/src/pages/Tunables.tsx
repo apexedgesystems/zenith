@@ -109,6 +109,11 @@ export default function TunablesPage({
   const latestRead = useRef(0);
   // The reload after an apply; a new selection cancels it.
   const reloadTimer = useRef<number | undefined>(undefined);
+  // Each selection shown is numbered, and choosing another component or
+  // target, or leaving the page, ends it. An apply answered after its
+  // selection ended changes nothing: no message, and no reload of the
+  // component left over the one now shown.
+  const selection = useRef(0);
 
   // Show a read's values, with nothing typed over them.
   const showRead = (data: ParamsData | null) => {
@@ -161,7 +166,10 @@ export default function TunablesPage({
 
   useEffect(() => {
     loadParams();
-    return () => window.clearTimeout(reloadTimer.current);
+    return () => {
+      selection.current += 1;
+      window.clearTimeout(reloadTimer.current);
+    };
     // loadParams is intentionally not in deps -- it's defined every render
     // (no useCallback) and including it would loop. The function only reads
     // selectedTarget + selectedUid which are both in deps.
@@ -229,6 +237,8 @@ export default function TunablesPage({
       }
       body = { fields: applied.fields, raw_hex: params.raw_hex };
     }
+    const current = selection.current;
+    const left = () => current !== selection.current;
     setLoading(true);
     setError(null);
     setMessage(null);
@@ -243,6 +253,7 @@ export default function TunablesPage({
       );
       if (r.ok) {
         const result = await r.json();
+        if (left()) return;
         const staged = result.staged as
           | {
               step: string;
@@ -279,9 +290,12 @@ export default function TunablesPage({
           setError(`Upload failed: ${result.status_name}${verdict}`);
         }
       } else {
-        setError(await r.text());
+        const text = await r.text();
+        if (left()) return;
+        setError(text);
       }
     } catch (e: unknown) {
+      if (left()) return;
       setError(e instanceof Error ? e.message : String(e));
     }
     setLoading(false);

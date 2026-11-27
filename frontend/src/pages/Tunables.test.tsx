@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import TunablesPage from "./Tunables";
 import { bytesToHex } from "../api/decode";
@@ -27,12 +27,23 @@ const B = motor("00B000", 9.25, 7, "0000144107000000");
 /** Whether A's reads are held, and the release of the one held. */
 let holdA = false;
 let releaseA: (() => void) | null = null;
+/** Whether updates are held, and the release of the one held. */
+let holdPost = false;
+let releasePost: (() => void) | null = null;
 
 function serve() {
   holdA = false;
   releaseA = null;
+  holdPost = false;
+  releasePost = null;
   return stubFetch(({ method, path }) => {
-    if (method === "POST") return json({ status: 0, uploaded_bytes: 8 });
+    if (method === "POST") {
+      const answer = () => json({ status: 0, uploaded_bytes: 8 });
+      if (!holdPost) return answer();
+      return new Promise<Response>((resolve) => {
+        releasePost = () => resolve(answer());
+      });
+    }
     if (path === "/api/targets/t1/registry") {
       return json({
         components: [
@@ -71,6 +82,15 @@ const shown = () =>
     (i) => i.value,
   );
 
+/** The components whose values were read, in the order asked. */
+const reads = (server: FetchStub) =>
+  server.sent
+    .filter((r) => r.method === "GET" && r.path.includes("/params/"))
+    .map((r) => r.path.slice(r.path.lastIndexOf("/") + 1));
+
+/** Past the reload the page starts 500 ms after an apply. */
+const PAST_RELOAD = 1_000;
+
 describe("Tunables", () => {
   it("shows and applies only the selected component's values when an earlier read lands late", async () => {
     const server = serve();
@@ -103,6 +123,109 @@ describe("Tunables", () => {
       fields: B.fields,
       raw_hex: B.raw_hex,
     });
+  });
+
+  /** Apply A with its answer held, select B, wait for B's form, then
+   *  hand the clock to the test. */
+  async function applyAThenSelectB(): Promise<FetchStub> {
+    const server = serve();
+    renderWithQuery(<TunablesPage selectedTarget="t1" />);
+    await waitFor(() => expect(shown()).toEqual(["1.5", "100"]));
+    holdPost = true;
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(releasePost).not.toBeNull());
+    fireEvent.change(screen.getByRole("combobox"), {
+      target: { value: "00B000" },
+    });
+    await waitFor(() => expect(shown()).toEqual(["9.25", "7"]));
+    vi.useFakeTimers();
+    return server;
+  }
+
+  /** Let the held answer land, and `ms` pass after it. */
+  async function answerAndWait(ms: number) {
+    await act(async () => {
+      releasePost!();
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  }
+
+  it("shows nothing of an apply answered after another component was chosen", async () => {
+    await applyAThenSelectB();
+    await answerAndWait(0);
+    expect(screen.queryByText(/updated|applied/i)).toBeNull();
+    expect(shown()).toEqual(["9.25", "7"]);
+  });
+
+  it("does not read back the component left when its apply is answered late", async () => {
+    const server = await applyAThenSelectB();
+    await answerAndWait(PAST_RELOAD);
+    expect(reads(server)).toEqual(["00A000", "00B000"]);
+    expect(shown()).toEqual(["9.25", "7"]);
+  });
+
+  it("reports an apply of the component shown, then reloads it", async () => {
+    const server = serve();
+    renderWithQuery(<TunablesPage selectedTarget="t1" />);
+    await waitFor(() => expect(shown()).toEqual(["1.5", "100"]));
+    vi.useFakeTimers();
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(
+      screen.getByText("Parameters updated and reloaded (8 bytes uploaded)"),
+    ).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(PAST_RELOAD);
+    });
+    expect(reads(server)).toEqual(["00A000", "00A000"]);
+  });
+
+  it("reports an apply answered after a reload of the same component", async () => {
+    const server = serve();
+    renderWithQuery(<TunablesPage selectedTarget="t1" />);
+    await waitFor(() => expect(shown()).toEqual(["1.5", "100"]));
+    vi.useFakeTimers();
+    const apply = () =>
+      fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+
+    // The first apply is answered at once and reloads 500 ms later; the
+    // second is answered only after that reload.
+    apply();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    holdPost = true;
+    apply();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(PAST_RELOAD);
+    });
+    expect(reads(server)).toEqual(["00A000", "00A000"]);
+    await answerAndWait(0);
+    expect(
+      screen.getByText("Parameters updated and reloaded (8 bytes uploaded)"),
+    ).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(PAST_RELOAD);
+    });
+    expect(reads(server)).toEqual(["00A000", "00A000", "00A000"]);
+  });
+
+  it("asks for nothing more when an apply is answered after the page closed", async () => {
+    const server = serve();
+    const page = renderWithQuery(<TunablesPage selectedTarget="t1" />);
+    await waitFor(() => expect(shown()).toEqual(["1.5", "100"]));
+    holdPost = true;
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(releasePost).not.toBeNull());
+
+    // Another target or page replaces this one before the answer lands.
+    page.unmount();
+    const asked = server.calls();
+    vi.useFakeTimers();
+    await answerAndWait(PAST_RELOAD);
+    expect(server.calls()).toEqual(asked);
   });
 });
 
