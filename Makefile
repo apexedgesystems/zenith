@@ -90,6 +90,11 @@ test-frontend:
 # Coverage: each half's suite runs once, instrumented; a failing test fails
 # its target and leaves no report for that half. Reports land under
 # coverage/<half>/: summary.txt (the per-file table), lcov.info and html/.
+# Each run counts only its own execution: the backend first removes the
+# profiles and workspace builds of earlier runs (cargo llvm-cov clean
+# --workspace; the dependency builds stay), since --no-report keeps them
+# and its report would merge them, and the frontend removes its old report
+# before installing, so a failed install leaves none behind.
 # The backend measures the library's and the server binary's tests with the
 # dev image's cargo-llvm-cov; llvm-cov counts the inline #[cfg(test)] modules
 # as covered lines, so a production file's row says more than the total. The
@@ -114,6 +119,7 @@ coverage-backend:
 	$(COMPOSE) run --rm -T dev bash -c 'set -eo pipefail; cd backend; \
 		export CARGO_TARGET_DIR=target-cov; \
 		rm -rf ../coverage/backend; \
+		cargo llvm-cov clean --workspace; \
 		cargo llvm-cov --lib --bins --locked --no-report; \
 		mkdir -p ../coverage/backend; \
 		cargo llvm-cov report --lcov --output-path ../coverage/backend/lcov.info; \
@@ -126,7 +132,7 @@ coverage-backend:
 ## Measure frontend coverage: every source file under frontend/src
 coverage-frontend:
 	$(COMPOSE) run --rm -T dev bash -c \
-		'cd frontend && npm ci && npm run test -- --coverage \
+		'rm -rf coverage/frontend && cd frontend && npm ci && npm run test -- --coverage \
 			$(if $(COVERAGE_GATE),--coverage.thresholds.lines=$(COVERAGE_FRONTEND_MIN_LINE))'
 
 ## Run coverage and fail a half under its line floor (COVERAGE_BACKEND_MIN_LINE,

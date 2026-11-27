@@ -66,9 +66,13 @@ cargo bench --bench decoder -- --profile-time=10   # pprof flamegraph
 `make coverage` runs each half's suite once, instrumented. A failing
 test fails its half and leaves no report for it. Each half writes
 `summary.txt` (the per-file table), `lcov.info` and `html/` under
-`coverage/<half>/`. The floors default to 0, so `make coverage-check`
-only reports until the suites have settled; a floor then sits a few
-points under a measured value and is only raised:
+`coverage/<half>/`. A report holds only its own run: the backend half
+first removes earlier runs' profiles and workspace builds
+(`cargo llvm-cov clean --workspace`; the dependency builds stay), and
+the frontend half removes its old report before `npm ci`, so an install
+that fails leaves no report behind. The floors default to 0, so
+`make coverage-check` only reports until the suites have settled; a
+floor then sits a few points under a measured value and is only raised:
 
 ```bash
 make coverage-check COVERAGE_BACKEND_MIN_LINE=75 COVERAGE_FRONTEND_MIN_LINE=50
