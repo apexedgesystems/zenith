@@ -53,6 +53,10 @@ tempfile = "3"
 # already in the tree through axum's WebSocket support)
 tokio-tungstenite = "0.29"
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+# Requests answered by the server's router in process, for the
+# handler and middleware tests in main.rs (already in the tree
+# through axum)
+tower = { version = "0.5", features = ["util"] }
 
 [[bench]]
 name = "protocol"

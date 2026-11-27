@@ -93,6 +93,9 @@ fn default_cookie_secure() -> bool {
 pub struct StorageSection {
     #[serde(default = "default_db_path")]
     pub path: String,
+    /// Telemetry older than this many hours is deleted by the
+    /// maintenance loop, its latest values with it. 0 keeps telemetry
+    /// forever; the size cap (max_db_size_mb) still bounds the file.
     #[serde(default = "default_retention")]
     pub retention_hours: u32,
     /// Audit rows older than this many days are pruned by the
@@ -289,11 +292,7 @@ impl PollBlock {
     }
 
     pub fn full_uid(&self) -> Option<u32> {
-        let t = self.uid.trim();
-        match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-            Some(hex) => u32::from_str_radix(hex, 16).ok(),
-            None => t.parse().ok(),
-        }
+        crate::core::config_manager::parse_num_u32(&self.uid)
     }
 }
 

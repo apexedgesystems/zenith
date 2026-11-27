@@ -34,7 +34,7 @@ use tracing_subscriber::EnvFilter;
 use crate::config::{FifoStrategy, ServerConfig};
 use crate::core::aproto_client::AprotoClient;
 use crate::core::auth::Credential;
-use crate::core::config_manager::StructDictionary;
+use crate::core::config_manager::{parse_num_u32, StructDictionary};
 use crate::core::metrics::TargetMetrics;
 use crate::core::session::{EndReason, Session, SessionPolicy, SessionStatus, SessionStore};
 use crate::core::telemetry::{self, TelemetrySample};
@@ -252,9 +252,9 @@ struct InspectQuery {
 
 #[derive(Deserialize)]
 struct SendCommandRequest {
-    /// Component fullUid (hex string like "0x00D000" or decimal)
+    /// Component fullUid: "0x" hex ("0x00D000") or decimal ("53248")
     full_uid: String,
-    /// Opcode (hex string like "0x0100" or decimal)
+    /// Opcode: "0x" hex ("0x0100") or decimal ("256")
     opcode: String,
     /// Payload as hex string (optional, e.g., "0102030405")
     #[serde(default)]
@@ -378,14 +378,7 @@ fn build_link(
                     records: record_spec.expect("boot validated records_config for this protocol"),
                 },
                 Protocol::RawSlip => PipelineSpec::SlipRaw {
-                    uid: config.raw_uid.as_deref().and_then(|s| {
-                        let t = s.trim();
-                        if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-                            u32::from_str_radix(hex, 16).ok()
-                        } else {
-                            t.parse().ok()
-                        }
-                    }),
+                    uid: config.raw_uid.as_deref().and_then(parse_num_u32),
                 },
                 Protocol::AprotoSlip => unreachable!("guarded by the outer match"),
             };
@@ -568,7 +561,6 @@ fn carrier_from_config(
 fn record_spec_from_table(
     table: &crate::core::config_manager::RecordTable,
 ) -> crate::core::stream_link::RecordSpec {
-    use crate::core::config_manager::parse_num_u32;
     crate::core::stream_link::RecordSpec {
         record_apid: parse_num_u32(&table.record_apid).unwrap_or(0) as u16,
         packet_prefix: table.packet_prefix,
@@ -619,16 +611,8 @@ fn parse_apid_map(
     target_name: &str,
 ) -> std::collections::HashMap<u16, u32> {
     let mut out = std::collections::HashMap::new();
-    let parse_num = |s: &str| -> Option<u32> {
-        let t = s.trim();
-        if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-            u32::from_str_radix(hex, 16).ok()
-        } else {
-            t.parse().ok()
-        }
-    };
     for (k, v) in raw.into_iter().flatten() {
-        match (parse_num(k), parse_num(v)) {
+        match (parse_num_u32(k), parse_num_u32(v)) {
             (Some(apid), Some(uid)) if apid <= 0x7FF => {
                 out.insert(apid as u16, uid);
             }
@@ -647,6 +631,19 @@ fn parse_apid_map(
         );
     }
     out
+}
+
+/// A component uid in a route path: hex digits, with or without a "0x"
+/// prefix. The console writes a manifest fullUid there without its
+/// prefix ("00D000"); request bodies use the 0x-or-decimal convention
+/// instead (`parse_num_u32`).
+fn path_uid(uid: &str) -> Result<u32, (StatusCode, String)> {
+    let digits = uid
+        .strip_prefix("0x")
+        .or_else(|| uid.strip_prefix("0X"))
+        .unwrap_or(uid);
+    u32::from_str_radix(digits, 16)
+        .map_err(|_| (StatusCode::BAD_REQUEST, format!("Invalid fullUid: {}", uid)))
 }
 
 async fn target_client(
@@ -928,13 +925,7 @@ async fn target_inspect(
     Path((id, uid_str)): Path<(String, String)>,
     axum::extract::Query(query): axum::extract::Query<InspectQuery>,
 ) -> Result<Json<CommandResponse>, (StatusCode, String)> {
-    let uid_clean = uid_str.trim_start_matches("0x").trim_start_matches("0X");
-    let full_uid = u32::from_str_radix(uid_clean, 16).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Invalid fullUid: {}", uid_str),
-        )
-    })?;
+    let full_uid = path_uid(&uid_str)?;
 
     let (client, _) = target_client(&state, &id).await?;
     let mut link = client.lock().await;
@@ -1154,13 +1145,7 @@ async fn swap_library(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let (client, db_for_audit) = target_client(&state, &id).await?;
 
-    let uid_clean = uid_str.trim_start_matches("0x").trim_start_matches("0X");
-    let full_uid = u32::from_str_radix(uid_clean, 16).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Invalid fullUid: {}", uid_str),
-        )
-    })?;
+    let full_uid = path_uid(&uid_str)?;
 
     use base64::Engine;
     let data = base64::engine::general_purpose::STANDARD
@@ -1290,28 +1275,18 @@ async fn send_command(
 ) -> Result<Json<CommandResponse>, (StatusCode, String)> {
     let (client, db_for_audit) = target_client(&state, &id).await?;
 
-    // Parse fullUid
-    let uid_clean = body
-        .full_uid
-        .trim_start_matches("0x")
-        .trim_start_matches("0X");
-    let full_uid = u32::from_str_radix(uid_clean, 16)
-        .or_else(|_| body.full_uid.parse::<u32>())
-        .map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("Invalid fullUid: {}", body.full_uid),
-            )
-        })?;
-
-    // Parse opcode
-    let opc_clean = body
-        .opcode
-        .trim_start_matches("0x")
-        .trim_start_matches("0X");
-    let opcode = u16::from_str_radix(opc_clean, 16)
-        .or_else(|_| body.opcode.parse::<u16>())
-        .map_err(|_| {
+    // "0x" hex or decimal, the convention of every number in target
+    // configuration: the console sends 0x strings, and an all-digit
+    // string is decimal.
+    let full_uid = parse_num_u32(&body.full_uid).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid fullUid: {}", body.full_uid),
+        )
+    })?;
+    let opcode = parse_num_u32(&body.opcode)
+        .and_then(|v| u16::try_from(v).ok())
+        .ok_or_else(|| {
             (
                 StatusCode::BAD_REQUEST,
                 format!("Invalid opcode: {}", body.opcode),
@@ -1519,13 +1494,7 @@ async fn get_params(
         )
     };
 
-    let uid_clean = uid_str.trim_start_matches("0x").trim_start_matches("0X");
-    let full_uid = u32::from_str_radix(uid_clean, 16).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Invalid fullUid: {}", uid_str),
-        )
-    })?;
+    let full_uid = path_uid(&uid_str)?;
 
     // INSPECT TUNABLE_PARAM (category=1)
     let mut link = client.lock().await;
@@ -1626,13 +1595,7 @@ async fn update_params(
         )
     };
 
-    let uid_clean = uid_str.trim_start_matches("0x").trim_start_matches("0X");
-    let full_uid = u32::from_str_radix(uid_clean, 16).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Invalid fullUid: {}", uid_str),
-        )
-    })?;
+    let full_uid = path_uid(&uid_str)?;
 
     // Decode the original binary from the frontend (from the initial page
     // load). No hidden INSPECT -- the user sees what they're modifying.
@@ -1727,8 +1690,8 @@ async fn update_params(
         // Encode header
         for field in &hdr_struct.fields {
             if let Some(value) = body.fields.get(&field.name) {
-                if !encode_field(&mut buf, field, value) {
-                    unencodable.push(field.name.clone());
+                if let Err(reason) = encode_field(&mut buf, field, value) {
+                    unencodable.push(format!("{}: {}", field.name, reason));
                 }
             }
         }
@@ -1740,8 +1703,8 @@ async fn update_params(
                 if let Some(value) = entry_fields.get(&field.name) {
                     let mut adjusted_field = field.clone();
                     adjusted_field.offset = base + field.offset;
-                    if !encode_field(&mut buf, &adjusted_field, value) {
-                        unencodable.push(format!("entry[{}].{}", i, field.name));
+                    if let Err(reason) = encode_field(&mut buf, &adjusted_field, value) {
+                        unencodable.push(format!("entry[{}].{}: {}", i, field.name, reason));
                     }
                 }
             }
@@ -1749,7 +1712,7 @@ async fn update_params(
         if !unencodable.is_empty() {
             return Err((
                 StatusCode::BAD_REQUEST,
-                format!("Cannot encode edited field(s): {}", unencodable.join(", ")),
+                format!("Cannot encode edited field(s): {}", unencodable.join("; ")),
             ));
         }
 
@@ -1825,21 +1788,18 @@ async fn update_params(
         } else {
             vec![0u8; struct_size]
         };
-        let mut unencodable: Vec<&str> = Vec::new();
+        let mut unencodable: Vec<String> = Vec::new();
         for field in &struct_fields {
             if let Some(value) = body.fields.get(&field.name) {
-                if !encode_field(&mut buf, field, value) {
-                    unencodable.push(&field.name);
+                if let Err(reason) = encode_field(&mut buf, field, value) {
+                    unencodable.push(format!("{}: {}", field.name, reason));
                 }
             }
         }
         if !unencodable.is_empty() {
             return Err((
                 StatusCode::BAD_REQUEST,
-                format!(
-                    "Cannot encode edited field(s): {} -- unsupported type/size or wrong value type",
-                    unencodable.join(", ")
-                ),
+                format!("Cannot encode edited field(s): {}", unencodable.join("; ")),
             ));
         }
         // Producer-stated hash when the dictionary exports one -- that
@@ -2107,13 +2067,7 @@ async fn tprm_verify_staged(
     State(state): State<AppState>,
     Path((id, uid_str)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let uid_clean = uid_str.trim_start_matches("0x").trim_start_matches("0X");
-    let full_uid = u32::from_str_radix(uid_clean, 16).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Invalid fullUid: {}", uid_str),
-        )
-    })?;
+    let full_uid = path_uid(&uid_str)?;
     let (client, _db) = target_client(&state, &id).await?;
     let mut link = client.lock().await;
     let proto = link.protocol();
@@ -2278,55 +2232,68 @@ fn constraint_violations(
     violations
 }
 
-/// Encode one edited field into the payload buffer. Returns false when
-/// the (type, size) shape is not encodable or the value has the wrong
-/// JSON type -- callers must surface that as an error: a silent skip
-/// here uploads the OLD value under a SUCCESS response, which reads as
-/// "applied" while changing nothing (this bit u64 swap thresholds).
+/// Encode one edited field into the payload buffer. A value the field
+/// cannot hold is refused with the reason, never written: the wrong
+/// JSON type, an integer outside the field's width (an unchecked cast
+/// would store 300 in a uint8 as 44), a bool other than 0 or 1, a
+/// string longer than its buffer, an array of the wrong length, or a
+/// (type, size) with no encoding. Callers fail the request naming the
+/// field: a value skipped here would upload the OLD value under a
+/// SUCCESS response, which reads as "applied" while changing nothing.
 fn encode_field(
     buf: &mut [u8],
     field: &crate::core::config_manager::FieldDef,
     value: &serde_json::Value,
-) -> bool {
+) -> Result<(), String> {
     let off = field.offset;
-    if off + field.size > buf.len() {
-        return false;
+    let size = field.size;
+    if off + size > buf.len() {
+        return Err(format!("lies past the {}-byte payload", buf.len()));
     }
-    match (field.field_type.as_str(), field.size) {
-        ("uint", 1) | ("bool", 1) => value.as_u64().map(|v| buf[off] = v as u8).is_some(),
-        ("uint", 2) => value
-            .as_u64()
-            .map(|v| buf[off..off + 2].copy_from_slice(&(v as u16).to_le_bytes()))
-            .is_some(),
-        ("uint", 4) => value
-            .as_u64()
-            .map(|v| buf[off..off + 4].copy_from_slice(&(v as u32).to_le_bytes()))
-            .is_some(),
-        ("uint", 8) => value
-            .as_u64()
-            .map(|v| buf[off..off + 8].copy_from_slice(&v.to_le_bytes()))
-            .is_some(),
-        ("int", 1) => value.as_i64().map(|v| buf[off] = v as u8).is_some(),
-        ("int", 2) => value
-            .as_i64()
-            .map(|v| buf[off..off + 2].copy_from_slice(&(v as i16).to_le_bytes()))
-            .is_some(),
-        ("int", 4) => value
-            .as_i64()
-            .map(|v| buf[off..off + 4].copy_from_slice(&(v as i32).to_le_bytes()))
-            .is_some(),
-        ("int", 8) => value
-            .as_i64()
-            .map(|v| buf[off..off + 8].copy_from_slice(&v.to_le_bytes()))
-            .is_some(),
-        ("float", 4) => value
-            .as_f64()
-            .map(|v| buf[off..off + 4].copy_from_slice(&(v as f32).to_le_bytes()))
-            .is_some(),
-        ("float", 8) | ("double", 8) => value
-            .as_f64()
-            .map(|v| buf[off..off + 8].copy_from_slice(&v.to_le_bytes()))
-            .is_some(),
+    let bits = size * 8;
+    match (field.field_type.as_str(), size) {
+        // Integers are checked against the field's width, then written
+        // as their low `size` bytes, exact for any value in range.
+        ("uint", 1 | 2 | 4 | 8) => {
+            let max = u64::MAX >> (64 - bits);
+            let v = match (value.as_u64(), value.as_i64()) {
+                (Some(v), _) if v <= max => v,
+                (Some(_), _) | (None, Some(_)) => {
+                    return Err(format!("{value} is outside uint{bits}'s range 0..={max}"));
+                }
+                (None, None) => return Err(format!("{value} is not an integer")),
+            };
+            buf[off..off + size].copy_from_slice(&v.to_le_bytes()[..size]);
+        }
+        ("int", 1 | 2 | 4 | 8) => {
+            let (min, max) = (i64::MIN >> (64 - bits), i64::MAX >> (64 - bits));
+            let v = match (value.as_i64(), value.as_u64()) {
+                (Some(v), _) if (min..=max).contains(&v) => v,
+                (Some(_), _) | (None, Some(_)) => {
+                    return Err(format!(
+                        "{value} is outside int{bits}'s range {min}..={max}"
+                    ));
+                }
+                (None, None) => return Err(format!("{value} is not an integer")),
+            };
+            buf[off..off + size].copy_from_slice(&v.to_le_bytes()[..size]);
+        }
+        ("bool", 1) => match value.as_u64() {
+            Some(v @ (0 | 1)) => buf[off] = v as u8,
+            _ => return Err(format!("{value} is not a bool (0 or 1)")),
+        },
+        ("float", 4) => {
+            let v = value
+                .as_f64()
+                .ok_or_else(|| format!("{value} is not a number"))?;
+            buf[off..off + 4].copy_from_slice(&(v as f32).to_le_bytes());
+        }
+        ("float", 8) | ("double", 8) => {
+            let v = value
+                .as_f64()
+                .ok_or_else(|| format!("{value} is not a number"))?;
+            buf[off..off + 8].copy_from_slice(&v.to_le_bytes());
+        }
         // Bounded string: fixed char buffer, NUL-padded. A value longer
         // than the field is refused, never truncated -- the packer on
         // the producing side errors the same way.
@@ -2334,9 +2301,9 @@ fn encode_field(
             Some(s) if s.len() <= n => {
                 buf[off..off + n].fill(0);
                 buf[off..off + s.len()].copy_from_slice(s.as_bytes());
-                true
             }
-            _ => false,
+            Some(s) => return Err(format!("{} bytes do not fit {n}", s.len())),
+            None => return Err(format!("{value} is not a string")),
         },
         // Array: exact element count required; each element encodes by
         // element_type at its slot (strings recurse into the bounded-
@@ -2348,14 +2315,20 @@ fn encode_field(
                 .map(|d| d.iter().product::<usize>())
                 .unwrap_or(0);
             let Some(arr) = value.as_array() else {
-                return false;
+                return Err(format!("{value} is not an array"));
             };
-            if count == 0 || arr.len() != count || total % count != 0 {
-                return false;
+            if count == 0 || total % count != 0 {
+                return Err("the dictionary gives this array no element size".to_string());
+            }
+            if arr.len() != count {
+                return Err(format!(
+                    "{} elements where the field holds {count}",
+                    arr.len()
+                ));
             }
             let elem_size = total / count;
             let elem_type = field.element_type.as_deref().unwrap_or("uint");
-            arr.iter().enumerate().all(|(i, v)| {
+            for (i, v) in arr.iter().enumerate() {
                 let elem = crate::core::config_manager::FieldDef {
                     name: field.name.clone(),
                     field_type: elem_type.to_string(),
@@ -2368,11 +2341,12 @@ fn encode_field(
                     struct_ref: None,
                     enum_ref: None,
                 };
-                encode_field(buf, &elem, v)
-            })
+                encode_field(buf, &elem, v).map_err(|e| format!("element {i}: {e}"))?;
+            }
         }
-        _ => false,
+        (ty, _) => return Err(format!("a {size}-byte {ty} field has no encoding")),
     }
+    Ok(())
 }
 
 /* ----------------------------- Telemetry History ----------------------------- */
@@ -4282,6 +4256,15 @@ fn spawn_sample_writer(
     });
 }
 
+/// Time-based retention, the maintenance loop's safety net under the
+/// size cap: telemetry older than `retention_hours` goes, with its
+/// latest values. 0 keeps telemetry forever, as `audit_retention_days
+/// = 0` keeps the audit log. User layouts beyond each target's newest
+/// 100 go either way. Returns the samples deleted.
+fn prune_telemetry(db: &TelemetryDb, retention_hours: u32) -> Result<usize, DbError> {
+    db.prune((retention_hours > 0).then(|| u64::from(retention_hours) * 3_600_000))
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
@@ -4529,7 +4512,8 @@ async fn main() {
     // - Measure net fill rate for storage vitals
     // - Size-based FIFO when the DB exceeds its cap (fair waterline
     //   across targets by default; see storage.fifo_strategy)
-    // - Prune samples older than retention
+    // - Prune samples older than retention (retention_hours = 0 keeps
+    //   them all)
     // - Prune audit rows beyond their retention
     // - Clean up stale telemetry_latest entries and old user layouts
     // - WAL checkpoint after large deletions
@@ -4543,11 +4527,14 @@ async fn main() {
         .clamp(256, 102_400); // 256MB min, 100GB max
     let max_db_bytes: u64 = max_db_mb as u64 * 1024 * 1024;
     tracing::info!(
-        "Storage limits: max_db_size={}MB, retention={}h",
+        "Storage limits: max_db_size={}MB, retention={}",
         max_db_mb,
-        config.storage.retention_hours
+        match config.storage.retention_hours {
+            0 => "forever".to_string(),
+            hours => format!("{hours}h"),
+        }
     );
-    let retention_ms = config.storage.retention_hours as u64 * 3600 * 1000;
+    let retention_hours = config.storage.retention_hours;
     let audit_retention_days = config.storage.audit_retention_days;
     let fifo_strategy = config.storage.fifo_strategy;
     let storage_vitals = Arc::new(StorageVitals {
@@ -4712,7 +4699,7 @@ async fn main() {
                 }
 
                 // Time-based retention as a safety net
-                match db.prune(retention_ms) {
+                match prune_telemetry(&db, retention_hours) {
                     Ok(n) if n > 0 => {
                         vitals
                             .retention_pruned_samples
@@ -4932,4 +4919,470 @@ async fn main() {
     }
 
     tracing::info!("Zenith shutdown complete");
+}
+
+/* ----------------------------- Tests ----------------------------- */
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use axum::body::Body;
+    use axum::extract::connect_info::MockConnectInfo;
+    use serde_json::json;
+    use tempfile::TempDir;
+    use tower::ServiceExt;
+
+    use crate::core::config_manager::{ComponentDict, FieldDef};
+    use crate::storage::telemetry_db::AuditEntry;
+
+    /// Where every test request comes from.
+    const CLIENT: SocketAddr =
+        SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 40_000);
+
+    /// One apex target. Its link is built and never dialed by these
+    /// tests, so every request that reaches it is refused "not
+    /// connected".
+    const APEX_TARGET: &str = r#"
+        [[targets]]
+        name = "apex"
+        host = "127.0.0.1"
+        port = 9
+    "#;
+
+    /// A server as boot assembles it, over a temporary database: the
+    /// config is config.toml text, and each `[[targets]]` entry becomes
+    /// a target under its positional id, its link built but not
+    /// connected, with the given dictionaries.
+    struct Server {
+        state: AppState,
+        db: Arc<TelemetryDb>,
+        _dir: TempDir,
+    }
+
+    impl Server {
+        fn new(config: &str) -> Self {
+            Self::with_dicts(config, StructDictionary::default())
+        }
+
+        fn with_dicts(config: &str, dicts: StructDictionary) -> Self {
+            let config: ServerConfig = toml::from_str(config).unwrap();
+            let dir = TempDir::new().unwrap();
+            let db = Arc::new(TelemetryDb::open(&dir.path().join("zenith.db")).unwrap());
+            let dicts = Arc::new(dicts);
+            let targets = config
+                .targets
+                .iter()
+                .enumerate()
+                .map(|(i, tc)| (format!("target-{i}"), target_state(tc, &dicts)))
+                .collect();
+            let sessions = SessionStore::open(
+                db.clone(),
+                SessionPolicy::from_config(&config.auth),
+                now_ms(),
+            )
+            .unwrap();
+            let storage_vitals = StorageVitals {
+                cap_bytes: 0,
+                tiers: config.storage.tiers,
+                fill_bytes_per_min: Default::default(),
+                last_size: Default::default(),
+                fifo_evicted_samples: Default::default(),
+                retention_pruned_samples: Default::default(),
+                tiered_source_rows: Default::default(),
+                tier_band_rows: Default::default(),
+            };
+            let state = Arc::new(RwLock::new(SharedState {
+                config,
+                targets,
+                db: db.clone(),
+                struct_dicts: Arc::new(StructDictionary::default()),
+                rate_limiter: Arc::new(RateLimiter::default()),
+                storage_vitals: Arc::new(storage_vitals),
+                sessions: Arc::new(sessions),
+                stopping: false,
+            }));
+            Self {
+                state,
+                db,
+                _dir: dir,
+            }
+        }
+
+        /// One request answered in process by the router the server
+        /// runs: its status and body text.
+        async fn call(&self, request: axum::http::Request<Body>) -> (StatusCode, String) {
+            let app = build_router(self.state.clone(), &[], 50).layer(MockConnectInfo(CLIENT));
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, String::from_utf8_lossy(&body).into_owned())
+        }
+
+        async fn get(&self, uri: &str) -> (StatusCode, String) {
+            self.call(axum::http::Request::get(uri).body(Body::empty()).unwrap())
+                .await
+        }
+
+        async fn post(&self, uri: &str, body: serde_json::Value) -> (StatusCode, String) {
+            self.call(
+                axum::http::Request::post(uri)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+        }
+
+        /// The audit log, oldest entry first.
+        fn audit(&self) -> Vec<AuditEntry> {
+            let mut entries = self.db.query_audit(1000, 0).unwrap();
+            entries.reverse();
+            entries
+        }
+    }
+
+    /// One target as boot builds it, its link not connected.
+    fn target_state(tc: &config::TargetSection, dicts: &Arc<StructDictionary>) -> TargetState {
+        let (push_tlm_tx, _) = broadcast::channel(64);
+        let (sample_tx, _) = broadcast::channel(64);
+        let protocol = Protocol::from_config(&tc.protocol).unwrap();
+        let metrics = TargetMetrics::new();
+        let mut link = build_link(protocol, push_tlm_tx.clone(), tc, None, None);
+        link.set_metrics(metrics.clone());
+        TargetState {
+            config: tc.clone(),
+            connected: link.connected_handle(),
+            listening: link.listening_handle(),
+            client: Arc::new(Mutex::new(link)),
+            metrics,
+            push_tlm_tx,
+            sample_tx,
+            struct_dicts: dicts.clone(),
+            manifest: None,
+            commands_config: None,
+            connect_init: None,
+            record_table: None,
+            _router_handle: None,
+            _poll_handles: Vec::new(),
+        }
+    }
+
+    fn temp_db() -> (TempDir, TelemetryDb) {
+        let dir = TempDir::new().unwrap();
+        let db = TelemetryDb::open(&dir.path().join("zenith.db")).unwrap();
+        (dir, db)
+    }
+
+    fn sample(channel: &str, timestamp_ms: u64, value: f64) -> TelemetrySample {
+        TelemetrySample {
+            target_id: Arc::from("target-0"),
+            timestamp_ms,
+            channel: Arc::from(channel),
+            value,
+            envelope: None,
+        }
+    }
+
+    /* ---- Retention ---- */
+
+    /// @test retention_hours = 0 keeps telemetry forever, as
+    /// audit_retention_days = 0 keeps the audit log: the retention step
+    /// deletes no sample and no latest value, however old. A nonzero
+    /// retention deletes what is older than its window, latest values
+    /// with it, and keeps the rest.
+    #[test]
+    fn zero_retention_hours_keeps_telemetry_forever() {
+        const HOUR: u64 = 3_600_000;
+        let (_dir, db) = temp_db();
+        let now = now_ms();
+        db.insert_batch(&[
+            sample("Old.x", now - 30 * HOUR, 1.0),
+            sample("New.y", now - 25 * HOUR, 2.0),
+            sample("New.y", now - 5_000, 3.0),
+        ])
+        .unwrap();
+        let latest = |db: &TelemetryDb| {
+            let mut channels: Vec<String> = db
+                .query_latest("target-0")
+                .unwrap()
+                .into_iter()
+                .map(|s| s.channel.to_string())
+                .collect();
+            channels.sort();
+            channels
+        };
+
+        assert_eq!(
+            prune_telemetry(&db, 0).unwrap(),
+            0,
+            "retention_hours = 0 deleted telemetry"
+        );
+        assert_eq!(db.count().unwrap(), 3);
+        assert_eq!(latest(&db), ["New.y", "Old.x"]);
+
+        assert_eq!(prune_telemetry(&db, 24).unwrap(), 2);
+        assert_eq!(db.count().unwrap(), 1);
+        assert_eq!(latest(&db), ["New.y"]);
+    }
+
+    /* ---- Tunable encoding ---- */
+
+    fn field(field_type: &str, size: usize) -> FieldDef {
+        serde_json::from_value(json!({
+            "name": "f", "type": field_type, "offset": 0, "size": size,
+        }))
+        .unwrap()
+    }
+
+    /// `value` encoded into `field` alone: the bytes, or the refusal.
+    fn encoded(field: &FieldDef, value: &serde_json::Value) -> Result<Vec<u8>, String> {
+        let mut buf = vec![0u8; field.size];
+        encode_field(&mut buf, field, value).map(|()| buf)
+    }
+
+    /// @test A tunable value its field cannot hold is refused, never
+    /// written: an integer outside its field's width in either
+    /// direction, a bool other than 0 or 1, a fraction for an integer,
+    /// and an array element out of range. The refusal names the value
+    /// and the range; each width's own limits encode exactly,
+    /// little-endian.
+    #[test]
+    fn tunable_values_outside_their_field_are_refused() {
+        // A field, a value, and its bytes or a fragment of its refusal.
+        type Row = (FieldDef, serde_json::Value, Result<Vec<u8>, &'static str>);
+        let ff = |n: usize| Ok(vec![0xFF; n]);
+        let rows: Vec<Row> = vec![
+            (field("uint", 1), json!(255), ff(1)),
+            (
+                field("uint", 1),
+                json!(300),
+                Err("300 is outside uint8's range 0..=255"),
+            ),
+            (
+                field("uint", 1),
+                json!(-1),
+                Err("-1 is outside uint8's range 0..=255"),
+            ),
+            (field("uint", 2), json!(65_535), ff(2)),
+            (
+                field("uint", 2),
+                json!(70_000),
+                Err("70000 is outside uint16's range"),
+            ),
+            (field("uint", 4), json!(4_294_967_295u64), ff(4)),
+            (
+                field("uint", 4),
+                json!(5_000_000_000u64),
+                Err("outside uint32's range"),
+            ),
+            (field("uint", 8), json!(u64::MAX), ff(8)),
+            (
+                field("uint", 8),
+                json!(-1),
+                Err("-1 is outside uint64's range"),
+            ),
+            (field("int", 1), json!(-128), Ok(vec![0x80])),
+            (field("int", 1), json!(127), Ok(vec![0x7F])),
+            (
+                field("int", 1),
+                json!(200),
+                Err("200 is outside int8's range -128..=127"),
+            ),
+            (
+                field("int", 1),
+                json!(-200),
+                Err("-200 is outside int8's range -128..=127"),
+            ),
+            (field("int", 2), json!(-32_768), Ok(vec![0x00, 0x80])),
+            (
+                field("int", 2),
+                json!(32_768),
+                Err("32768 is outside int16's range"),
+            ),
+            (field("int", 4), json!(i32::MIN), Ok(vec![0, 0, 0, 0x80])),
+            (
+                field("int", 4),
+                json!(1u64 << 31),
+                Err("2147483648 is outside int32's range"),
+            ),
+            (
+                field("int", 8),
+                json!(i64::MIN),
+                Ok(vec![0, 0, 0, 0, 0, 0, 0, 0x80]),
+            ),
+            (
+                field("int", 8),
+                json!(u64::MAX),
+                Err("is outside int64's range"),
+            ),
+            (field("bool", 1), json!(0), Ok(vec![0])),
+            (field("bool", 1), json!(1), Ok(vec![1])),
+            (field("bool", 1), json!(2), Err("2 is not a bool (0 or 1)")),
+            (
+                field("bool", 1),
+                json!(-1),
+                Err("-1 is not a bool (0 or 1)"),
+            ),
+            (field("uint", 1), json!(1.5), Err("1.5 is not an integer")),
+        ];
+        let pair: FieldDef = serde_json::from_value(json!({
+            "name": "f", "type": "array", "offset": 0, "size": 2,
+            "element_type": "uint", "dims": [2],
+        }))
+        .unwrap();
+        let rows = rows.into_iter().chain([
+            (pair.clone(), json!([1, 2]), Ok(vec![1, 2])),
+            (
+                pair,
+                json!([1, 256]),
+                Err("element 1: 256 is outside uint8's range"),
+            ),
+        ]);
+
+        let mut written = Vec::new();
+        let mut refusals = Vec::new();
+        for (field, value, want) in rows {
+            let shape = format!("{}{} <- {}", field.field_type, field.size * 8, value);
+            match (want, encoded(&field, &value)) {
+                (Ok(bytes), got) => assert_eq!(got, Ok(bytes), "{shape}"),
+                (Err(_), Ok(bytes)) => written.push(format!("{shape} wrote {bytes:?}")),
+                (Err(reason), Err(said)) => refusals.push((shape, reason, said)),
+            }
+        }
+        assert!(
+            written.is_empty(),
+            "values their field cannot hold were written: {written:?}"
+        );
+        for (shape, reason, said) in refusals {
+            assert!(said.contains(reason), "{shape}: refused as {said:?}");
+        }
+    }
+
+    /// Dictionaries with one tunable block: uint8 `level`, bool
+    /// `enabled` and int16 `trim`, four bytes.
+    fn tunable_dicts() -> StructDictionary {
+        let dict: ComponentDict = serde_json::from_value(json!({
+            "component": "Gain",
+            "structs": { "GainParams": {
+                "category": "TUNABLE_PARAM", "size": 4,
+                "fields": [
+                    { "name": "level", "type": "uint", "offset": 0, "size": 1 },
+                    { "name": "enabled", "type": "bool", "offset": 1, "size": 1 },
+                    { "name": "trim", "type": "int", "offset": 2, "size": 2 },
+                ],
+            }},
+        }))
+        .unwrap();
+        StructDictionary {
+            components: HashMap::from([("Gain".to_string(), dict)]),
+        }
+    }
+
+    /// @test A tunable update carrying a value its field cannot hold
+    /// fails before anything is sent: a 400 naming the field, the value
+    /// and the range, and no update reaches the link, so none is
+    /// audited. The same update in range goes on to the upload, which
+    /// the unconnected link refuses.
+    #[tokio::test]
+    async fn an_unholdable_tunable_fails_the_update_before_any_upload() {
+        let server = Server::with_dicts(APEX_TARGET, tunable_dicts());
+        let update = |level: i64| {
+            json!({
+                "fields": { "level": level, "enabled": 1, "trim": -5 },
+                "raw_hex": "00000000",
+            })
+        };
+        let uri = "/api/targets/target-0/params/00D000/update";
+
+        let (status, body) = server.post(uri, update(300)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains("level: 300 is outside uint8's range 0..=255"),
+            "{body}"
+        );
+        assert!(server.audit().is_empty(), "the update reached the link");
+
+        let (status, body) = server.post(uri, update(200)).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        let audit = server.audit();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(
+            (audit[0].action.as_str(), audit[0].status.as_str()),
+            ("update_tprm", "err: not connected")
+        );
+    }
+
+    /* ---- Request numbers ---- */
+
+    /// @test The command route reads a number as hex only with a 0x
+    /// prefix, and as decimal otherwise: the console's 0x body, its
+    /// upper-case spelling and the same uid and opcode in decimal are
+    /// one command at the link, each attempt audited as uid 0x00D000,
+    /// opcode 0x0100. Bare hex digits, an opcode past 16 bits and an
+    /// empty uid are refused before the link.
+    #[tokio::test]
+    async fn command_numbers_read_as_hex_with_0x_and_decimal_otherwise() {
+        let server = Server::new(APEX_TARGET);
+        let command = |uid: &str, opcode: &str| json!({ "full_uid": uid, "opcode": opcode });
+        let uri = "/api/targets/target-0/command";
+
+        for (uid, opcode) in [
+            ("0x00D000", "0x0100"),
+            ("0X00d000", "0X100"),
+            ("53248", "256"),
+        ] {
+            let (status, body) = server.post(uri, command(uid, opcode)).await;
+            assert_eq!(status, StatusCode::BAD_GATEWAY, "{uid} {opcode}: {body}");
+        }
+        let details: Vec<String> = server
+            .audit()
+            .into_iter()
+            .map(|e| e.detail.unwrap_or_default())
+            .collect();
+        assert_eq!(details, ["uid=0x00D000 opcode=0x0100 payload_len=0"; 3]);
+
+        for (uid, opcode, refusal) in [
+            ("D000", "0x0100", "Invalid fullUid: D000"),
+            ("0x00D000", "65536", "Invalid opcode: 65536"),
+            ("0x00D000", "0x10000", "Invalid opcode: 0x10000"),
+            ("", "0x0100", "Invalid fullUid: "),
+        ] {
+            let (status, body) = server.post(uri, command(uid, opcode)).await;
+            assert_eq!(
+                (status, body.as_str()),
+                (StatusCode::BAD_REQUEST, refusal),
+                "{uid} {opcode}"
+            );
+        }
+        assert_eq!(
+            server.audit().len(),
+            3,
+            "a refused command reached the link"
+        );
+    }
+
+    /// @test A uid in a route path is hex digits, with or without the 0x
+    /// prefix, as the console writes it there (a manifest fullUid
+    /// without its prefix): each form reaches the link, and a uid that
+    /// is not hex is refused before it.
+    #[tokio::test]
+    async fn path_uids_read_as_hex() {
+        let server = Server::new(APEX_TARGET);
+        for uid in ["00D000", "0x00D000", "d000"] {
+            let (status, body) = server
+                .get(&format!("/api/targets/target-0/inspect/{uid}?category=1"))
+                .await;
+            assert_eq!(status, StatusCode::BAD_GATEWAY, "{uid}: {body}");
+        }
+        let (status, body) = server
+            .get("/api/targets/target-0/inspect/0xZZ?category=1")
+            .await;
+        assert_eq!(
+            (status, body.as_str()),
+            (StatusCode::BAD_REQUEST, "Invalid fullUid: 0xZZ")
+        );
+    }
 }

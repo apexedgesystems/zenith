@@ -585,26 +585,31 @@ impl TelemetryDb {
         })
     }
 
-    /// Delete samples older than retention period.
-    pub fn prune(&self, retention_ms: u64) -> Result<usize, DbError> {
+    /// Delete the telemetry older than the retention window, and the
+    /// latest values older than it; `None` keeps all telemetry. User
+    /// layouts beyond each target's newest 100 go either way. Returns
+    /// the samples deleted.
+    pub fn prune(&self, retention_ms: Option<u64>) -> Result<usize, DbError> {
         let conn = self.writer.lock().map_err(|_| DbError::Lock)?;
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        let cutoff = now_ms.saturating_sub(retention_ms);
-
-        // Prune telemetry samples
-        let deleted = conn.execute(
-            "DELETE FROM telemetry WHERE timestamp_ms < ?1",
-            params![cutoff as i64],
-        )?;
-
-        // Clean up stale telemetry_latest entries
-        conn.execute(
-            "DELETE FROM telemetry_latest WHERE timestamp_ms < ?1",
-            params![cutoff as i64],
-        )?;
+        let deleted = match retention_ms {
+            Some(retention_ms) => {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64;
+                let cutoff = now_ms.saturating_sub(retention_ms);
+                let deleted = conn.execute(
+                    "DELETE FROM telemetry WHERE timestamp_ms < ?1",
+                    params![cutoff as i64],
+                )?;
+                conn.execute(
+                    "DELETE FROM telemetry_latest WHERE timestamp_ms < ?1",
+                    params![cutoff as i64],
+                )?;
+                deleted
+            }
+            None => 0,
+        };
 
         // Clean up old user-created layouts (keep last 100 per target,
         // config layouts always kept). The ranking must partition by
@@ -2469,9 +2474,8 @@ mod tests {
                 .unwrap();
         }
 
-        // Retention window large enough that no samples are pruned; only
-        // the layout-retention pass acts.
-        db.prune(u64::MAX).unwrap();
+        // No telemetry retention: only the layout-retention pass acts.
+        db.prune(None).unwrap();
 
         assert_eq!(db.get_layouts("t1").unwrap().len(), 100);
         assert_eq!(db.get_layouts("t2").unwrap().len(), 5);
@@ -2848,7 +2852,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert_eq!(db.prune(60 * MIN).unwrap(), 3);
+        assert_eq!(db.prune(Some(60 * MIN)).unwrap(), 3);
         let window = |ch: &str| {
             db.query_range("t1", Some(ch), 0, now, 10)
                 .unwrap()

@@ -21,6 +21,8 @@ password_hash = ""
 # Use an absolute path inside the persistent volume when running under
 # docker compose (zenith-data mounts at /var/lib/zenith).
 path = "/var/lib/zenith/zenith.db"
+# Telemetry older than this many hours is pruned (0 = keep forever; the
+# size cap, max_db_size_mb, still bounds the file).
 retention_hours = 24
 # Audit rows older than this are pruned (0 = keep forever).
 audit_retention_days = 90

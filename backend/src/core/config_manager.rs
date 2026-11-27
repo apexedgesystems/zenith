@@ -995,7 +995,9 @@ pub fn check_byte_order(stamp: Option<&str>) -> Result<(), String> {
     }
 }
 
-/// "0x" hex or decimal, the target-config number convention.
+/// "0x" hex or decimal, surrounding whitespace ignored: the convention
+/// of every number in target configuration and in command requests,
+/// all read by this one parser. An all-digit string is decimal.
 pub fn parse_num_u32(s: &str) -> Option<u32> {
     let t = s.trim();
     if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {

@@ -107,6 +107,15 @@ architecture review; work before that is the v0.0.1 tag.
 
 ### Fixed
 
+- `[storage] retention_hours = 0` keeps telemetry forever, as
+  `audit_retention_days = 0` keeps the audit log, instead of deleting
+  all of it every minute.
+- A tunable update with an integer outside its field's range, or a bool
+  other than 0 or 1, fails naming the field and uploads nothing, instead
+  of writing the value wrapped (300 into a uint8 as 44).
+- The command route reads a uid or opcode as hex only with a `0x` prefix
+  and as decimal otherwise, as documented: `256` is 256, not 0x256. A
+  client sending bare hex digits gets a 400 and must add the prefix.
 - History queries over a window holding more samples than their limit
   return the newest ones, so a chart of a long window reaches the
   present instead of stopping at the limit's oldest samples. History

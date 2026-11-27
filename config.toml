@@ -27,6 +27,8 @@ secret = "change-me-in-production"
 # against the container's working directory and lands outside the
 # volume, so history would not survive container recreation.
 path = "/var/lib/zenith/zenith.db"
+# Telemetry older than this many hours is deleted (0 keeps it forever;
+# the size cap below still bounds the file).
 retention_hours = 24
 # max_db_size_mb = 2048    # size cap before FIFO eviction (default 2048)
 # fifo_strategy = "fair"   # "fair" waterlines evictions across targets
