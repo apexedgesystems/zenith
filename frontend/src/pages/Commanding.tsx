@@ -8,6 +8,7 @@ import {
   type FieldDef,
 } from "../api/decode";
 import { apiFetch } from "../api/apiFetch";
+import { parseWholeNumber, wholeNumberHint } from "../utils/wholeNumber";
 
 /* ----------------------------- Types ----------------------------- */
 
@@ -126,18 +127,16 @@ export function encodeField(
       if (text === "") return blank;
       const bytes =
         field.type === "uint8" ? 1 : field.type === "uint16" ? 2 : 4;
-      const max = 2 ** (8 * bytes) - 1;
-      const n = /^0[xX][0-9a-fA-F]+$/.test(text)
-        ? parseInt(text.slice(2), 16)
-        : /^[0-9]+$/.test(text)
-          ? parseInt(text, 10)
-          : NaN;
-      if (Number.isNaN(n) || n > max) {
+      const whole = parseWholeNumber(text, 8 * bytes, false);
+      if (whole === null) {
+        const takes = wholeNumberHint(8 * bytes, false);
         return {
           ok: false,
-          error: `field '${field.name}': '${value}' is not a ${field.type} (a whole number from 0 to ${max}, decimal or 0x hex)`,
+          error: `field '${field.name}': '${value}' is not a ${field.type} (${takes})`,
         };
       }
+      // Exact: at most 32 bits wide.
+      const n = Number(whole);
       const buf = new ArrayBuffer(bytes);
       const view = new DataView(buf);
       if (bytes === 1) view.setUint8(0, n);

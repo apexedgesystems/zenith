@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useRegistry, useTunableFields } from "../api/queries";
 import { apiFetch } from "../api/apiFetch";
+import { parseWholeNumber, wholeNumberHint } from "../utils/wholeNumber";
 
 /* ----------------------------- Types ----------------------------- */
 
@@ -45,6 +46,15 @@ function routeUid(uid: string): string {
   return uid.replace("0x", "").replace("0X", "");
 }
 
+/** Whether `fi` is an int or uint 8 bytes wide. The parameter read gives
+ *  such a field as a decimal string and the update takes one back: a
+ *  double, which a JSON number becomes here, holds integers exactly only
+ *  up to 2^53. The form edits it as text: a number input takes no 0x
+ *  hex, and its stepper counts in doubles. */
+function isWideInteger(fi: FieldInfo | undefined): fi is FieldInfo {
+  return fi?.size === 8 && (fi.type === "int" || fi.type === "uint");
+}
+
 /* ----------------------------- Page ----------------------------- */
 
 export default function TunablesPage({
@@ -57,6 +67,9 @@ export default function TunablesPage({
   >([]);
   const [selectedUid, setSelectedUid] = useState("");
   const [params, setParams] = useState<ParamsData | null>(null);
+  // What the operator has typed into the flat form, by field name; a
+  // field not typed into is applied as read.
+  const [edits, setEdits] = useState<Record<string, string>>({});
   // The component the shown values were read from (route form).
   const [paramsUid, setParamsUid] = useState("");
   const [fieldInfo, setFieldInfo] = useState<FieldInfo[]>([]);
@@ -78,11 +91,13 @@ export default function TunablesPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [registryQuery.data]);
 
-  // Struct-dict field info for the selected component, cached
-  // per (target, component) -- dictionaries are immutable per process.
+  // Struct-dict field info for the struct the shown block was read
+  // with, cached per (target, component, struct) -- dictionaries are
+  // immutable per process.
   const tunableFieldsQuery = useTunableFields(
     selectedTarget,
     params?.component ?? null,
+    params?.struct_name ?? null,
   );
   useEffect(() => {
     setFieldInfo((tunableFieldsQuery.data ?? []) as FieldInfo[]);
@@ -94,6 +109,12 @@ export default function TunablesPage({
   const latestRead = useRef(0);
   // The reload after an apply; a new selection cancels it.
   const reloadTimer = useRef<number | undefined>(undefined);
+
+  // Show a read's values, with nothing typed over them.
+  const showRead = (data: ParamsData | null) => {
+    setParams(data);
+    setEdits({});
+  };
 
   const loadParams = async () => {
     if (!selectedUid) return;
@@ -113,16 +134,16 @@ export default function TunablesPage({
         const data = await r.json();
         if (superseded()) return;
         if (data.fields) {
-          setParams(data);
+          showRead(data);
           setParamsUid(uid);
         } else {
-          setParams(null);
+          showRead(null);
           setMessage("No tunable parameters registered for this component.");
         }
       } else {
         const text = await r.text();
         if (superseded()) return;
-        setParams(null);
+        showRead(null);
         if (text.includes("COMPONENT_NOT_FOUND")) {
           setMessage(
             "This component has no tunable parameters in the data registry.",
@@ -148,12 +169,37 @@ export default function TunablesPage({
   }, [selectedTarget, selectedUid]);
 
   const updateField = (name: string, value: string) => {
-    if (!params || isVarLen(params)) return;
-    const numVal = parseFloat(value);
-    setParams({
-      ...params,
-      fields: { ...params.fields, [name]: isNaN(numVal) ? value : numVal },
-    });
+    setEdits((typed) => ({ ...typed, [name]: value }));
+  };
+
+  /** The flat form's fields as Apply sends them, or the refusal of the
+   *  first typed value that cannot be sent. A field not typed into goes
+   *  as read. A typed 8-byte integer goes as the decimal string of a
+   *  whole number in its range, never through a double; any other typed
+   *  value goes as a number when it reads as one, else as typed. */
+  const appliedFields = (
+    read: Record<string, number | string>,
+  ): { fields: Record<string, number | string> } | { refusal: string } => {
+    const fields = { ...read };
+    for (const [name, text] of Object.entries(edits)) {
+      const fi = fieldInfo.find((f) => f.name === name);
+      if (isWideInteger(fi)) {
+        const bits = 8 * fi.size;
+        const signed = fi.type === "int";
+        const n = parseWholeNumber(text, bits, signed);
+        if (n === null) {
+          const takes = wholeNumberHint(bits, signed);
+          return {
+            refusal: `Not applied: field '${name}' takes ${takes}; '${text}' is not one.`,
+          };
+        }
+        fields[name] = n.toString();
+      } else {
+        const n = parseFloat(text);
+        fields[name] = isNaN(n) ? text : n;
+      }
+    }
+    return { fields };
   };
 
   const applyParams = async () => {
@@ -166,19 +212,27 @@ export default function TunablesPage({
       );
       return;
     }
+    // Include raw_hex so backend can use it as base (no hidden INSPECT)
+    let body: object;
+    if (isVarLen(params)) {
+      body = {
+        fields: params.fields.header,
+        entries: params.fields.entries,
+        variable_length: true,
+        raw_hex: params.raw_hex,
+      };
+    } else {
+      const applied = appliedFields(params.fields);
+      if ("refusal" in applied) {
+        setError(applied.refusal);
+        return;
+      }
+      body = { fields: applied.fields, raw_hex: params.raw_hex };
+    }
     setLoading(true);
     setError(null);
     setMessage(null);
     try {
-      // Include raw_hex so backend can use it as base (no hidden INSPECT)
-      const body = isVarLen(params)
-        ? {
-            fields: params.fields.header,
-            entries: params.fields.entries,
-            variable_length: true,
-            raw_hex: params.raw_hex,
-          }
-        : { fields: params.fields, raw_hex: params.raw_hex };
       const r = await apiFetch(
         `/api/targets/${selectedTarget}/params/${paramsUid}/update`,
         {
@@ -238,6 +292,9 @@ export default function TunablesPage({
     return fi ? `${fi.type}${fi.size > 0 ? fi.size * 8 : ""}` : "";
   };
 
+  const isWide = (name: string) =>
+    isWideInteger(fieldInfo.find((f) => f.name === name));
+
   return (
     <div className="max-w-screen-2xl">
       <div className="flex items-center gap-3 mb-5">
@@ -246,7 +303,7 @@ export default function TunablesPage({
           value={selectedUid}
           onChange={(e) => {
             // Nothing of the last component shows while this one loads.
-            setParams(null);
+            showRead(null);
             setSelectedUid(e.target.value);
           }}
           className="text-sm"
@@ -381,9 +438,9 @@ export default function TunablesPage({
                       </td>
                       <td style={{ padding: "0.4rem 0.8rem" }}>
                         <input
-                          type="number"
-                          step="any"
-                          value={value}
+                          type={isWide(name) ? "text" : "number"}
+                          step={isWide(name) ? undefined : "any"}
+                          value={edits[name] ?? value}
                           onChange={(e) => updateField(name, e.target.value)}
                           className="mono text-sm w-full"
                         />

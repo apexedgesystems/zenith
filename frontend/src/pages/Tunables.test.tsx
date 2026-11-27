@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { act, fireEvent, screen, waitFor } from "@testing-library/react";
 import TunablesPage from "./Tunables";
-import { json, renderWithQuery, stubFetch } from "../test/helpers";
+import { bytesToHex } from "../api/decode";
+import {
+  json,
+  renderWithQuery,
+  stubFetch,
+  type FetchStub,
+} from "../test/helpers";
 
 /* Two instances of one component type, answered as the backend answers
  * GET /params/{uid}. The form shows, and Apply sends, only the values
@@ -97,5 +103,205 @@ describe("Tunables", () => {
       fields: B.fields,
       raw_hex: B.raw_hex,
     });
+  });
+});
+
+/* 8-byte integers cross the wire as decimal strings: the parameter read
+ * gives an int64 or uint64 field as one, since a double (what a JSON
+ * number becomes here) holds integers exactly only up to 2^53, and the
+ * update takes one back. The answers below are JSON text, as the server
+ * sends it, and the checks read the text the page posts. */
+
+/** The bytes of a block holding an int64, a uint64 and an int32, as the
+ *  read gives them: little-endian hex. */
+function wideHex(iWide: string, uWide: string): string {
+  const view = new DataView(new ArrayBuffer(20));
+  view.setBigInt64(0, BigInt(iWide), true);
+  view.setBigUint64(8, BigInt(uWide), true);
+  view.setInt32(16, -70000, true);
+  return bytesToHex(new Uint8Array(view.buffer));
+}
+
+/** Serve one component whose block reads, as JSON text, with `iWide`
+ *  and `uWide` as the strings the server gives 8-byte integers in. */
+function serveWide(iWide: string, uWide: string): FetchStub {
+  const block =
+    `{"fullUid":"0x00C000","component":"Matrix","struct_name":"MatrixTprm",` +
+    `"fields":{"iWide":"${iWide}","uWide":"${uWide}","iWord":-70000},` +
+    `"raw_hex":"${wideHex(iWide, uWide)}","raw_length":20}`;
+  return stubFetch(({ method, path }) => {
+    if (method === "POST") return json({ status: 0, uploaded_bytes: 20 });
+    if (path === "/api/targets/t1/registry") {
+      return json({
+        components: [
+          { fullUid: "0x00C000", name: "Matrix #0", reachable: true },
+        ],
+      });
+    }
+    if (path === "/api/targets/t1/params/00C000") return new Response(block);
+    if (path === "/api/targets/t1/structs/Matrix") {
+      return json({
+        structs: {
+          MatrixTprm: {
+            category: "TUNABLE_PARAM",
+            fields: [
+              { name: "iWide", type: "int", offset: 0, size: 8 },
+              { name: "uWide", type: "uint", offset: 8, size: 8 },
+              { name: "iWord", type: "int", offset: 16, size: 4 },
+            ],
+          },
+        },
+      });
+    }
+    return undefined;
+  });
+}
+
+/** Open the page on that block and wait for its field types. */
+async function openWide(iWide: string, uWide: string): Promise<FetchStub> {
+  const server = serveWide(iWide, uWide);
+  renderWithQuery(<TunablesPage selectedTarget="t1" />);
+  await screen.findByText("uint64");
+  return server;
+}
+
+/** The bodies of the updates posted, as sent. */
+const posted = (server: FetchStub) =>
+  server.sent.filter((r) => r.method === "POST").map((r) => r.body);
+
+/** The update body for the block, as text, with these field values. */
+const wideBody = (iWide: string, uWide: string, hex: string) =>
+  `{"fields":{"iWide":"${iWide}","uWide":"${uWide}","iWord":-70000},` +
+  `"raw_hex":"${hex}"}`;
+
+/** The values the block is read with before an edit. */
+const I0 = "-8000000000";
+const U0 = "9000000000";
+
+/** Type `text` into field `name` of the block read with I0 and U0. */
+function typeInto(name: "iWide" | "uWide", text: string) {
+  fireEvent.change(screen.getByDisplayValue(name === "iWide" ? I0 : U0), {
+    target: { value: text },
+  });
+}
+
+describe("Tunables 8-byte integers", () => {
+  it.each([
+    ["9007199254740993", "9007199254740993"],
+    ["-9007199254740993", "9223372036854775807"],
+    ["9223372036854775807", "18446744073709551615"],
+    ["-9223372036854775808", "18446744073709551615"],
+  ])(
+    "shows int64 %s and uint64 %s as read and applies them unedited as the same strings",
+    async (iWide, uWide) => {
+      const server = await openWide(iWide, uWide);
+      for (const v of [iWide, uWide]) {
+        expect(screen.getAllByDisplayValue(v).length).toBeGreaterThan(0);
+      }
+      fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+      await waitFor(() => expect(posted(server)).toHaveLength(1));
+      expect(posted(server)[0]).toBe(
+        wideBody(iWide, uWide, wideHex(iWide, uWide)),
+      );
+    },
+  );
+
+  it.each([
+    ["iWide", "9007199254740993", "9007199254740993"],
+    ["iWide", "-9007199254740993", "-9007199254740993"],
+    ["iWide", "0x20000000000001", "9007199254740993"],
+    ["iWide", "9223372036854775807", "9223372036854775807"],
+    ["iWide", "-9223372036854775808", "-9223372036854775808"],
+    ["uWide", "18446744073709551615", "18446744073709551615"],
+    ["uWide", "0xFFFFFFFFFFFFFFFF", "18446744073709551615"],
+    ["uWide", "0", "0"],
+  ] as const)(
+    "applies %s typed as %s as the decimal string %s",
+    async (name, typed, sent) => {
+      const server = await openWide(I0, U0);
+      typeInto(name, typed);
+      fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+      await waitFor(() => expect(posted(server)).toHaveLength(1));
+      const values = { iWide: I0, uWide: U0, [name]: sent };
+      expect(posted(server)[0]).toBe(
+        wideBody(values.iWide, values.uWide, wideHex(I0, U0)),
+      );
+    },
+  );
+
+  it.each([
+    ["iWide", "9223372036854775808"],
+    ["iWide", "-9223372036854775809"],
+    ["uWide", "18446744073709551616"],
+    ["uWide", "-1"],
+  ] as const)(
+    "refuses %s typed as %s, one past its range, naming the field, and sends nothing",
+    async (name, typed) => {
+      const server = await openWide(I0, U0);
+      typeInto(name, typed);
+      fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+      expect(
+        await screen.findByText(new RegExp(`field '${name}'.*'${typed}'`)),
+      ).toBeInTheDocument();
+      expect(posted(server)).toHaveLength(0);
+    },
+  );
+
+  it("takes field types from the struct the block was read with, of several", async () => {
+    // A component may define more than one TUNABLE_PARAM struct; the
+    // read names the one it decoded the block with, and the struct
+    // route lists them by name, here with the other one first.
+    const server = stubFetch(({ method, path }) => {
+      if (method === "POST") return json({ status: 0, uploaded_bytes: 10 });
+      if (path === "/api/targets/t1/registry") {
+        return json({
+          components: [
+            { fullUid: "0x000000", name: "Executive", reachable: true },
+          ],
+        });
+      }
+      if (path === "/api/targets/t1/params/000000") {
+        return new Response(
+          `{"fullUid":"0x000000","component":"Executive",` +
+            `"struct_name":"ExecutiveTunableParams",` +
+            `"fields":{"clockFrequencyHz":100,"shutdownAtCycle":"0"},` +
+            `"raw_hex":"64000000000000000000","raw_length":10}`,
+        );
+      }
+      if (path === "/api/targets/t1/structs/Executive") {
+        return json({
+          structs: {
+            ExecutiveThreadConfigTprm: {
+              category: "TUNABLE_PARAM",
+              fields: [
+                { name: "startup", type: "struct", offset: 0, size: 11 },
+              ],
+            },
+            ExecutiveTunableParams: {
+              category: "TUNABLE_PARAM",
+              fields: [
+                { name: "clockFrequencyHz", type: "uint", offset: 0, size: 2 },
+                { name: "shutdownAtCycle", type: "uint", offset: 2, size: 8 },
+              ],
+            },
+          },
+        });
+      }
+      return undefined;
+    });
+    renderWithQuery(<TunablesPage selectedTarget="t1" />);
+    expect(await screen.findByText("uint64")).toBeInTheDocument();
+    expect(screen.getByText("uint16")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByDisplayValue("0"), {
+      target: { value: "18446744073709551615" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    await waitFor(() => expect(posted(server)).toHaveLength(1));
+    expect(posted(server)[0]).toBe(
+      `{"fields":{"clockFrequencyHz":100,` +
+        `"shutdownAtCycle":"18446744073709551615"},` +
+        `"raw_hex":"64000000000000000000"}`,
+    );
   });
 });
