@@ -96,9 +96,10 @@ test-frontend:
 # and its report would merge them, and the frontend removes its old report
 # before installing, so a failed install leaves none behind.
 # The backend measures the library's and the server binary's tests with the
-# dev image's cargo-llvm-cov; llvm-cov counts the inline #[cfg(test)] modules
-# as covered lines, so a production file's row says more than the total. The
-# frontend measures every source file under src/, loaded by a test or not
+# dev image's cargo-llvm-cov, which counts each file's inline #[cfg(test)]
+# code with the file: a file's row and the TOTAL both include its inline
+# tests (docs/TESTING.md gives a production-only reading). The frontend
+# measures every source file under src/, loaded by a test or not
 # (vitest's v8 provider, configured in vite.config.ts). The container writes
 # the reports as root, and llvm-cov makes its HTML directories readable by
 # owner and group only, so coverage-backend opens its report to every user:
@@ -148,7 +149,7 @@ coverage-summary:
 		echo; \
 		case $$half in \
 			backend) echo '### Backend: library and server binary tests (cargo llvm-cov)'; echo; \
-				echo 'Line counts include the inline test modules; read a production file by its row.' ;; \
+				echo 'File rows and the TOTAL both include the inline tests of each file; docs/TESTING.md gives a production-only reading.' ;; \
 			frontend) echo '### Frontend: every file under src/ (vitest, v8)' ;; \
 		esac; \
 		echo; \

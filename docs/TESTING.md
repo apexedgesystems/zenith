@@ -30,7 +30,7 @@ is needed. `make format`, `make format-check` and
 
 The backend has 202 library tests and 25 in the server binary
 (`main.rs`); the library's harness runs in about 2.2 s and the
-binary's in under a second. The frontend has 104 tests in 20 files and
+binary's in about a second. The frontend has 104 tests in 20 files and
 runs in about 4 s. `make test` takes about a minute, most of it
 `npm ci` and starting the containers. These are the figures at the
 time of writing; the harnesses print the current ones.
@@ -80,14 +80,16 @@ make coverage-check COVERAGE_BACKEND_MIN_LINE=75 COVERAGE_FRONTEND_MIN_LINE=50
 
 Reading the numbers:
 
-- **Backend** (cargo-llvm-cov): the inline `#[cfg(test)]` modules count
-  as covered lines, so a file's row, and the TOTAL, read higher than its
-  production code alone. `main.rs` is the plainest case: its row
-  includes its own test module, which runs in full. For a production
-  figure, leave each file's lines from its `mod tests {` on out of
-  `lcov.info`. At the time of writing the TOTAL row reads about 80% of
-  lines; production code alone is about 64%: 91% of the library's lines
-  and 30% of `main.rs`'s, where the boot sequence and the handlers that
+- **Backend** (cargo-llvm-cov): a Rust file's row counts its inline
+  test code with its production code, and the TOTAL counts every file's,
+  so both read higher than production code alone. `main.rs` is the
+  plainest case: its row includes its own test module, which runs in
+  full. For a production figure, leave every line of every
+  `#[cfg(test)]` item out of `lcov.info`: each file's test modules and
+  any test-only item outside them, such as `repo_structs_path` in
+  `config.rs`. At the time of writing the TOTAL row reads about 81% of
+  lines; production code alone is about 66%: 91% of the library's lines
+  and 33% of `main.rs`'s, where the boot sequence and the handlers that
   talk to a target need a running server or a live target.
 - **Frontend** (Vitest, v8): every file under `src/` is in the table,
   loaded by a test or not, so a file no test reaches reads 0%. Test
