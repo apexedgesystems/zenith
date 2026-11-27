@@ -156,6 +156,45 @@ describe("Telemetry page status", () => {
     expect(screen.getByText("Live")).toBeInTheDocument();
   });
 
+  it("stops reading Live once the target list reports the link down, though samples still arrive", async () => {
+    linkConnected = true;
+    await renderPage();
+    await act(async () => {
+      FakeSocket.opened[0].serverSend(sample);
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText("Live")).toBeInTheDocument();
+    linkConnected = false;
+    for (let s = 1; s <= 4; s++) {
+      // A sample a second, past the next target list read
+      await act(async () => {
+        FakeSocket.opened[0].serverSend({ ...sample, timestamp_ms: s * 1_000 });
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+    }
+    expect(screen.getByText("Off")).toBeInTheDocument();
+    expect(screen.queryByText("Live")).not.toBeInTheDocument();
+  });
+
+  it("stops reading Live when samples stop for 3 s, and reads Live again with the next one", async () => {
+    linkConnected = true;
+    await renderPage();
+    await act(async () => {
+      FakeSocket.opened[0].serverSend(sample);
+      await vi.advanceTimersByTimeAsync(2_900);
+    });
+    expect(screen.getByText("Live")).toBeInTheDocument();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
+    expect(screen.getByText("No data")).toBeInTheDocument();
+    await act(async () => {
+      FakeSocket.opened[0].serverSend({ ...sample, timestamp_ms: 4_100 });
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText("Live")).toBeInTheDocument();
+  });
+
   it("reads Off once the target list reports the link down", async () => {
     linkConnected = true;
     await renderPage();

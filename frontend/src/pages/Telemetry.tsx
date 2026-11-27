@@ -21,6 +21,10 @@ import {
 
 const MAX_LIVE_POINTS = 6000; // WS buffer cap for sidebar live values
 const WS_BATCH_MS = 100; // Flush WS batch every 100ms
+// A stream with no sample for this long is quiet, not live: the target
+// list is read on the same period, so a dropped link and a stalled
+// stream both leave the Live status within one read.
+const STALE_MS = 3000;
 
 export default function TelemetryPage({
   selectedTarget,
@@ -33,13 +37,17 @@ export default function TelemetryPage({
   const [layouts, setLayouts] = useState<TelemetryLayout[]>([]);
   const [selectedLayout, setSelectedLayout] = useState("");
   const [connected, setConnected] = useState(false);
-  // `connected` above means samples are arriving on the live stream; the
-  // link itself can be up with nothing to push, and that is not "off".
-  // Neither is a listening link, bound and waiting for its target.
+  // `connected` above means samples are arriving on the live stream (one
+  // within STALE_MS); the link itself can be up with nothing to push,
+  // and that is not "off". Neither is a listening link, bound and
+  // waiting for its target. Live (`streaming`) needs both: the stream
+  // outlives a dropped link, since the backend keeps the socket open
+  // across it.
   const { data: targets } = useTargets();
   const link = targets?.find((t) => t.id === selectedTarget);
   const linkUp = link?.connected ?? false;
   const linkListening = !linkUp && (link?.listening ?? false);
+  const streaming = connected && linkUp;
   const [sampleCount, setSampleCount] = useState(0);
   const [pickerFilter, setPickerFilter] = useState("");
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
@@ -141,6 +149,9 @@ export default function TelemetryPage({
     let reconnectTimer: number | undefined;
     let reconnectDelay = 1000;
     let stopped = false;
+    // Whether samples are arriving, and when the last one did.
+    let receiving = false;
+    let lastSampleAt = 0;
 
     function connect() {
       if (stopped) return;
@@ -150,17 +161,14 @@ export default function TelemetryPage({
         }/api/targets/${selectedTarget}/telemetry/live`,
       );
       wsInstance = ws;
-      let receivedData = false;
 
       ws.onopen = () => {
         reconnectDelay = 1000;
-        setTimeout(() => {
-          if (!receivedData && !stopped) setConnected(false);
-        }, 3000);
       };
       ws.onmessage = (event) => {
-        if (!receivedData) {
-          receivedData = true;
+        lastSampleAt = Date.now();
+        if (!receiving) {
+          receiving = true;
           setConnected(true);
         }
         if (pausedRef.current) return;
@@ -172,6 +180,7 @@ export default function TelemetryPage({
       };
       ws.onclose = (event) => {
         if (stopped) return;
+        receiving = false;
         setConnected(false);
         if (event.code === SESSION_END_CLOSE) {
           // The server closed this stream because its session ended:
@@ -187,8 +196,13 @@ export default function TelemetryPage({
       };
     }
 
-    // Flush WS batch into liveDataRef and update state (for small windows)
+    // Flush WS batch into liveDataRef and update state (for small
+    // windows); a stream quiet for STALE_MS stops reading as receiving.
     const flushTimer = window.setInterval(() => {
+      if (receiving && Date.now() - lastSampleAt > STALE_MS) {
+        receiving = false;
+        setConnected(false);
+      }
       const batch = batchRef.current;
       if (batch.length === 0) return;
       batchRef.current = [];
@@ -673,7 +687,7 @@ export default function TelemetryPage({
           <div
             className="flex items-center gap-1.5 text-xs"
             style={{
-              color: connected
+              color: streaming
                 ? paused
                   ? "var(--color-warn)"
                   : "var(--color-ok)"
@@ -687,7 +701,7 @@ export default function TelemetryPage({
             <div
               className="w-1.5 h-1.5 rounded-full"
               style={{
-                backgroundColor: connected
+                backgroundColor: streaming
                   ? paused
                     ? "var(--color-warn)"
                     : "var(--color-ok)"
@@ -698,7 +712,7 @@ export default function TelemetryPage({
                       : "var(--color-crit)",
               }}
             />
-            {!connected
+            {!streaming
               ? linkUp
                 ? "No data"
                 : linkListening
@@ -921,7 +935,7 @@ export default function TelemetryPage({
               className="text-xs py-4 text-center"
               style={{ color: "var(--color-text-muted)" }}
             >
-              {connected
+              {streaming
                 ? "Waiting for channels..."
                 : linkUp
                   ? "Connected -- no telemetry arriving"

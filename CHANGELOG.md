@@ -124,6 +124,20 @@ architecture review; work before that is the v0.0.1 tag.
   the 60-second grace that let a 30-second ticket work for 90 seconds.
 - An audit log request whose offset lies past the end returns no rows
   instead of the first page.
+- The Telemetry page reads Live only while samples arrive and the link
+  is up: a link reported down, or a stream silent for 3 s, shows Off,
+  Listening or No data instead.
+- Tunables shows and applies only the selected component's values: a
+  slow read of the component left behind no longer replaces them, and
+  Apply writes to the component the values were read from.
+- The chart's hover readout shows no value for a channel before its
+  first sample or after its last, instead of extrapolating one.
+- Dashboard health cards for individual components load: the console
+  asks for them with the uid and opcode in the hex form the command
+  route reads.
+- Command forms refuse a blank field, and an integer that is not a
+  whole decimal or 0x number within its field's range, instead of
+  sending 0 or a truncated value.
 - UDP targets show listening until first contact, and TCP targets no
   longer falsely remain connected after an immediate hangup or a
   disconnect racing an incoming session. Clients of the connect

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRegistry, useTunableFields } from "../api/queries";
 import { apiFetch } from "../api/apiFetch";
 
@@ -40,6 +40,11 @@ function isVarLen(p: ParamsData): p is VarLenParamsData {
   return p.variable_length === true;
 }
 
+/** A registry uid as the params routes take it: hex digits, no 0x. */
+function routeUid(uid: string): string {
+  return uid.replace("0x", "").replace("0X", "");
+}
+
 /* ----------------------------- Page ----------------------------- */
 
 export default function TunablesPage({
@@ -52,6 +57,8 @@ export default function TunablesPage({
   >([]);
   const [selectedUid, setSelectedUid] = useState("");
   const [params, setParams] = useState<ParamsData | null>(null);
+  // The component the shown values were read from (route form).
+  const [paramsUid, setParamsUid] = useState("");
   const [fieldInfo, setFieldInfo] = useState<FieldInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -81,13 +88,22 @@ export default function TunablesPage({
     setFieldInfo((tunableFieldsQuery.data ?? []) as FieldInfo[]);
   }, [tunableFieldsQuery.data]);
 
+  // Reads are numbered and only the latest may write the form: a slow
+  // answer for a component the operator has since left, or for a read
+  // since repeated, is dropped instead of replacing what is shown.
+  const latestRead = useRef(0);
+  // The reload after an apply; a new selection cancels it.
+  const reloadTimer = useRef<number | undefined>(undefined);
+
   const loadParams = async () => {
     if (!selectedUid) return;
+    const read = ++latestRead.current;
+    const superseded = () => read !== latestRead.current;
     setLoading(true);
     setError(null);
     setMessage(null);
     try {
-      const uid = selectedUid.replace("0x", "").replace("0X", "");
+      const uid = routeUid(selectedUid);
       if (!uid) {
         setLoading(false);
         return;
@@ -95,14 +111,17 @@ export default function TunablesPage({
       const r = await apiFetch(`/api/targets/${selectedTarget}/params/${uid}`);
       if (r.ok) {
         const data = await r.json();
+        if (superseded()) return;
         if (data.fields) {
           setParams(data);
+          setParamsUid(uid);
         } else {
           setParams(null);
           setMessage("No tunable parameters registered for this component.");
         }
       } else {
         const text = await r.text();
+        if (superseded()) return;
         setParams(null);
         if (text.includes("COMPONENT_NOT_FOUND")) {
           setMessage(
@@ -113,6 +132,7 @@ export default function TunablesPage({
         }
       }
     } catch (e: unknown) {
+      if (superseded()) return;
       setError(e instanceof Error ? e.message : String(e));
     }
     setLoading(false);
@@ -120,6 +140,7 @@ export default function TunablesPage({
 
   useEffect(() => {
     loadParams();
+    return () => window.clearTimeout(reloadTimer.current);
     // loadParams is intentionally not in deps -- it's defined every render
     // (no useCallback) and including it would loop. The function only reads
     // selectedTarget + selectedUid which are both in deps.
@@ -137,11 +158,18 @@ export default function TunablesPage({
 
   const applyParams = async () => {
     if (!params) return;
+    // The values go back to the component they were read from, and only
+    // while it is the one selected.
+    if (paramsUid !== routeUid(selectedUid)) {
+      setError(
+        "Not applied: these values were read from another component. Reload, then apply.",
+      );
+      return;
+    }
     setLoading(true);
     setError(null);
     setMessage(null);
     try {
-      const uid = selectedUid.replace("0x", "").replace("0X", "");
       // Include raw_hex so backend can use it as base (no hidden INSPECT)
       const body = isVarLen(params)
         ? {
@@ -152,7 +180,7 @@ export default function TunablesPage({
           }
         : { fields: params.fields, raw_hex: params.raw_hex };
       const r = await apiFetch(
-        `/api/targets/${selectedTarget}/params/${uid}/update`,
+        `/api/targets/${selectedTarget}/params/${paramsUid}/update`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -181,7 +209,7 @@ export default function TunablesPage({
                   })`
               : `Parameters updated and reloaded (${result.uploaded_bytes} bytes uploaded)`,
           );
-          setTimeout(loadParams, 500);
+          reloadTimer.current = window.setTimeout(loadParams, 500);
         } else if (staged && staged.step !== "applied") {
           // The pipeline refused before apply: active bytes untouched.
           const verdict =
@@ -216,7 +244,11 @@ export default function TunablesPage({
         <h1 className="text-xl font-bold">Tunables</h1>
         <select
           value={selectedUid}
-          onChange={(e) => setSelectedUid(e.target.value)}
+          onChange={(e) => {
+            // Nothing of the last component shows while this one loads.
+            setParams(null);
+            setSelectedUid(e.target.value);
+          }}
           className="text-sm"
           style={{ padding: "4px 8px" }}
         >

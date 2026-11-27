@@ -41,6 +41,15 @@ function expectRows(rows: [type: string, value: string, hex: string][]) {
   }
 }
 
+/** Each row's input is refused, naming the field. */
+function expectRefused(rows: [type: string, value: string][]) {
+  for (const [type, value] of rows) {
+    expect(encoded(type, value), `${type} '${value}'`).toMatch(
+      /^refused: field 'x'/,
+    );
+  }
+}
+
 interface Catalog {
   components: Record<
     string,
@@ -60,28 +69,43 @@ function command(text: string, component: string, name: string) {
 }
 
 describe("encodeField", () => {
-  it("encodes unsigned integers little-endian at the field's width, masking what does not fit", () => {
+  it("encodes unsigned integers little-endian at the field's width and refuses what does not fit", () => {
     expectRows([
       ["uint8", "42", "2a"],
-      ["uint8", "256", "00"], // 0x100 & 0xFF
-      ["uint8", "257", "01"],
+      ["uint8", "255", "ff"],
       ["uint16", "0x1234", "3412"],
-      ["uint16", "65536", "0000"], // 0x10000 & 0xFFFF
+      ["uint16", "65535", "ffff"],
       ["uint32", "0xDEADBEEF", "efbeadde"],
+      ["uint32", "4294967295", "ffffffff"],
       ["uint32", "0", "00000000"],
+    ]);
+    expectRefused([
+      ["uint8", "256"],
+      ["uint8", "257"],
+      ["uint16", "65536"],
+      ["uint32", "4294967296"],
+      ["uint32", "0x100000000"],
     ]);
   });
 
-  it("reads unsigned input as decimal or 0x hex, clamps negatives to zero and encodes non-numeric input as zero", () => {
+  it("reads unsigned input as a whole decimal or 0x hex number and refuses anything else", () => {
     expectRows([
       ["uint8", "0xFF", "ff"],
       ["uint8", "0x0a", "0a"],
-      ["uint8", "-5", "00"],
-      ["uint16", "-1", "0000"],
-      ["uint32", "-1", "00000000"],
-      ["uint8", "abc", "00"],
-      ["uint8", "", "00"],
-      ["uint16", "abc", "0000"],
+      ["uint8", " 7 ", "07"],
+      ["uint16", "007", "0700"],
+    ]);
+    expectRefused([
+      ["uint8", "-5"],
+      ["uint16", "-1"],
+      ["uint32", "-1"],
+      ["uint8", "abc"],
+      ["uint16", "abc"],
+      ["uint8", "12abc"],
+      ["uint8", "1.9"],
+      ["uint8", "1e3"],
+      ["uint8", "0x1G"],
+      ["uint8", "0x"],
     ]);
   });
 
@@ -123,14 +147,21 @@ describe("encodeField", () => {
 });
 
 describe("buildPayload", () => {
-  it("encodes a blank field as zero", () => {
+  it("refuses a blank field rather than sending zero", () => {
+    for (const type of ["uint8", "uint16", "uint32", "float", "double"]) {
+      for (const value of ["", "  "]) {
+        const e = encodeField({ name: "a_m", type }, value);
+        expect(e.ok, `${type} '${value}'`).toBe(false);
+        if (!e.ok) expect(e.error).toContain("'a_m'");
+      }
+    }
     const fields = [
       { name: "a_m", type: "float" },
       { name: "b_m", type: "float" },
     ];
-    expect(buildPayload(fields, {})).toEqual({
-      ok: true,
-      hex: "0000000000000000",
+    expect(buildPayload(fields, { a_m: "1.5" })).toEqual({
+      ok: false,
+      error: "field 'b_m' is blank",
     });
   });
 });
@@ -195,6 +226,7 @@ describe("command form", () => {
   it("shows the refusal and posts nothing for a field it cannot encode", async () => {
     const server = renderPage(specCatalogText);
     const user = await choose("SpecBusDriver #0", "SendFrame");
+    await user.type(screen.getByPlaceholderText(/^Frame length/), "4");
     await user.click(screen.getByRole("button", { name: "Send" }));
 
     const alert = await screen.findByRole("alert");

@@ -1,5 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState, useMemo } from "react";
-import { computePadL, pixelToTime } from "./chartGeometry";
+import { computePadL, pixelToTime, readoutAt } from "./chartGeometry";
 import { COLORS, fieldName, exportPng, exportCsv } from "../types/telemetry";
 import type { ThresholdDef, ChannelData } from "../types/telemetry";
 
@@ -405,25 +405,14 @@ const MultiChart = memo(function MultiChart({
         range?: [number, number];
       }[] = [];
       visibleChannels.forEach((ch, ci) => {
-        const pts = data[ch];
-        if (!pts || pts.length === 0) return;
-        let lo = 0,
-          hi = pts.length - 1;
-        while (lo < hi - 1) {
-          const mid = (lo + hi) >> 1;
-          if (pts[mid].t < tAtMouse) lo = mid;
-          else hi = mid;
-        }
-        const p0 = pts[lo],
-          p1 = pts[hi];
-        const frac = p1.t === p0.t ? 0 : (tAtMouse - p0.t) / (p1.t - p0.t);
-        // Envelope readout comes from the nearer point: it makes the
-        // resolution explicit -- an operator reading a tiered bucket
-        // sees mean plus spread, not a false point sample.
-        const near = frac < 0.5 ? p0 : p1;
+        // No reading where the cursor is before the channel's first
+        // sample or after its last (a channel that lags, or stopped).
+        const reading = readoutAt(data[ch] ?? [], tAtMouse);
+        if (!reading) return;
+        const { v, near } = reading;
         values.push({
           ch,
-          v: p0.v + frac * (p1.v - p0.v),
+          v,
           color: COLORS[ci % COLORS.length],
           ...(near.lo !== undefined && near.hi !== undefined
             ? { range: [near.lo, near.hi] as [number, number] }

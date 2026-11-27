@@ -245,7 +245,6 @@ async function buildHealthCards(
       return uid !== 0x000000;
     })
     .map(({ comp, idx }) => {
-      const uid = parseInt(comp.fullUid.replace("0x", ""), 16);
       const baseName = comp.name
         .split(" #")[0]
         .split("#")[0]
@@ -263,21 +262,28 @@ async function buildHealthCards(
           break;
         }
       }
-      return { comp, idx, uid, tlmStruct };
+      return { comp, idx, tlmStruct };
     })
     .filter((t) => t.tlmStruct !== undefined) as {
     comp: RegistryComponent;
     idx: number;
-    uid: number;
     tlmStruct: TelemetryStruct;
   }[];
 
   const results = await Promise.allSettled(
-    componentTasks.map(async ({ comp, uid, tlmStruct }) => {
+    componentTasks.map(async ({ comp, tlmStruct }) => {
+      // The command route reads full_uid and opcode as hex strings (an
+      // all-digit one too), as the Commanding page sends them.
       const r = await apiFetch(`/api/targets/${selectedTarget}/command`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ full_uid: uid, opcode: tlmStruct.opcode }),
+        body: JSON.stringify({
+          full_uid: comp.fullUid,
+          opcode: `0x${tlmStruct.opcode
+            .toString(16)
+            .toUpperCase()
+            .padStart(4, "0")}`,
+        }),
       });
       if (!r.ok) return null;
       const data = await r.json();

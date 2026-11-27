@@ -98,40 +98,51 @@ export type EncodedField =
   | { ok: true; hex: string }
   | { ok: false; error: string };
 
-/** Encode one typed form field little-endian. Unsigned integers parse
- *  decimal or 0x hex; float and double are the IEEE 754 binary32 and
- *  binary64 of a finite number. Any other catalog type is refused, so
- *  the form never sends bytes that do not match the field's layout. */
+/** Encode one typed form field little-endian. An unsigned integer is a
+ *  whole number in range for its width, in decimal or 0x hex; float and
+ *  double are the IEEE 754 binary32 and binary64 of a finite number. A
+ *  blank field, any other input and any other catalog type are refused,
+ *  so the form never sends a value the operator did not enter, or bytes
+ *  that do not match the field's layout. */
 export function encodeField(
   field: CommandFieldDef,
   value: string,
 ): EncodedField {
+  const text = value.trim();
+  const blank: EncodedField = {
+    ok: false,
+    error: `field '${field.name}' is blank`,
+  };
   switch (field.type) {
     case "uint8":
     case "uint16":
     case "uint32": {
-      // Parse as hex if starts with 0x, otherwise decimal
-      const num =
-        value.startsWith("0x") || value.startsWith("0X")
-          ? parseInt(value, 16)
-          : parseInt(value);
-      // Non-numeric input encodes zero; unsigned types clamp to >= 0
-      const n = isNaN(num) ? 0 : Math.max(0, num);
-      if (field.type === "uint8") {
-        return { ok: true, hex: (n & 0xff).toString(16).padStart(2, "0") };
+      if (text === "") return blank;
+      const bytes =
+        field.type === "uint8" ? 1 : field.type === "uint16" ? 2 : 4;
+      const max = 2 ** (8 * bytes) - 1;
+      const n = /^0[xX][0-9a-fA-F]+$/.test(text)
+        ? parseInt(text.slice(2), 16)
+        : /^[0-9]+$/.test(text)
+          ? parseInt(text, 10)
+          : NaN;
+      if (Number.isNaN(n) || n > max) {
+        return {
+          ok: false,
+          error: `field '${field.name}': '${value}' is not a ${field.type} (a whole number from 0 to ${max}, decimal or 0x hex)`,
+        };
       }
-      if (field.type === "uint16") {
-        const buf = new ArrayBuffer(2);
-        new DataView(buf).setUint16(0, n & 0xffff, true);
-        return { ok: true, hex: bytesToHex(new Uint8Array(buf)) };
-      }
-      const buf = new ArrayBuffer(4);
-      new DataView(buf).setUint32(0, n >>> 0, true);
+      const buf = new ArrayBuffer(bytes);
+      const view = new DataView(buf);
+      if (bytes === 1) view.setUint8(0, n);
+      else if (bytes === 2) view.setUint16(0, n, true);
+      else view.setUint32(0, n, true);
       return { ok: true, hex: bytesToHex(new Uint8Array(buf)) };
     }
     case "float":
     case "double": {
-      const n = Number(value);
+      if (text === "") return blank;
+      const n = Number(text);
       const single = field.type === "float";
       if (!Number.isFinite(single ? Math.fround(n) : n)) {
         return {
@@ -153,14 +164,15 @@ export function encodeField(
 }
 
 /** Encode a command's fields in catalog order into one hex payload, or
- *  return the first field's refusal. Empty inputs encode as 0. */
+ *  return the first field's refusal; a blank field is refused, never
+ *  sent as 0. */
 export function buildPayload(
   fields: CommandFieldDef[],
   values: Record<string, string>,
 ): EncodedField {
   let hex = "";
   for (const field of fields) {
-    const encoded = encodeField(field, values[field.name] || "0");
+    const encoded = encodeField(field, values[field.name] ?? "");
     if (!encoded.ok) return encoded;
     hex += encoded.hex;
   }
