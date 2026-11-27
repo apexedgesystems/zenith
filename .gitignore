@@ -3,6 +3,10 @@ target/
 backend/target/
 backend/target-test/
 backend/target-bench/
+backend/target-cov/
+
+# Coverage reports (make coverage)
+coverage/
 
 # Node
 frontend/node_modules/

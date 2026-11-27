@@ -1,7 +1,10 @@
 # ==============================================================================
 # CI -- Build, test, and lint on pull requests to main
 #
-# Runs all checks inside the dev Docker Compose service (Rust + Node).
+# The tests, lint and format check are Makefile targets, run inside the
+# dev Docker Compose service (Rust + Node). The tests run once,
+# instrumented (make coverage): the per-file coverage tables go to the job
+# summary and the report is uploaded as the coverage artifact (14 days).
 # The production image is built as a final step and booted as docker run
 # boots it with no mounts and no environment (make smoke-boot), so its
 # bundled config and demo targets are what boots; docs/TESTING.md lists
@@ -38,20 +41,28 @@ jobs:
       - name: Build dev image
         run: docker compose build dev
 
-      - name: Backend tests
-        run: docker compose run --rm -T dev bash -c 'cd backend && cargo test --lib --bins --locked'
+      # A failing test fails this step; -k lets the other half still run
+      # and write its report.
+      - name: Tests with coverage
+        run: make -k coverage
 
-      - name: Frontend tests
-        run: docker compose run --rm -T dev bash -c 'cd frontend && npm ci && npm run test'
+      - name: Coverage summary
+        if: always()
+        run: make coverage-summary >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Clippy
-        run: docker compose run --rm -T dev bash -c 'cd backend && cargo clippy --all-targets --locked -- -D warnings'
+      - name: Upload the coverage report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage
+          path: coverage/
+          retention-days: 14
 
-      - name: ESLint
-        run: docker compose run --rm -T dev bash -c 'cd frontend && npx eslint . --max-warnings 200'
+      - name: Lint
+        run: make lint
 
       - name: Cargo fmt check
-        run: docker compose run --rm -T dev bash -c 'cd backend && cargo fmt -- --check'
+        run: make fmt-check
 
       - name: Build production image
         run: docker compose build zenith
