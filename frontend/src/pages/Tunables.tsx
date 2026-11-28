@@ -62,17 +62,41 @@ function typedNumber(text: string): number | string {
   return isNaN(n) ? text : n;
 }
 
+/** The exact value of decimal number text, as the sign, the digits
+ *  without leading or trailing zeros, and the power of ten, so that
+ *  equal values give equal strings ("-0.250" and "-25e-2" both give
+ *  "-25e-2"); null for any other text. */
+function decimalValue(text: string): string | null {
+  const m = /^(-?)(\d*)(?:\.(\d*))?(?:e([+-]?\d+))?$/i.exec(text.trim());
+  if (!m) return null;
+  const [, sign, whole, fraction = "", exponent = "0"] = m;
+  const digits = `${whole}${fraction}`;
+  if (digits === "") return null;
+  const significant = digits.replace(/^0+/, "");
+  if (significant === "") return "0";
+  const kept = significant.replace(/0+$/, "");
+  const power =
+    BigInt(exponent) -
+    BigInt(fraction.length) +
+    BigInt(significant.length - kept.length);
+  return `${sign}${kept}e${power}`;
+}
+
 /** A value typed into a field whose type the form does not know: a
  *  nested leaf, a variable-length block's field, or any field before
- *  the struct read answers. As typedNumber, except that a value reading
- *  as an integer past 2^53, which a double cannot hold exactly, goes as
- *  the text typed, trimmed: as a number it would arrive rounded. The
- *  server reads that text exactly for an 8-byte integer and refuses it,
- *  naming the field, for a field that takes no string. */
+ *  the struct read answers. It goes as a number only when the JSON text
+ *  of that number has exactly the value typed; otherwise as the text
+ *  typed, trimmed. A double keeps about 15 significant digits, and a
+ *  value that is not whole can still read as one (0.99999999999999999
+ *  as 1, 1e-400 as 0), which an integer field would take. The server
+ *  judges the text: it reads an 8-byte integer's string exactly and
+ *  refuses a string, naming the field, where a field takes none. */
 function untypedValue(text: string): number | string {
   const n = parseFloat(text);
-  if (Number.isInteger(n) && !Number.isSafeInteger(n)) return text.trim();
-  return isNaN(n) ? text : n;
+  const typed = decimalValue(text);
+  return typed !== null && decimalValue(JSON.stringify(n)) === typed
+    ? n
+    : text.trim();
 }
 
 /* ----------------------------- Page ----------------------------- */

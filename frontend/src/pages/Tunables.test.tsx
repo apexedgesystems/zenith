@@ -545,21 +545,29 @@ describe("Tunables fields of unknown type", () => {
     );
   });
 
-  it("still applies a typed 1.5 or 42 as a number before the field types arrive", async () => {
-    const server = serveWide(I0, U0, null);
-    renderWithQuery(<TunablesPage selectedTarget="t1" />);
-    await screen.findByDisplayValue(I0);
-    fireEvent.change(screen.getByDisplayValue("-70000"), {
-      target: { value: "1.5" },
-    });
-    typeInto("uWide", "42");
-    apply();
-    await waitFor(() => expect(posted(server)).toHaveLength(1));
-    expect(posted(server)[0]).toBe(
-      `{"fields":{"iWide":"${I0}","uWide":42,"iWord":1.5},` +
-        `"raw_hex":"${wideHex(I0, U0)}"}`,
-    );
-  });
+  it.each([
+    ["1.5", "1.5"],
+    ["42", "42"],
+    ["1e3", "1000"],
+    ["-0.25", "-0.25"],
+    ["123456789.012345", "123456789.012345"],
+  ])(
+    "still applies a typed %s as the number %s before the field types arrive",
+    async (typed, sent) => {
+      const server = serveWide(I0, U0, null);
+      renderWithQuery(<TunablesPage selectedTarget="t1" />);
+      await screen.findByDisplayValue(I0);
+      fireEvent.change(screen.getByDisplayValue("-70000"), {
+        target: { value: typed },
+      });
+      apply();
+      await waitFor(() => expect(posted(server)).toHaveLength(1));
+      expect(posted(server)[0]).toBe(
+        `{"fields":{"iWide":"${I0}","uWide":"${U0}","iWord":${sent}},` +
+          `"raw_hex":"${wideHex(I0, U0)}"}`,
+      );
+    },
+  );
 
   it("still applies a typed 42 or 1.5 to a variable-length block as a number", async () => {
     const server = serveVarLen();
@@ -604,4 +612,178 @@ describe("Tunables fields of unknown type", () => {
       `{"fields":{"ratio":9007199254740992},"raw_hex":"0000003f"}`,
     );
   });
+
+  /** Type `text` where a field has no known type: into the int64 before
+   *  the field types arrive, or into a variable-length block's entry;
+   *  apply, and return what was posted. */
+  async function applyUntyped(
+    place: "before the field types arrive" | "in a variable-length entry",
+    text: string,
+  ): Promise<string | null> {
+    const server =
+      place === "before the field types arrive"
+        ? serveWide(I0, U0, null)
+        : serveVarLen();
+    renderWithQuery(<TunablesPage selectedTarget="t1" />);
+    fireEvent.change(
+      await screen.findByDisplayValue(
+        place === "before the field types arrive" ? I0 : "-8000000000",
+      ),
+      { target: { value: text } },
+    );
+    apply();
+    await waitFor(() => expect(posted(server)).toHaveLength(1));
+    return posted(server)[0];
+  }
+
+  // None is a whole number, yet each reads as a double that prints as
+  // one: sent as a number, an integer field would take it. (A number
+  // input blanks a value past a double's range, so none arrives as
+  // Infinity.)
+  it.each(
+    [
+      "4503599627370497.5",
+      "0.99999999999999999",
+      "9007199254740991.4",
+      "1e-400",
+    ].flatMap((typed) =>
+      (
+        ["before the field types arrive", "in a variable-length entry"] as const
+      ).map((place) => [typed, place] as const),
+    ),
+  )("applies %s typed %s as that text", async (typed, place) => {
+    const body = await applyUntyped(place, typed);
+    expect(body).toBe(
+      place === "before the field types arrive"
+        ? wideBody(typed, U0, wideHex(I0, U0))
+        : `{"fields":{"count":1},"entries":[{"slot":3,"wide":"${typed}"}],` +
+            `"variable_length":true,"raw_hex":"010300b02923feffffff"}`,
+    );
+  });
+
+  it.each([
+    "before the field types arrive",
+    "in a variable-length entry",
+  ] as const)(
+    "posts a bare number only with exactly the value typed, over generated decimals, %s",
+    async (place) => {
+      const typed = decimalStrings(300);
+      const values: string[] = [];
+      // Thirty fields to a form: each keystroke renders the whole form.
+      for (let at = 0; at < typed.length; at += 30) {
+        const chunk = typed.slice(at, at + 30);
+        const server =
+          place === "before the field types arrive"
+            ? serveBlock(
+                "Wide",
+                `{"fullUid":"0x00C000","component":"Wide","struct_name":"WideTprm",` +
+                  `"fields":{${chunk.map((_, i) => `"f${i}":0`).join(",")}},` +
+                  `"raw_hex":"00","raw_length":1}`,
+                null,
+              )
+            : serveBlock(
+                "Sched",
+                `{"fullUid":"0x00C000","component":"Sched",` +
+                  `"struct_name":"SchedHeader + SchedEntry[]","variable_length":true,` +
+                  `"fields":{"header":{"count":${chunk.length}},` +
+                  `"entries":[${chunk.map(() => `{"v":0}`).join(",")}]},` +
+                  `"raw_hex":"00","raw_length":1}`,
+                { structs: {} },
+              );
+        const page = renderWithQuery(<TunablesPage selectedTarget="t1" />);
+        await waitFor(() =>
+          expect(screen.getAllByRole("spinbutton").length).toBeGreaterThan(
+            chunk.length - 1,
+          ),
+        );
+        // The entries follow the variable-length header's one field.
+        const inputs = (
+          screen.getAllByRole("spinbutton") as HTMLInputElement[]
+        ).slice(place === "before the field types arrive" ? 0 : 1);
+        chunk.forEach((text, i) =>
+          fireEvent.change(inputs[i], { target: { value: text } }),
+        );
+        // Every string is one a number input keeps as typed.
+        expect(inputs.map((input) => input.value)).toEqual(chunk);
+        apply();
+        await waitFor(() => expect(posted(server)).toHaveLength(1));
+        // Each value's JSON text as posted, in order.
+        values.push(
+          ...[
+            ...(posted(server)[0] ?? "").matchAll(
+              place === "before the field types arrive"
+                ? /"f\d+":("(?:[^"\\]|\\.)*"|[^,}]+)/g
+                : /\{"v":("(?:[^"\\]|\\.)*"|[^}]+)\}/g,
+            ),
+          ].map((m) => m[1]),
+        );
+        page.unmount();
+      }
+
+      expect(values).toHaveLength(typed.length);
+      const numbers = values.filter((v) => !v.startsWith('"')).length;
+      const changed = typed
+        .map((text, i) => ({ typed: text, posted: values[i] }))
+        .filter(({ typed: text, posted: sent }) =>
+          sent.startsWith('"')
+            ? JSON.parse(sent) !== text.trim()
+            : exactValue(sent) === null ||
+              exactValue(sent) !== exactValue(text),
+        );
+      expect({ changed: changed.length, first: changed.slice(0, 6) }).toEqual({
+        changed: 0,
+        first: [],
+      });
+      // Both kinds of value occur.
+      expect(numbers).toBeGreaterThan(30);
+      expect(typed.length - numbers).toBeGreaterThan(30);
+    },
+  );
 });
+
+/** A decimal number's text as its exact value: the sign, the digits as
+ *  a BigInt without trailing zeros, and the power of ten; null for any
+ *  other text. Equal values give equal strings. */
+function exactValue(text: string): string | null {
+  const m = /^(-?)(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/.exec(text.trim());
+  if (!m || `${m[2]}${m[3] ?? ""}` === "") return null;
+  let digits = BigInt(`${m[2]}${m[3] ?? ""}`);
+  let power = BigInt(m[4] ?? 0) - BigInt((m[3] ?? "").length);
+  if (digits === 0n) return "0";
+  while (digits % 10n === 0n) {
+    digits /= 10n;
+    power += 1n;
+  }
+  return `${m[1]}${digits}e${power}`;
+}
+
+/** `count` decimal strings an operator could type into a number input,
+ *  from a fixed seed: signs, leading zeros, long fractions, runs of 9,
+ *  values around 2^52 and 2^53, exponents down past a double's range.
+ *  A value past its top the input does not hold, so none is made. */
+function decimalStrings(count: number): string[] {
+  let seed = 20261127;
+  const next = (n: number) => {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    return Math.floor((seed / 2 ** 32) * n);
+  };
+  const digits = (n: number) =>
+    Array.from({ length: n }, () => next(10)).join("");
+  const out: string[] = [];
+  while (out.length < count) {
+    const whole = digits(1 + next(20));
+    const mantissa = [
+      whole,
+      `${whole}.${digits(1 + next(20))}`,
+      `.${digits(1 + next(20))}`,
+      `${"9".repeat(1 + next(17))}.${"9".repeat(1 + next(19))}`,
+      `9007199254740${digits(3)}${next(2) ? ".5" : ""}`,
+      `4503599627370${digits(3)}.${next(2) ? "5" : digits(1 + next(3))}`,
+    ][next(6)];
+    const exponent =
+      next(4) === 0 ? `e${["", "+", "-"][next(3)]}${next(420)}` : "";
+    const text = `${next(3) === 0 ? "-" : ""}${mantissa}${exponent}`;
+    if (Number.isFinite(Number(text))) out.push(text);
+  }
+  return out;
+}
