@@ -113,9 +113,6 @@ pub enum Frame {
 /// offset zero, standard-conformant idle-packet fill, CRC trailer.
 /// Content must leave at least 7 octets for the idle packet or
 /// exactly fill the field.
-// The binary compiles this module directly and has no emitter yet;
-// tests are its only caller for now.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn pack_frame(frame_size: usize, scid: u16, frame_count: u8, content: &[u8]) -> Vec<u8> {
     let field_len = frame_size - HEADER_SIZE - TRAILER_SIZE;
     assert!(content.len() == field_len || content.len() + 7 <= field_len);

@@ -282,15 +282,20 @@ export function useRegistry(targetId: string | null, enabled = true) {
   });
 }
 
-/** TUNABLE_PARAM field definitions for one component, from the
- *  per-target struct-dict endpoint. */
+/** The field definitions of a component's TUNABLE_PARAM struct
+ *  `structName`, from the per-target struct-dict endpoint: the struct a
+ *  parameter read names as the one it decoded the block with. A
+ *  component can define several, and the read picks the one the block's
+ *  size matches, so the name says which, not the order they are listed
+ *  in. Empty when the dictionary has no such struct. */
 export function useTunableFields(
   targetId: string | null,
   component: string | null,
+  structName: string | null,
 ) {
   return useQuery({
-    queryKey: ["tunable-fields", targetId, component],
-    enabled: !!targetId && !!component,
+    queryKey: ["tunable-fields", targetId, component, structName],
+    enabled: !!targetId && !!component && !!structName,
     staleTime: Infinity,
     queryFn: async () => {
       const data = await request(
@@ -301,13 +306,12 @@ export function useTunableFields(
       );
       const structs =
         (data as { structs?: Record<string, unknown> }).structs ?? {};
-      for (const sdef of Object.values(structs)) {
-        const def = sdef as { category?: string; fields?: unknown[] };
-        if (def.category === "TUNABLE_PARAM" && (def.fields?.length ?? 0) > 0) {
-          return def.fields as unknown[];
-        }
-      }
-      return [] as unknown[];
+      const def = structs[structName as string] as
+        | { category?: string; fields?: unknown[] }
+        | undefined;
+      return def?.category === "TUNABLE_PARAM"
+        ? def.fields ?? []
+        : ([] as unknown[]);
     },
   });
 }

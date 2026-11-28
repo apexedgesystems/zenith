@@ -30,19 +30,28 @@ describe("hexToBytes", () => {
 
 describe("decodeField", () => {
   it("decodes every scalar width little-endian", () => {
-    expect(decodeField(view([0xfb]), f({ type: "int", size: 1 }))).toBe(-5);
-    expect(decodeField(view([0xef, 0xbe]), f({ type: "uint", size: 2 }))).toBe(
-      0xbeef,
-    );
-    expect(
-      decodeField(view([0xef, 0xbe, 0xad, 0xde]), f({ type: "uint", size: 4 })),
-    ).toBe(0xdeadbeef);
-    expect(
-      decodeField(view([0, 0, 0x40, 0x40]), f({ type: "float", size: 4 })),
-    ).toBe(3.0);
+    const rows: [type: string, bytes: number[], value: number][] = [
+      ["uint", [0xfe], 254],
+      ["bool", [0x01], 1],
+      ["uint", [0xef, 0xbe], 0xbeef],
+      ["uint", [0xef, 0xbe, 0xad, 0xde], 0xdeadbeef],
+      ["int", [0xfb], -5],
+      ["int", [0x18, 0xfc], -1000],
+      ["int", [0xeb, 0x32, 0xa4, 0xf8], -123456789],
+      ["float", [0, 0, 0x40, 0x40], 3.0],
+      ["double", [0, 0, 0, 0, 0, 0, 0x04, 0xc0], -2.5],
+      // An 8-byte float is a double.
+      ["float", [0, 0, 0, 0, 0, 0, 0x04, 0x40], 2.5],
+    ];
+    for (const [type, bytes, value] of rows) {
+      const field = f({ type, size: bytes.length });
+      expect(decodeField(view(bytes), field), `${type}:${bytes.length}`).toBe(
+        value,
+      );
+    }
   });
 
-  it("preserves 64-bit precision as bigint beyond the safe range", () => {
+  it("keeps 64-bit integers exact: a number in the safe range, a bigint beyond it", () => {
     const big = view([0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f]);
     const v = decodeField(big, f({ type: "uint", size: 8 }));
     expect(typeof v).toBe("bigint");
@@ -50,6 +59,22 @@ describe("decodeField", () => {
     // Small u64 stays a plain number for ergonomic display
     const small = view([42, 0, 0, 0, 0, 0, 0, 0]);
     expect(decodeField(small, f({ type: "uint", size: 8 }))).toBe(42);
+    // Signed: both ends of the range
+    const minusTwo = view([0xfe, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+    expect(decodeField(minusTwo, f({ type: "int", size: 8 }))).toBe(-2);
+    const min = view([0, 0, 0, 0, 0, 0, 0, 0x80]);
+    expect(decodeField(min, f({ type: "int", size: 8 }))).toBe(
+      -0x8000000000000000n,
+    );
+  });
+
+  it("returns null for a type or a width it does not know", () => {
+    expect(
+      decodeField(view([1, 2, 3, 4]), f({ type: "mystery", size: 4 })),
+    ).toBeNull();
+    expect(
+      decodeField(view([1, 2, 3]), f({ type: "int", size: 3 })),
+    ).toBeNull();
   });
 
   it("trims bounded strings at the first NUL", () => {

@@ -196,6 +196,48 @@ fn bench_slip_decode_chunked(c: &mut Criterion) {
     group.finish();
 }
 
+/// SLIP decode of a frame that is all escape work: a 1 KB payload of
+/// alternating END and ESC bytes, so every payload byte arrives as a
+/// two-byte escape (2050 encoded bytes with the two delimiters), fed
+/// whole and one byte at a time. Each iteration decodes the one frame
+/// with a new decoder; both ways of feeding are checked to give back
+/// the payload before timing.
+fn bench_slip_decode_escaped(c: &mut Criterion) {
+    // The two bytes SLIP escapes (RFC 1055): END and ESC.
+    let payload: Vec<u8> = (0..1024)
+        .map(|i| if i % 2 == 0 { 0xC0 } else { 0xDB })
+        .collect();
+    let encoded = slip::encode(&payload);
+    assert_eq!(encoded.len(), 2 * payload.len() + 2);
+    assert_eq!(slip::Decoder::new().feed(&encoded), vec![payload.clone()]);
+    let mut decoder = slip::Decoder::new();
+    let byte_frames: Vec<Vec<u8>> = encoded
+        .iter()
+        .flat_map(|byte| decoder.feed(std::slice::from_ref(byte)))
+        .collect();
+    assert_eq!(byte_frames, vec![payload]);
+
+    let mut group = c.benchmark_group("slip_decode_escaped");
+    group.throughput(Throughput::Bytes(encoded.len() as u64));
+    group.bench_function("1KB_whole_feed", |b| {
+        b.iter(|| {
+            let mut decoder = slip::Decoder::new();
+            decoder.feed(black_box(&encoded))
+        })
+    });
+    group.bench_function("1KB_byte_by_byte", |b| {
+        b.iter(|| {
+            let mut decoder = slip::Decoder::new();
+            let mut total = 0;
+            for byte in encoded.iter() {
+                total += decoder.feed(black_box(std::slice::from_ref(byte))).len();
+            }
+            black_box(total)
+        })
+    });
+    group.finish();
+}
+
 fn pprof_profiler() -> Criterion {
     Criterion::default().with_profiler(PProfProfiler::new(100, Output::Flamegraph(None)))
 }
@@ -207,6 +249,7 @@ criterion_group! {
         bench_slip_encode,
         bench_slip_decode,
         bench_slip_decode_chunked,
+        bench_slip_decode_escaped,
         bench_aproto_build,
         bench_aproto_parse,
         bench_ack_parse_cases,
@@ -214,7 +257,10 @@ criterion_group! {
         bench_spp_extract,
         bench_tm_deframe,
         bench_record_walk,
-        bench_tprm_review
+        bench_tprm_review,
+        bench_tm_packet_stage,
+        bench_tunable_decode,
+        bench_validate_token
 }
 criterion_main!(benches);
 
@@ -502,5 +548,402 @@ fn bench_tprm_review(c: &mut Criterion) {
         );
     }
 
+    group.finish();
+}
+
+/// TM transfer frames through the real packet stage: a StreamLink
+/// dialed to a loopback peer, so every chunk its reader takes from the
+/// socket passes the link's ingest -- the TM deframer (a CRC per
+/// frame), the step that hands each verified frame's data field to the
+/// packet stage, and the SPP extractor -- and leaves as routed packets
+/// on the broadcast channel. One iteration writes one stream of fifty
+/// 1024-byte frames (51,200 bytes) from the peer and receives every
+/// packet routed from it, through the stream's last packet, which is
+/// addressed to a uid of its own. The receiver runs on the reader's
+/// single-threaded runtime.
+///
+/// The healthy stream carries four 200-byte packets in each frame. The
+/// damaged one repeats a recovery ten times: a frame that fails its
+/// CRC, carrying two packets and the head of a 2864-byte packet; two
+/// frames that carry only that packet's middle (no packet starts in
+/// them); a frame that holds its 216-byte tail and then two packets;
+/// and a healthy frame. Before timing, each stream's frames are counted
+/// as the deframer sees them, and three passes of each must route the
+/// same number of packets: each stream ends on a healthy frame, so a
+/// pass leaves the pipeline as it found it.
+fn bench_tm_packet_stage(c: &mut Criterion) {
+    use std::collections::HashMap;
+    use std::time::Duration;
+
+    use tokio::io::AsyncWriteExt;
+    use tokio::sync::broadcast;
+    use zenith::core::stream_link::{Carrier, PipelineSpec, StreamLink};
+    use zenith::core::transport::{Protocol, PushTelemetryPacket};
+    use zenith::protocol::{ccsds_spp, ccsds_tm};
+
+    const FRAME: usize = 1024;
+    const FIELD: usize = FRAME - ccsds_tm::HEADER_SIZE - ccsds_tm::TRAILER_SIZE;
+    const DATA_APID: u16 = 0x001;
+    const LAST_APID: u16 = 0x002;
+    const LAST_UID: u32 = 0x00D100;
+    /// The first-header pointer of a frame in which no packet starts.
+    const NO_PACKET_START: u16 = 0x7FF;
+
+    /// Packets with a running sequence count. Their payload bytes are
+    /// 0x5A, which never reads as the first byte of a packet header.
+    struct Packer(u16);
+    impl Packer {
+        fn packet(&mut self, apid: u16, len: usize) -> Vec<u8> {
+            let p = ccsds_spp::pack(apid, self.0, &vec![0x5A; len - ccsds_spp::HEADER_SIZE]);
+            self.0 = self.0.wrapping_add(1);
+            p
+        }
+
+        /// Four 200-byte packets, the last on `last_apid`, and idle fill.
+        fn healthy_frame(&mut self, count: u8, last_apid: u16) -> Vec<u8> {
+            let mut content = Vec::new();
+            for i in 0..4 {
+                let apid = if i == 3 { last_apid } else { DATA_APID };
+                content.extend(self.packet(apid, 200));
+            }
+            ccsds_tm::pack_frame(FRAME, 0x044, count, &content)
+        }
+    }
+
+    /// A packed frame with its first-header pointer set and its CRC
+    /// recomputed.
+    fn restamp(mut frame: Vec<u8>, first_header: u16) -> Vec<u8> {
+        frame[4..6].copy_from_slice(&(0x1800u16 | first_header).to_be_bytes());
+        let crc = ccsds_tm::crc16(&frame[..FRAME - ccsds_tm::TRAILER_SIZE]);
+        frame[FRAME - ccsds_tm::TRAILER_SIZE..].copy_from_slice(&crc.to_be_bytes());
+        frame
+    }
+
+    let mut packer = Packer(0);
+    let mut healthy = Vec::with_capacity(50 * FRAME);
+    for count in 0..50u8 {
+        let last = if count == 49 { LAST_APID } else { DATA_APID };
+        healthy.extend(packer.healthy_frame(count, last));
+    }
+    let mut damaged = Vec::with_capacity(50 * FRAME);
+    for recovery in 0..10u8 {
+        let count = recovery * 5;
+        let long = packer.packet(DATA_APID, 2864);
+        let (head, rest) = long.split_at(FIELD - 400);
+        let (middle, tail) = rest.split_at(2 * FIELD);
+        let mut content = packer.packet(DATA_APID, 200);
+        content.extend(packer.packet(DATA_APID, 200));
+        content.extend_from_slice(head);
+        let mut lost = ccsds_tm::pack_frame(FRAME, 0x044, count, &content);
+        lost[ccsds_tm::HEADER_SIZE + 4] ^= 0xFF; // fails its CRC
+        damaged.extend(lost);
+        for (i, part) in (1u8..).zip(middle.chunks(FIELD)) {
+            let frame = ccsds_tm::pack_frame(FRAME, 0x044, count + i, part);
+            damaged.extend(restamp(frame, NO_PACKET_START));
+        }
+        let mut content = tail.to_vec();
+        content.extend(packer.packet(DATA_APID, 200));
+        content.extend(packer.packet(DATA_APID, 200));
+        let frame = ccsds_tm::pack_frame(FRAME, 0x044, count + 3, &content);
+        damaged.extend(restamp(frame, tail.len() as u16));
+        let last = if recovery == 9 { LAST_APID } else { DATA_APID };
+        damaged.extend(packer.healthy_frame(count + 4, last));
+    }
+
+    // (frames, dropped, frames in which no packet starts), as the
+    // delimitation stage sees each stream.
+    let frames_of = |stream: &[u8]| {
+        let frames = ccsds_tm::Deframer::new(FRAME).feed(stream);
+        let dropped = frames
+            .iter()
+            .filter(|f| matches!(f, ccsds_tm::Frame::Dropped))
+            .count();
+        let no_start = frames
+            .iter()
+            .filter(|f| {
+                matches!(
+                    f,
+                    ccsds_tm::Frame::Verified {
+                        first_header: None,
+                        ..
+                    }
+                )
+            })
+            .count();
+        (frames.len(), dropped, no_start)
+    };
+    assert_eq!(frames_of(&healthy), (50, 0, 0));
+    assert_eq!(frames_of(&damaged), (50, 10, 20));
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let (push_tx, mut rx) = broadcast::channel::<PushTelemetryPacket>(1024);
+    let (mut link, mut peer) = rt.block_on(async {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind the peer");
+        let port = listener.local_addr().expect("peer address").port();
+        let mut link = StreamLink::new(
+            Protocol::TmCcsdsSpp,
+            PipelineSpec::TmSpp {
+                apid_map: HashMap::from([(DATA_APID, 0x00D000), (LAST_APID, LAST_UID)]),
+                frame_size: FRAME,
+            },
+            Carrier::Tcp,
+            Vec::new(),
+            push_tx,
+        );
+        link.connect("127.0.0.1", port)
+            .await
+            .expect("dial the peer");
+        let (peer, _) = listener.accept().await.expect("accept the link");
+        (link, peer)
+    });
+    // One pass: write the stream, receive through its last packet, and
+    // return how many packets routed before it.
+    let mut pass = |stream: &[u8]| -> usize {
+        rt.block_on(async {
+            peer.write_all(stream).await.expect("write the stream");
+            let drain = async {
+                let mut routed = 0;
+                loop {
+                    match rx.recv().await {
+                        Ok(p) if p.full_uid == LAST_UID => return routed,
+                        Ok(_) => routed += 1,
+                        Err(e) => panic!("packet stage output lost: {e}"),
+                    }
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(10), drain)
+                .await
+                .expect("the stream's last packet arrives")
+        })
+    };
+    for (name, stream) in [
+        ("healthy_50x1024B", &healthy),
+        ("damaged_50x1024B", &damaged),
+    ] {
+        let routed: Vec<usize> = (0..3).map(|_| pass(stream)).collect();
+        assert!(
+            routed.windows(2).all(|w| w[0] == w[1]),
+            "{name}: routed {routed:?} over three passes"
+        );
+        eprintln!(
+            "work: tm_packet_stage/{name} bytes={} routed={} plus the last packet",
+            stream.len(),
+            routed[0]
+        );
+    }
+    assert_eq!(pass(&healthy), 199, "every packet of the healthy stream");
+
+    let mut group = c.benchmark_group("tm_packet_stage");
+    group.throughput(Throughput::Bytes(healthy.len() as u64));
+    group.bench_function("healthy_50x1024B", |b| b.iter(|| pass(black_box(&healthy))));
+    group.bench_function("damaged_50x1024B", |b| b.iter(|| pass(black_box(&damaged))));
+    group.finish();
+    link.disconnect();
+}
+
+/// The parameter read's decode, gathered in one place so the same cases
+/// compile against another revision of the crate by replacing this
+/// module alone: what the read handler asks of the dictionaries for one
+/// tunable block, the variable-length decode within the owning
+/// component first, then the flat decode of its struct.
+mod tunable_api {
+    use zenith::core::config_manager::StructDictionary;
+
+    pub fn read(
+        dicts: &StructDictionary,
+        component: &str,
+        struct_name: &str,
+        block: &[u8],
+    ) -> Option<serde_json::Value> {
+        match dicts.decode_variable_length_for("TUNABLE_PARAM", block, Some(component)) {
+            Some((_, _, _, fields)) => Some(fields),
+            None => dicts.decode_payload(component, struct_name, block),
+        }
+    }
+}
+
+/// A parameter block of `sname` with every numeric leaf set, in the
+/// dictionary's byte order: floats 1.25, unsigned integers 7, 1000,
+/// 100000 or 2^53 + 1 by width, signed ones their negatives, bools 1.
+/// Strings and arrays keep a letter pattern; they read back as hex.
+fn tunable_block(dict: &zenith::core::config_manager::ComponentDict, sname: &str) -> Vec<u8> {
+    use zenith::core::config_manager::expanded_fields;
+
+    let unsigned = |size: usize| -> u64 {
+        match size {
+            1 => 7,
+            2 => 1000,
+            4 => 100_000,
+            _ => (1 << 53) + 1,
+        }
+    };
+    let sdef = &dict.structs[sname];
+    let mut block: Vec<u8> = (0..sdef.size).map(|i| b'A' + (i % 26) as u8).collect();
+    for leaf in expanded_fields(dict, &sdef.fields, 0) {
+        let mut bytes = match (leaf.field_type.as_str(), leaf.size) {
+            ("float", 4) => 1.25f32.to_le_bytes().to_vec(),
+            ("float", 8) | ("double", 8) => 1.25f64.to_le_bytes().to_vec(),
+            ("uint", n @ (1 | 2 | 4 | 8)) => unsigned(n).to_le_bytes()[..n].to_vec(),
+            ("int", n @ (1 | 2 | 4 | 8)) => (-(unsigned(n) as i64)).to_le_bytes()[..n].to_vec(),
+            ("bool", 1) => vec![1],
+            _ => continue,
+        };
+        if dict.big_endian() {
+            bytes.reverse();
+        }
+        block[leaf.offset..leaf.offset + leaf.size].copy_from_slice(&bytes);
+    }
+    block
+}
+
+/// The parameter read's decode of one tunable block (`tunable_api`)
+/// over shipped dictionaries, each set holding only the component under
+/// test: the flat SystemMonitor block (122 bytes, 29 fields: floats,
+/// 8- to 64-bit integers, arrays); the flat SpecProtoMax block (80
+/// bytes, 16 fields, every scalar type, 64-bit integers past 2^53 and
+/// a bool among them) in little- and big-endian byte order; and the
+/// Scheduler's header with 32 task entries (483 bytes). Before timing,
+/// each decode's values are counted by the JSON kind they read as,
+/// with the order in which the Scheduler's two candidate structs are
+/// tried (that set's map order, fixed for the run).
+fn bench_tunable_decode(c: &mut Criterion) {
+    use std::collections::HashMap;
+    use zenith::core::config_manager::{ComponentDict, StructDictionary};
+
+    fn kinds(v: &serde_json::Value, counts: &mut [usize; 3]) {
+        match v {
+            serde_json::Value::Number(_) => counts[0] += 1,
+            serde_json::Value::String(_) => counts[1] += 1,
+            serde_json::Value::Array(a) => a.iter().for_each(|x| kinds(x, counts)),
+            serde_json::Value::Object(o) => o.values().for_each(|x| kinds(x, counts)),
+            _ => counts[2] += 1,
+        }
+    }
+    let dict = |text: &str| -> ComponentDict { serde_json::from_str(text).expect("dictionary") };
+    let only = |d: ComponentDict| StructDictionary {
+        components: HashMap::from([(d.component.clone(), d)]),
+    };
+
+    let monitor = dict(include_str!(
+        "../../targets/sil-ops-demo/structs/SystemMonitor.json"
+    ));
+    let protomax = dict(include_str!(
+        "../../targets/sil-ops-demo/structs/SpecProtoMax.json"
+    ));
+    let mut protomax_be = protomax.clone();
+    protomax_be.byte_order = Some("be".to_string());
+    let scheduler = dict(include_str!(
+        "../../targets/sil-ops-demo/structs/Scheduler.json"
+    ));
+    let monitor_block = tunable_block(&monitor, "SystemMonitorTunableParams");
+    let le_block = tunable_block(&protomax, "SpecProtoMaxTunableParams");
+    let be_block = tunable_block(&protomax_be, "SpecProtoMaxTunableParams");
+    // Header: one pool, two workers, 32 tasks; then the 32 entries.
+    let entry = tunable_block(&scheduler, "SchedulerTaskEntry");
+    let mut schedule = vec![1u8, 2, 32];
+    for _ in 0..32 {
+        schedule.extend_from_slice(&entry);
+    }
+    let scheduler = only(scheduler);
+    let tried: Vec<&str> = scheduler.components["Scheduler"]
+        .structs
+        .iter()
+        .filter(|(_, s)| s.category == "TUNABLE_PARAM" && !s.fields.is_empty() && s.size > 0)
+        .map(|(name, _)| name.as_str())
+        .collect();
+    eprintln!("work: tunable_decode/variable_Scheduler_32_entries candidates tried in the order {tried:?}");
+
+    let cases = [
+        (
+            "flat_SystemMonitor_122B",
+            only(monitor),
+            "SystemMonitor",
+            "SystemMonitorTunableParams",
+            monitor_block,
+        ),
+        (
+            "flat_SpecProtoMax_80B_le",
+            only(protomax),
+            "SpecProtoMax",
+            "SpecProtoMaxTunableParams",
+            le_block,
+        ),
+        (
+            "flat_SpecProtoMax_80B_be",
+            only(protomax_be),
+            "SpecProtoMax",
+            "SpecProtoMaxTunableParams",
+            be_block,
+        ),
+        (
+            "variable_Scheduler_32_entries",
+            scheduler,
+            "Scheduler",
+            "SchedulerTprmHeader",
+            schedule,
+        ),
+    ];
+    let mut group = c.benchmark_group("tunable_decode");
+    for (name, dicts, component, sname, block) in &cases {
+        let fields = tunable_api::read(dicts, component, sname, block).expect("the block decodes");
+        let mut counts = [0usize; 3];
+        kinds(&fields, &mut counts);
+        eprintln!(
+            "work: tunable_decode/{name} bytes={} numbers={} strings={} other={}",
+            block.len(),
+            counts[0],
+            counts[1],
+            counts[2]
+        );
+        group.bench_function(*name, |b| {
+            b.iter(|| {
+                tunable_api::read(
+                    black_box(dicts),
+                    black_box(component),
+                    black_box(sname),
+                    black_box(block),
+                )
+            })
+        });
+    }
+    group.finish();
+}
+
+/// Token validation as the auth middleware calls it for a request: a
+/// bearer token from the Authorization header, and a socket ticket from
+/// the telemetry socket's query string. Both are HS256 with the shipped
+/// placeholder secret and are checked to validate before timing; the
+/// ticket is minted an hour ahead so its 30 s lifetime outlasts the run.
+fn bench_validate_token(c: &mut Criterion) {
+    use zenith::core::auth;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock")
+        .as_secs() as i64;
+    let key = auth::DEFAULT_SECRET;
+    let bearer = auth::mint_token("operator", key, now).expect("token");
+    let ticket = auth::mint_ws_ticket("operator", key, now + 3600).expect("ticket");
+    assert_eq!(
+        auth::validate_token(&bearer, key, false),
+        Ok("operator".to_string())
+    );
+    assert_eq!(
+        auth::validate_token(&ticket, key, true),
+        Ok("operator".to_string())
+    );
+
+    let mut group = c.benchmark_group("validate_token");
+    group.bench_function("bearer_header", |b| {
+        b.iter(|| auth::validate_token(black_box(&bearer), black_box(key), false))
+    });
+    group.bench_function("ticket_query", |b| {
+        b.iter(|| auth::validate_token(black_box(&ticket), black_box(key), true))
+    });
     group.finish();
 }

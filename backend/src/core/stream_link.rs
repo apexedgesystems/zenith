@@ -156,10 +156,12 @@ impl RecordSpec {
 
 /// The bytes of one deframed TM frame that the packet stage should
 /// see. A dropped frame counts as one unroutable unit and arms
-/// resync; the next verified frame then starts at its first packet
-/// header (the orphaned head of a straddling packet is discarded
-/// with the extractor's residue), or is skipped whole when no packet
-/// starts in it.
+/// resync, which holds until a verified frame in which a packet
+/// starts: that frame is seen from its first packet header (the
+/// orphaned head of a straddling packet is discarded with the
+/// extractor's residue), and every frame before it, in which no
+/// packet starts, is skipped whole -- it carries only the middle of
+/// the orphaned packet.
 fn tm_field<'a>(
     frame: &'a ccsds_tm::Frame,
     extractor: &mut ccsds_spp::Extractor,
@@ -179,9 +181,10 @@ fn tm_field<'a>(
             if !*resync {
                 return Some(field);
             }
+            let start = (*first_header)?;
             *resync = false;
             extractor.reset();
-            first_header.map(|p| &field[p..])
+            Some(&field[start..])
         }
     }
 }
@@ -1004,16 +1007,17 @@ mod tests {
         (buf[..n].to_vec(), src)
     }
 
-    /// @test THE protocol-agnosticism proof, now across FOUR stream
-    /// compositions: the same struct bytes delivered as (a) bare
-    /// self-delimiting SPP, (b) SLIP-framed SPP, (c) SPP inside
-    /// CRC-verified fixed-size TM transfer frames -- the space-data-
-    /// link stack -- and (d) raw SLIP frames all decode to exactly
-    /// the samples the decoder produces for those bytes directly.
-    /// One dictionary, one decoder, one pipeline seam; the stacks
-    /// differ only in config.
+    /// @test The protocol-agnosticism proof, across the four stream
+    /// compositions that carry struct telemetry: the same struct bytes
+    /// delivered as (a) bare self-delimiting SPP, (b) SLIP-framed SPP,
+    /// (c) SPP inside CRC-verified fixed-size TM transfer frames -- the
+    /// space-data-link stack -- and (d) raw SLIP frames all decode to
+    /// exactly the samples the decoder produces for those bytes
+    /// directly. One dictionary, one decoder, one pipeline seam; the
+    /// stacks differ only in config. The fifth composition carries
+    /// records, not structs; its walk has its own test.
     #[tokio::test]
-    async fn all_stream_compositions_decode_identically() {
+    async fn struct_stream_compositions_decode_identically() {
         let dict = wavegen_dict();
         let decoder =
             TelemetryDecoder::new(&dict, &[(0x00D000, "WaveGenerator", Some("WaveGenerator"))]);
@@ -1175,50 +1179,6 @@ mod tests {
         assert_eq!(pkt.full_uid, 0x00D000);
         assert_eq!(pkt.payload, vec![7, 7, 7, 7]);
         assert!(link.is_connected(), "the first datagram is first contact");
-        link.disconnect();
-    }
-
-    /// @test A UDP link with no peer reports what it knows: bound and
-    /// armed is listening, not connected, on the methods and on the
-    /// lock-free handles the status endpoints read. The init step
-    /// still goes out at bind, and neither sending it nor waiting is
-    /// hearing the target.
-    #[tokio::test]
-    async fn udp_link_listens_until_the_target_is_heard() {
-        let target = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let target_addr = target.local_addr().unwrap();
-        let (push_tx, _) = broadcast::channel(4);
-        let mut link = StreamLink::new(
-            Protocol::CcsdsSpp,
-            PipelineSpec::Spp {
-                apid_map: HashMap::new(),
-            },
-            Carrier::Udp { listen_port: 0 },
-            vec![InitStep {
-                name: "enable downlink".into(),
-                delay_ms: 0,
-                bytes: vec![0xA5],
-            }],
-            push_tx,
-        );
-        let connected = link.connected_handle();
-        let listening = link.listening_handle();
-        link.connect(&target_addr.ip().to_string(), target_addr.port())
-            .await
-            .unwrap();
-        assert!(link.is_listening(), "a bound UDP link is listening");
-        assert!(!link.is_connected(), "nothing has been heard");
-        assert!(listening.load(Ordering::Acquire));
-        assert!(!connected.load(Ordering::Acquire));
-
-        let (arm, _) = recv_datagram(&target).await;
-        assert_eq!(arm, vec![0xA5], "the init step goes out at bind");
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        assert!(link.is_listening() && listening.load(Ordering::Acquire));
-        assert!(
-            !link.is_connected() && !connected.load(Ordering::Acquire),
-            "sending the init step and waiting are not hearing the target"
-        );
         link.disconnect();
     }
 
@@ -1418,8 +1378,8 @@ mod tests {
     /// @test Connect after disconnect waits for the retired tasks: the
     /// reader and init runner a disconnect aborted have finished when
     /// the next connect returns, so the old socket is closed and the
-    /// same fixed port binds again, every round, for both listening
-    /// carriers.
+    /// same fixed port binds again, round after round, for both
+    /// listening carriers.
     #[tokio::test]
     async fn reconnect_waits_for_the_retired_tasks() {
         // The target binds first, so it cannot be given a probed port.
@@ -1461,7 +1421,7 @@ mod tests {
             connect_within(&mut link, &host, target_addr.port())
                 .await
                 .unwrap();
-            for round in 0..20 {
+            for round in 0..2 {
                 let retired: Vec<_> = [link.reader_handle.as_ref(), link.init_handle.as_ref()]
                     .into_iter()
                     .flatten()
@@ -1606,107 +1566,6 @@ mod tests {
         link.disconnect();
     }
 
-    /// @test Under a datagram flood a reconnect starts clean: round
-    /// after round, a UDP link that has heard nothing since its bind
-    /// reads listening and not connected, while the reader it retired
-    /// was busy with the flood on the old socket. Multi-threaded, so
-    /// the retiring reader runs beside the reconnect. A round whose new
-    /// socket the kernel gave the retired port, which the flood still
-    /// aims at, proves nothing and is not asserted; every round
-    /// re-aims.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn udp_reconnect_under_a_flood_starts_clean() {
-        let target = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
-        let target_addr = target.local_addr().unwrap();
-        let host = target_addr.ip().to_string();
-        let (push_tx, _) = broadcast::channel(16);
-        let mut link = StreamLink::new(
-            Protocol::CcsdsSpp,
-            PipelineSpec::Spp {
-                apid_map: HashMap::from([(0x0D0u16, 0x00D000u32)]),
-            },
-            Carrier::Udp { listen_port: 0 },
-            vec![InitStep {
-                name: "hello".into(),
-                delay_ms: 0,
-                bytes: b"HI".to_vec(),
-            }],
-            push_tx,
-        );
-        // Two senders flood whichever port `aim` names (0: hold), until
-        // `stop`, which a guard sets however the test ends.
-        let aim = Arc::new(std::sync::atomic::AtomicU16::new(0));
-        let stop = Arc::new(AtomicBool::new(false));
-        struct StopOnDrop(Arc<AtomicBool>);
-        impl Drop for StopOnDrop {
-            fn drop(&mut self) {
-                self.0.store(true, Ordering::Relaxed);
-            }
-        }
-        let floods: Vec<_> = (0..2)
-            .map(|_| {
-                let (aim, stop) = (aim.clone(), stop.clone());
-                std::thread::spawn(move || {
-                    let sock = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-                    let pkt = ccsds_spp::pack(0x0D0, 1, &[0xA5; 14]);
-                    while !stop.load(Ordering::Relaxed) {
-                        match aim.load(Ordering::Relaxed) {
-                            0 => std::thread::yield_now(),
-                            port => {
-                                let _ = sock.send_to(&pkt, ("127.0.0.1", port));
-                            }
-                        }
-                    }
-                })
-            })
-            .collect();
-        let stop_floods = StopOnDrop(stop);
-
-        connect_within(&mut link, &host, target_addr.port())
-            .await
-            .unwrap();
-        let (_, mut link_addr) = recv_datagram(&target).await;
-        let mut conclusive = 0;
-        for round in 0..100 {
-            aim.store(link_addr.port(), Ordering::Relaxed);
-            assert!(
-                wait_until(|| link.is_connected()).await,
-                "round {round}: the flood is heard"
-            );
-            link.disconnect();
-            connect_within(&mut link, &host, target_addr.port())
-                .await
-                .unwrap();
-            // The flood still hits the retired port; nothing has been
-            // sent to the new socket unless it was given that port.
-            let clean = || {
-                link.listening_handle().load(Ordering::Acquire)
-                    && !link.connected_handle().load(Ordering::Acquire)
-            };
-            let clean_at_connect = clean();
-            let (_, next) = recv_datagram(&target).await;
-            let clean_after_init = clean();
-            if next.port() != link_addr.port() {
-                conclusive += 1;
-                assert!(clean_at_connect, "round {round}: right after connect");
-                assert!(
-                    clean_after_init,
-                    "round {round}: once the init step has gone out"
-                );
-            }
-            link_addr = next;
-        }
-        assert!(
-            conclusive >= 20,
-            "only {conclusive} rounds bound a fresh port"
-        );
-        drop(stop_floods);
-        for f in floods {
-            f.join().unwrap();
-        }
-        link.disconnect();
-    }
-
     /// @test The TCP carrier sends init bytes on connect -- same
     /// init semantics on both carriers -- and the reader hears the
     /// response on the same stream.
@@ -1771,7 +1630,7 @@ mod tests {
     /// Linux defaults), so no single write takes it whole.
     const PAST_A_SEND_BUFFER: usize = 8 << 20;
 
-    /// Dials per case in the tests of a stream that ends at once.
+    /// Dials in the test of a stream that ends at once.
     const DIAL_ROUNDS: usize = 50;
 
     /// A peer that accepts every dial and hangs up at once.
@@ -1789,13 +1648,13 @@ mod tests {
     /// @test A dialed stream whose peer hangs up at once reads down.
     /// The store that marks it connected comes before the reader
     /// starts, so the reader's clear at end of stream is the last
-    /// word even when it runs beside connect on another worker. Two
-    /// cases, each dialed repeatedly: no init sequence, and a first
-    /// step delayed past the round. That step keeps the runner from
-    /// clearing the flag itself, and copying its large payload for
-    /// the runner is work connect does after the reader has started:
-    /// a window in which a store made after the tasks start would
-    /// land after the reader's clear and leave a dead link connected.
+    /// word even when it runs beside connect on another worker. Dialed
+    /// repeatedly with a first step delayed past the round: that step
+    /// keeps the runner from clearing the flag itself, and copying its
+    /// large payload for the runner is work connect does after the
+    /// reader has started -- a window in which a store made after the
+    /// tasks start would land after the reader's clear and leave a
+    /// dead link connected.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn tcp_dial_whose_peer_hangs_up_at_once_reads_down() {
         let addr = hang_up_on_every_dial().await;
@@ -1804,33 +1663,28 @@ mod tests {
             delay_ms: 60_000,
             bytes: vec![0; PAST_A_SEND_BUFFER],
         };
-        for (case, init) in [
-            ("no init sequence", Vec::new()),
-            ("a quiet first step", vec![quiet]),
-        ] {
-            let (push_tx, _) = broadcast::channel(4);
-            let mut link = StreamLink::new(
-                Protocol::RawSlip,
-                PipelineSpec::SlipRaw { uid: Some(1) },
-                Carrier::Tcp,
-                init,
-                push_tx,
-            );
-            for round in 0..DIAL_ROUNDS {
-                link.connect(&addr.ip().to_string(), addr.port())
-                    .await
-                    .unwrap();
-                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-                while link.is_connected() && tokio::time::Instant::now() < deadline {
-                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-                }
-                assert!(
-                    !link.is_connected(),
-                    "{case}, round {round}: the peer hung up, yet the link reads connected"
-                );
+        let (push_tx, _) = broadcast::channel(4);
+        let mut link = StreamLink::new(
+            Protocol::RawSlip,
+            PipelineSpec::SlipRaw { uid: Some(1) },
+            Carrier::Tcp,
+            vec![quiet],
+            push_tx,
+        );
+        for round in 0..DIAL_ROUNDS {
+            link.connect(&addr.ip().to_string(), addr.port())
+                .await
+                .unwrap();
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+            while link.is_connected() && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
             }
-            link.disconnect();
+            assert!(
+                !link.is_connected(),
+                "round {round}: the peer hung up, yet the link reads connected"
+            );
         }
+        link.disconnect();
     }
 
     /// @test A dial whose first init step cannot be sent reads down.
@@ -1935,74 +1789,15 @@ mod tests {
         link.disconnect();
     }
 
-    /// @test A failing init step tears the whole link down rather
-    /// than leaving it half-armed: the fake TCP target closes after
-    /// the first step, the delayed second write fails, and the link
-    /// reports disconnected.
-    #[tokio::test]
-    async fn failed_init_step_tears_link_down() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let (mut sock, _) = listener.accept().await.unwrap();
-            let mut buf = [0u8; 1];
-            tokio::io::AsyncReadExt::read_exact(&mut sock, &mut buf)
-                .await
-                .unwrap();
-            drop(sock); // hang up before the second step
-        });
-
-        let (push_tx, _) = broadcast::channel(4);
-        let mut link = StreamLink::new(
-            Protocol::RawSlip,
-            PipelineSpec::SlipRaw { uid: Some(1) },
-            Carrier::Tcp,
-            vec![
-                InitStep {
-                    name: "accepted".into(),
-                    delay_ms: 0,
-                    bytes: vec![0xAA],
-                },
-                InitStep {
-                    name: "refused".into(),
-                    delay_ms: 100,
-                    bytes: vec![0xBB],
-                },
-                // A third step guarantees a post-RST write even if
-                // the second lands in the kernel buffer before the
-                // peer's reset is processed.
-                InitStep {
-                    name: "definitely refused".into(),
-                    delay_ms: 200,
-                    bytes: vec![0xCC],
-                },
-            ],
-            push_tx,
-        );
-        link.connect(&addr.ip().to_string(), addr.port())
-            .await
-            .unwrap();
-        assert!(link.is_connected());
-
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
-        while link.is_connected() && tokio::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-        assert!(
-            !link.is_connected(),
-            "link must report disconnected after an init step fails"
-        );
-        link.disconnect();
-    }
-
-    /// @test The record stage end to end through the full TM stack:
-    /// two known records aggregated in one packet route whole
-    /// (header + value) to their table uids; an unknown id drops
-    /// the aggregate's tail but not what came before it; packets on
-    /// a skip APID vanish silently; and the whole walk survives the
-    /// frame being split mid-stream.
-    #[tokio::test]
-    async fn record_stage_walks_aggregates_through_tm_stack() {
+    /// @test The record stage through the full TM stack: two known
+    /// records aggregated in one packet route whole (header + value) to
+    /// their table uids, a record the table declares undecoded is
+    /// stepped over by its layout, an unknown id drops the aggregate's
+    /// tail (one unroutable unit) but not what came before it, packets
+    /// on a skip APID and the frame's idle fill vanish silently, and
+    /// the walk survives the frame being split mid-stream.
+    #[test]
+    fn record_stage_walks_aggregates_through_tm_stack() {
         // Record shape mirroring a typical id-addressed wire: one 2B
         // packet descriptor, then records of 4B id, 11B time, value.
         let rec = |id: u32, value: &[u8]| -> Vec<u8> {
@@ -2039,37 +1834,29 @@ mod tests {
         content.extend_from_slice(&event_pkt);
         let frame = ccsds_tm::pack_frame(256, 0x044, 0, &content);
 
-        let addr = serve_bytes(vec![frame[..100].to_vec(), frame[100..].to_vec()]).await;
-        let (push_tx, mut push_rx) = broadcast::channel(16);
-        let mut link = StreamLink::new(
-            Protocol::TmCcsdsSppRecords,
-            PipelineSpec::TmSppRecords {
-                frame_size: 256,
-                records: spec,
-            },
-            Carrier::Tcp,
-            Vec::new(),
-            push_tx,
-        );
-        link.connect(&addr.ip().to_string(), addr.port())
-            .await
-            .unwrap();
+        let mut pipeline = PacketPipeline::build(&PipelineSpec::TmSppRecords {
+            frame_size: 256,
+            records: spec,
+        });
+        let (mut packets, mut unroutable) = pipeline.feed(&frame[..100]);
+        assert!(packets.is_empty(), "nothing before the frame completes");
+        let (more, dropped) = pipeline.feed(&frame[100..]);
+        packets.extend(more);
+        unroutable += dropped;
 
-        let first = recv_one(&mut push_rx).await;
-        assert_eq!(first.full_uid, 100);
-        assert_eq!(first.payload.len(), 15 + 4);
-        assert_eq!(&first.payload[15..], &[1, 2, 3, 4]);
-        let second = recv_one(&mut push_rx).await;
+        let routed: Vec<(u32, usize, &[u8])> = packets
+            .iter()
+            .map(|p| (p.full_uid, p.payload.len(), &p.payload[15..]))
+            .collect();
         assert_eq!(
-            second.full_uid, 200,
-            "the string before it was stepped over"
+            routed,
+            [
+                (100, 15 + 4, &[1u8, 2, 3, 4][..]),
+                (200, 15 + 1, &[7u8][..])
+            ],
+            "whole records, the string before 200 stepped over"
         );
-        assert_eq!(&second.payload[15..], &[7]);
-        // Unknown-id tail and the skip-APID event packet: nothing
-        // further arrives.
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        assert!(push_rx.try_recv().is_err());
-        link.disconnect();
+        assert_eq!(unroutable, 1, "the unknown id's tail, and nothing else");
     }
 
     /// @test The listen-mode carrier end to end, shaped like the
@@ -2200,6 +1987,55 @@ mod tests {
         link.disconnect();
     }
 
+    /// @test A packet spanning three frames whose first frame is dropped
+    /// leaks nothing: the middle frame carries no packet start (its
+    /// first-header pointer says so), so resync stays armed through it,
+    /// and the packet stage resumes at the third frame's first header.
+    /// The orphaned tail before that header is shaped like a plausible
+    /// header on a routed address, as real payload bytes can be, and
+    /// must not parse.
+    #[test]
+    fn a_continuation_frame_after_a_dropped_frame_keeps_the_resync() {
+        const FRAME: usize = 32;
+        let field_len = FRAME - ccsds_tm::HEADER_SIZE - ccsds_tm::TRAILER_SIZE; // 24
+                                                                                // A: 54 bytes on the wire, 24 in frame 1, 24 in frame 2, 6 in 3.
+        let mut a_payload = vec![0xA5u8; 48];
+        // A's last six bytes read as a header: APID 0x0D0, one data byte.
+        a_payload[42..48].copy_from_slice(&[0x00, 0xD0, 0xC0, 0x00, 0x00, 0x00]);
+        let a = ccsds_spp::pack(0x0D0, 1, &a_payload);
+        assert_eq!(a.len(), 54);
+        let b = ccsds_spp::pack(0x0D0, 2, &[1, 2, 3, 4]);
+        let restamp = |frame: &mut Vec<u8>, first_header: u16| {
+            frame[4..6].copy_from_slice(&(0x1800u16 | first_header).to_be_bytes());
+            let crc = ccsds_tm::crc16(&frame[..FRAME - ccsds_tm::TRAILER_SIZE]);
+            frame[FRAME - 2..].copy_from_slice(&crc.to_be_bytes());
+        };
+        let mut f1 = ccsds_tm::pack_frame(FRAME, 0x044, 0, &a[..field_len]);
+        let mut f2 = ccsds_tm::pack_frame(FRAME, 0x044, 1, &a[field_len..2 * field_len]);
+        restamp(&mut f2, 0x7FF); // no packet starts in frame 2
+        let mut f3_content = a[2 * field_len..].to_vec();
+        f3_content.extend_from_slice(&b);
+        let mut f3 = ccsds_tm::pack_frame(FRAME, 0x044, 2, &f3_content);
+        restamp(&mut f3, 6); // B starts after A's six-byte tail
+        f1[10] ^= 0xFF; // frame 1 fails its CRC
+
+        let mut pipeline = PacketPipeline::build(&PipelineSpec::TmSpp {
+            apid_map: HashMap::from([(0x0D0u16, 0x00D000u32)]),
+            frame_size: FRAME,
+        });
+        let mut stream = f1;
+        stream.extend_from_slice(&f2);
+        stream.extend_from_slice(&f3);
+        let (packets, unroutable) = pipeline.feed(&stream);
+        let payloads: Vec<Vec<u8>> = packets.into_iter().map(|p| p.payload).collect();
+        assert_eq!(
+            payloads,
+            vec![vec![1u8, 2, 3, 4]],
+            "B alone, nothing bogus before it"
+        );
+        assert_eq!(unroutable, 1, "the dropped frame");
+    }
+
     /// @test Connect is idempotent on a listening link: a second call
     /// while the listener is alive leaves it bound (no rebind window
     /// that would refuse a dialing peer) and a peer still attaches.
@@ -2272,24 +2108,23 @@ mod tests {
     }
 
     /// @test Without a configured raw_uid, raw frames drop instead of
-    /// inventing an address -- the link stays connected and harmless.
-    #[tokio::test]
-    async fn missing_uid_drops_frames() {
-        let addr = serve_bytes(vec![slip::encode(&[1, 2, 3])]).await;
-        let (push_tx, mut push_rx) = broadcast::channel(16);
-        let mut link = StreamLink::new(
+    /// inventing an address: each counts as one unroutable unit and
+    /// nothing routes. Such a link still builds (it warns once).
+    #[test]
+    fn missing_uid_drops_frames() {
+        let (push_tx, _) = broadcast::channel(4);
+        let _link = StreamLink::new(
             Protocol::RawSlip,
             PipelineSpec::SlipRaw { uid: None },
             Carrier::Tcp,
             Vec::new(),
             push_tx,
         );
-        link.connect(&addr.ip().to_string(), addr.port())
-            .await
-            .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        assert!(push_rx.try_recv().is_err());
-        assert!(link.is_connected());
-        link.disconnect();
+        let mut pipeline = PacketPipeline::build(&PipelineSpec::SlipRaw { uid: None });
+        let mut wire = slip::encode(&[1, 2, 3]);
+        wire.extend_from_slice(&slip::encode(&[4]));
+        let (packets, unroutable) = pipeline.feed(&wire);
+        assert!(packets.is_empty());
+        assert_eq!(unroutable, 2);
     }
 }

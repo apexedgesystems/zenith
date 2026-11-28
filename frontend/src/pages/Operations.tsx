@@ -57,7 +57,7 @@ interface ExecSurface {
   opcodes: Record<string, string>;
 }
 
-/** Pack a u32 as 4-char little-endian hex. */
+/** Pack a u32 as little-endian hex: four bytes, eight hex digits. */
 function u32Hex(n: number): string {
   const buf = new ArrayBuffer(4);
   new DataView(buf).setUint32(0, n >>> 0, true);
@@ -456,7 +456,12 @@ export default function OperationsPage({
     try {
       const encoded = await fileToBase64(swapFile);
       if ("error" in encoded) {
-        void notify(encoded.error, "Library swap");
+        // Nothing was sent: the row ends as the refusal, not pending.
+        const message = encoded.error;
+        setAudit((prev) =>
+          prev.map((e) => (e.id === id ? { ...e, status: "err", message } : e)),
+        );
+        void notify(message, "Library swap");
         return;
       }
       const base64 = encoded.base64;

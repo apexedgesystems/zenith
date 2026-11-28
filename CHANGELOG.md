@@ -13,6 +13,39 @@ architecture review; work before that is the v0.0.1 tag.
 
 ### Breaking
 
+- API clients: the command route, `POST /api/targets/{id}/command`,
+  reads `full_uid` and `opcode` as hex only with a `0x` prefix and as
+  decimal otherwise, as documented; it used to read any string of hex
+  digits as hex. Add the prefix to a hex value: `"D000"` is now refused
+  with 400, and an all-digit string changes meaning (`"1000"` is now
+  1000, not 0x1000). The console already sends `0x` strings.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- API clients: a socket ticket from `POST /api/auth/ws-ticket` opens the
+  telemetry socket and nothing else. On another route's `?ticket=`, or
+  sent as `Authorization: Bearer`, it is now refused with 401; send the
+  bearer token there instead.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- Operators: values the console used to coerce are refused, naming the
+  field, and nothing is sent. Command forms refuse a blank field, an
+  integer that is not a whole decimal or `0x` number or does not fit its
+  field, and a floating-point value not written in decimal notation
+  (`0x10`, `Infinity`). A tunable update refuses an integer outside its
+  field's range (300 for a uint8 used to be written as 44), a bool other
+  than 0 or 1, and a float32 beyond its range (written as infinity).
+  Tunables refuses a 64-bit integer that is not a whole decimal or `0x`
+  number in its field's range, such as `1e3` or `1.0`. Enter a value the
+  field holds; Raw Mode still sends a payload as typed in hex.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- API clients: a tunable read, `GET /api/targets/{id}/params/{uid}`,
+  gives each 8-byte integer field (int64 and uint64) as a string holding
+  its exact decimal value, `"18446744073709551615"`. An int64 used to
+  read as the hex of its bytes, and a uint64 as a number, which a
+  browser's JSON rounds past 2^53. An update takes such a field as that
+  string, a `0x` hex string or a JSON integer, each read exactly; a
+  fraction, an exponent, a value outside the type or a hex-bytes string
+  is refused with 400 naming the field, and a string of digits is always
+  decimal.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - The image runs zenith as an unprivileged user (uid 10001) instead of
   root; its entrypoint hands an existing data volume to that user on
   first start. Started as root, the container needs CAP_SETUID and
@@ -63,6 +96,11 @@ architecture review; work before that is the v0.0.1 tag.
 - Release images are smoke-tested on each supported architecture before
   publication.
   ([#53](https://github.com/apexedgesystems/zenith/pull/53))
+- Boot warns when the retention ladder is on and `[storage]
+  retention_hours` (other than 0) ends at or before `[storage.tiers]
+  mid_horizon_hours`: telemetry is deleted before it reaches the coarse
+  tier, which stays empty. The warning names both values.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 
 ### Changed
 
@@ -107,6 +145,106 @@ architecture review; work before that is the v0.0.1 tag.
 
 ### Fixed
 
+- `[storage] retention_hours = 0` keeps telemetry forever, as
+  `audit_retention_days = 0` keeps the audit log, instead of deleting
+  all of it every minute.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- Tunables shows bool and int64 fields as values instead of hex, and
+  reads and writes a big-endian dictionary's fields in that byte order.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- Tunables applies a block holding arrays, strings or other fields it
+  shows as hex instead of refusing the update: each such field takes
+  back the hex form it was read as. The rails judge a float, and each
+  element of an array, by the value its bytes hold, whether it comes as
+  a number, as its own hex or within the whole field's hex, so every
+  form of the same bytes gets one verdict. A float that is not finite,
+  or is negative zero (which a browser writes as 0), also reads as hex;
+  one that is not finite lies outside any rails.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- A float32 tunable entered at one of its rails passes them again on an
+  unedited Apply: the rails compare a float32 with each rail as a
+  float32, so 0.1 under max 0.1, 0.7 over min 0.7 and 1000.1 on a step
+  of 0.1 still pass once written and read back.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- An unedited Tunables Apply writes every field back byte for byte,
+  whatever its type: a double, which the server could read back a unit
+  in the last place off, now keeps its bytes too. A bool holding a value
+  other than 0 or 1 is refused instead, as Breaking describes.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- Tunables never writes an integer other than the one entered: an
+  unedited Apply writes back the 64-bit value read, and a typed value,
+  in nested and variable-length blocks too, is written as typed or
+  refused, naming the field, instead of arriving rounded.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- A telemetry history or CSV request whose `end_ms` lies past 2^63 - 1
+  (`end_ms=18446744073709551615`, say) returns the window's samples
+  instead of none, and one whose `start_ms` lies there returns none
+  instead of all of them.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- Tunables shows field types, and checks 64-bit edits, for a component
+  with more than one tunable struct, such as the executive, from the
+  struct its values were read with.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- `zenith --hash-password` hashes the password as typed, edge spaces
+  included, as sign-in compares it; only the line ending is removed.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- An upload is checked as an RTS sequence only when it goes into a
+  directory named `rts`, not whenever its path contains `rts/`
+  (`parts/`), and the refusal reads without a run of spaces.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- Downsampling and the bearer-token login are audited: downsampling
+  with the rows it converted, the login as a console sign-in is.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- Shutdown waits up to 5 s, one budget shared by every target's sample
+  writer, for the writers to write the samples they hold, instead of
+  exiting with them unwritten. A writer still writing then is left with
+  a warning and does not keep the process from exiting.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- A trim with `count: 0` deletes nothing instead of a quarter of the
+  target's samples.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- History queries over a window holding more samples than their limit
+  return the newest ones, so a chart of a long window reaches the
+  present instead of stopping at the limit's oldest samples. History
+  and CSV export rows come in time order; CSV exports list the oldest
+  row first.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- Tiered history no longer holds two points at one timestamp for a
+  channel: a tier pass leaves the bucket its cutoff falls in for a
+  later pass instead of writing it twice.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- After a dropped TM frame, a packet spanning three or more frames no
+  longer yields bogus telemetry or swallows the next real packet:
+  decoding resumes at the next frame in which a packet starts.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- A SLIP peer can no longer grow a frame past the 64 KiB bound with
+  escaped bytes, and escaped bytes outside a frame are dropped.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- Socket tickets and bearer tokens are refused once expired, without
+  the 60-second grace that let a 30-second ticket work for 90 seconds.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- An audit log request whose offset lies past the end returns no rows
+  instead of the first page.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- The Telemetry page reads Live only while samples arrive and the link
+  is up: a link reported down, or a stream silent for 10 s, shows Off,
+  Listening or No data instead.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- Tunables shows and applies only the selected component's values: a
+  slow read, or a slow apply's answer, for the component left behind no
+  longer replaces them, and Apply writes to the component the values
+  were read from.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- The chart's hover readout shows no value for a channel before its
+  first sample or after its last, instead of extrapolating one.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- Dashboard health cards for individual components load: the console
+  asks for them with the uid and opcode in the hex form the command
+  route reads.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- A library swap whose file cannot be read is logged as failed on the
+  Operations page instead of staying pending.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - UDP targets show listening until first contact, and TCP targets no
   longer falsely remain connected after an immediate hangup or a
   disconnect racing an incoming session. Clients of the connect

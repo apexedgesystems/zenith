@@ -8,6 +8,7 @@ import {
   type FieldDef,
 } from "../api/decode";
 import { apiFetch } from "../api/apiFetch";
+import { parseWholeNumber, wholeNumberHint } from "../utils/wholeNumber";
 
 /* ----------------------------- Types ----------------------------- */
 
@@ -98,45 +99,60 @@ export type EncodedField =
   | { ok: true; hex: string }
   | { ok: false; error: string };
 
-/** Encode one typed form field little-endian. Unsigned integers parse
- *  decimal or 0x hex; float and double are the IEEE 754 binary32 and
- *  binary64 of a finite number. Any other catalog type is refused, so
- *  the form never sends bytes that do not match the field's layout. */
+/** A number in decimal notation: an optional sign, digits with an
+ *  optional point (or a point and digits), an optional exponent.
+ *  Number() alone also reads 0x, 0b and 0o literals and Infinity. */
+const DECIMAL_NUMBER = /^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i;
+
+/** Encode one typed form field little-endian. An unsigned integer is a
+ *  whole number in range for its width, in decimal or 0x hex; float and
+ *  double are the IEEE 754 binary32 and binary64 of a finite number in
+ *  decimal notation. A blank field, any other input and any other
+ *  catalog type are refused, so the form never sends a value the
+ *  operator did not enter, or bytes that do not match the field's
+ *  layout. */
 export function encodeField(
   field: CommandFieldDef,
   value: string,
 ): EncodedField {
+  const text = value.trim();
+  const blank: EncodedField = {
+    ok: false,
+    error: `field '${field.name}' is blank`,
+  };
   switch (field.type) {
     case "uint8":
     case "uint16":
     case "uint32": {
-      // Parse as hex if starts with 0x, otherwise decimal
-      const num =
-        value.startsWith("0x") || value.startsWith("0X")
-          ? parseInt(value, 16)
-          : parseInt(value);
-      // Non-numeric input encodes zero; unsigned types clamp to >= 0
-      const n = isNaN(num) ? 0 : Math.max(0, num);
-      if (field.type === "uint8") {
-        return { ok: true, hex: (n & 0xff).toString(16).padStart(2, "0") };
+      if (text === "") return blank;
+      const bytes =
+        field.type === "uint8" ? 1 : field.type === "uint16" ? 2 : 4;
+      const whole = parseWholeNumber(text, 8 * bytes, false);
+      if (whole === null) {
+        const takes = wholeNumberHint(8 * bytes, false);
+        return {
+          ok: false,
+          error: `field '${field.name}': '${value}' is not a ${field.type} (${takes})`,
+        };
       }
-      if (field.type === "uint16") {
-        const buf = new ArrayBuffer(2);
-        new DataView(buf).setUint16(0, n & 0xffff, true);
-        return { ok: true, hex: bytesToHex(new Uint8Array(buf)) };
-      }
-      const buf = new ArrayBuffer(4);
-      new DataView(buf).setUint32(0, n >>> 0, true);
+      // Exact: at most 32 bits wide.
+      const n = Number(whole);
+      const buf = new ArrayBuffer(bytes);
+      const view = new DataView(buf);
+      if (bytes === 1) view.setUint8(0, n);
+      else if (bytes === 2) view.setUint16(0, n, true);
+      else view.setUint32(0, n, true);
       return { ok: true, hex: bytesToHex(new Uint8Array(buf)) };
     }
     case "float":
     case "double": {
-      const n = Number(value);
+      if (text === "") return blank;
+      const n = DECIMAL_NUMBER.test(text) ? Number(text) : NaN;
       const single = field.type === "float";
       if (!Number.isFinite(single ? Math.fround(n) : n)) {
         return {
           ok: false,
-          error: `field '${field.name}': '${value}' is not a finite ${field.type}`,
+          error: `field '${field.name}': '${value}' is not a finite ${field.type} in decimal notation, such as -1.5 or 2.5e3`,
         };
       }
       const buf = new ArrayBuffer(single ? 4 : 8);
@@ -153,14 +169,15 @@ export function encodeField(
 }
 
 /** Encode a command's fields in catalog order into one hex payload, or
- *  return the first field's refusal. Empty inputs encode as 0. */
+ *  return the first field's refusal; a blank field is refused, never
+ *  sent as 0. */
 export function buildPayload(
   fields: CommandFieldDef[],
   values: Record<string, string>,
 ): EncodedField {
   let hex = "";
   for (const field of fields) {
-    const encoded = encodeField(field, values[field.name] || "0");
+    const encoded = encodeField(field, values[field.name] ?? "");
     if (!encoded.ok) return encoded;
     hex += encoded.hex;
   }

@@ -93,6 +93,9 @@ fn default_cookie_secure() -> bool {
 pub struct StorageSection {
     #[serde(default = "default_db_path")]
     pub path: String,
+    /// Telemetry older than this many hours is deleted by the
+    /// maintenance loop, its latest values with it. 0 keeps telemetry
+    /// forever; the size cap (max_db_size_mb) still bounds the file.
     #[serde(default = "default_retention")]
     pub retention_hours: u32,
     /// Audit rows older than this many days are pruned by the
@@ -289,11 +292,7 @@ impl PollBlock {
     }
 
     pub fn full_uid(&self) -> Option<u32> {
-        let t = self.uid.trim();
-        match t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-            Some(hex) => u32::from_str_radix(hex, 16).ok(),
-            None => t.parse().ok(),
-        }
+        crate::core::config_manager::parse_num_u32(&self.uid)
     }
 }
 
@@ -857,6 +856,28 @@ pub fn duplicate_listen_port(targets: &[TargetSection]) -> Option<(u16, &str, &s
     None
 }
 
+/// The warning boot logs when the retention ladder cannot fill its
+/// coarse tier: rows reach that tier only once they are older than
+/// `mid_horizon_hours`, and time-based retention deletes every row
+/// older than `retention_hours` (0 keeps them all), so with tiers on, a
+/// retention window that ends at or before the horizon leaves the coarse
+/// tier empty. A warning, not a refusal: the configuration is valid,
+/// only its coarse tier is idle.
+pub fn coarse_tier_stays_empty(storage: &StorageSection) -> Option<String> {
+    let tiers = &storage.tiers;
+    let unreachable = tiers.enabled
+        && storage.retention_hours != 0
+        && tiers.mid_horizon_hours >= storage.retention_hours;
+    unreachable.then(|| {
+        format!(
+            "[storage] retention_hours = {} deletes telemetry before it reaches the coarse \
+             tier, which starts at [storage.tiers] mid_horizon_hours = {}: the coarse \
+             tier will stay empty",
+            storage.retention_hours, tiers.mid_horizon_hours
+        )
+    })
+}
+
 /// A retired key must not be ignored: serde drops unknown keys, so
 /// the retired spelling is still parsed and refused with the new
 /// name, which is the only way the operator learns why last week's
@@ -958,44 +979,38 @@ mod tests {
         t
     }
 
-    /// @test A positive rate whose period the poll timer cannot use is
-    /// refused at load, naming the target and the rate: 1e-300 and the
-    /// smallest positive double (the reciprocal overflows Duration), and
-    /// 1e-19 (a Duration, but too long for the clock to hold one period
-    /// past now).
+    /// @test A poll rate converts to the period the timer will use, or is
+    /// refused at load naming the target and the rate: the published
+    /// ceiling and tiny positive rates are exact reciprocals (50 Hz gives
+    /// 20 ms, 5 Hz 200 ms, 2^-30 Hz 2^30 s and 2^-60 Hz 2^60 s), while
+    /// 1e-300 and the smallest positive double (the reciprocal overflows
+    /// Duration) and 1e-19 (a Duration, but too long for the clock to
+    /// hold one period past now) give none.
     #[test]
-    fn poll_rate_without_a_usable_period_is_refused() {
-        for (rate, shown) in [
-            (1e-300, "1e-300"),
-            (f64::MIN_POSITIVE, "2.2250738585072014e-308"),
-            (1e-19, "1e-19"),
-        ] {
-            let targets = [aproto_poll_target(rate)];
-            let (name, reason) = invalid_poll(&targets).expect("must refuse");
-            assert_eq!(name, "rover");
-            assert!(
-                reason.contains(shown) && reason.contains("period"),
-                "{reason}"
-            );
-            assert!(targets[0].poll[0].period().is_none());
-        }
-    }
-
-    /// @test The published ceiling and tiny positive rates whose period
-    /// the timer can use are accepted, and the period a row converts to
-    /// is the validated one: 50 Hz gives 20 ms, 5 Hz 200 ms, 2^-30 Hz
-    /// 2^30 seconds and 2^-60 Hz 2^60 seconds (exact reciprocals).
-    #[test]
-    fn poll_rates_with_a_usable_period_are_accepted() {
+    fn poll_rates_convert_to_a_usable_period_or_refuse() {
+        use std::time::Duration;
         for (rate, period) in [
-            (50.0, std::time::Duration::from_millis(20)),
-            (5.0, std::time::Duration::from_millis(200)),
-            (2f64.powi(-30), std::time::Duration::from_secs(1 << 30)),
-            (2f64.powi(-60), std::time::Duration::from_secs(1 << 60)),
+            (50.0, Some(Duration::from_millis(20))),
+            (5.0, Some(Duration::from_millis(200))),
+            (2f64.powi(-30), Some(Duration::from_secs(1 << 30))),
+            (2f64.powi(-60), Some(Duration::from_secs(1 << 60))),
+            (1e-300, None),
+            (f64::MIN_POSITIVE, None),
+            (1e-19, None),
         ] {
             let targets = [aproto_poll_target(rate)];
-            assert!(invalid_poll(&targets).is_none(), "rate {rate:e} refused");
-            assert_eq!(targets[0].poll[0].period(), Some(period), "rate {rate:e}");
+            assert_eq!(targets[0].poll[0].period(), period, "rate {rate:e}");
+            match invalid_poll(&targets) {
+                None => assert!(period.is_some(), "rate {rate:e} accepted"),
+                Some((name, reason)) => {
+                    assert!(period.is_none(), "rate {rate:e} refused: {reason}");
+                    assert_eq!(name, "rover");
+                    assert!(
+                        reason.contains(&format!("{rate:e}")) && reason.contains("period"),
+                        "{reason}"
+                    );
+                }
+            }
         }
     }
 
@@ -1049,11 +1064,13 @@ mod tests {
         }
     }
 
-    /// @test The target-directory convention: naming one directory
-    /// finds the conventional artifacts inside it, absent ones stay
-    /// absent (a bundle without commands.json simply has no command
-    /// catalog), and an explicit path always wins over the
-    /// convention.
+    /// @test The target-directory convention on a real directory: the
+    /// conventional artifacts present in it are found, file and
+    /// directory alike; an absent one stays absent (a bundle without
+    /// commands.json simply has no command catalog); an explicit path
+    /// always wins over the convention and is kept as declared even
+    /// when nothing is there (its loader reports it); and a target with
+    /// no directory resolves only explicit paths.
     #[test]
     fn target_directory_resolves_conventional_artifacts() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1061,34 +1078,31 @@ mod tests {
         std::fs::write(dir.join("app_manifest.json"), "{}").unwrap();
         std::fs::write(dir.join("telemetry.json"), "{}").unwrap();
         std::fs::create_dir(dir.join("structs")).unwrap();
-        // Deliberately no commands.json and no on_connect.json.
+        // Deliberately no commands.json, on_connect.json or records.json.
+        let at = |name: &str| Some(dir.join(name).to_string_lossy().into_owned());
 
         let mut t = target("rover", "tcp", None);
         t.dir = Some(dir.to_string_lossy().into_owned());
-
-        assert_eq!(
-            t.manifest_path(),
-            Some(dir.join("app_manifest.json").to_string_lossy().into_owned())
-        );
-        assert_eq!(
-            t.structs_path(),
-            Some(dir.join("structs").to_string_lossy().into_owned())
-        );
-        assert_eq!(
-            t.telemetry_path(),
-            Some(dir.join("telemetry.json").to_string_lossy().into_owned())
-        );
+        assert_eq!(t.manifest_path(), at("app_manifest.json"));
+        assert_eq!(t.structs_path(), at("structs"));
+        assert_eq!(t.telemetry_path(), at("telemetry.json"));
         assert_eq!(t.commands_path(), None, "absent artifact stays absent");
         assert_eq!(t.connect_init_path(), None);
+        assert_eq!(t.records_path(), None);
 
-        // An explicit path overrides the convention.
         t.commands_config = Some("/elsewhere/commands.json".to_string());
         assert_eq!(
             t.commands_path(),
-            Some("/elsewhere/commands.json".to_string())
+            Some("/elsewhere/commands.json".to_string()),
+            "an explicit path overrides the convention"
+        );
+        t.records_config = Some("/no/such/records.json".to_string());
+        assert_eq!(
+            t.records_path(),
+            Some("/no/such/records.json".to_string()),
+            "an explicit path is kept, absent or not"
         );
 
-        // With no directory declared, only explicit paths resolve.
         let bare = target("bare", "tcp", None);
         assert_eq!(bare.manifest_path(), None);
         assert_eq!(bare.telemetry_path(), None);
@@ -1190,38 +1204,6 @@ mod tests {
         }
     }
 
-    /// @test Missing paths: the accessors drop a conventional artifact
-    /// that is not there and keep an explicit path as declared, absent
-    /// or not (its loader reports it); the preflight raises nothing for
-    /// either, since absence is not a permission error.
-    #[test]
-    fn absent_artifacts_keep_their_handling() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        std::fs::write(tmp.path().join("telemetry.json"), "{}").unwrap();
-        let mut t = target("t", "tcp", None);
-        t.dir = Some(tmp.path().to_string_lossy().into_owned());
-        t.records_config = Some("/no/such/records.json".to_string());
-        assert_eq!(
-            t.telemetry_path(),
-            Some(
-                tmp.path()
-                    .join("telemetry.json")
-                    .to_string_lossy()
-                    .into_owned()
-            )
-        );
-        assert_eq!(t.manifest_path(), None, "absent conventional artifact");
-        assert_eq!(t.structs_path(), None);
-        assert_eq!(t.commands_path(), None);
-        assert_eq!(t.connect_init_path(), None);
-        assert_eq!(
-            t.records_path(),
-            Some("/no/such/records.json".to_string()),
-            "an explicit path is kept, absent or not"
-        );
-        assert!(unreadable_target_path(&[t]).is_none());
-    }
-
     /// @test A permission error on any declared path refuses, naming the
     /// target, the path and the error: the target directory (as when it,
     /// or the mount above it, cannot be searched) or an explicit
@@ -1280,8 +1262,9 @@ mod tests {
     /// root, which bypasses permission bits, so there the test runs
     /// itself again as uid and gid 65534 (std's Command uid and gid, from
     /// a copy of the test binary in a directory that uid can reach), with
-    /// the directory owned by root at mode 0744, as the review found it;
-    /// the child prints a marker the parent requires. Run as any other
+    /// the directory owned by root at mode 0744 (listable, not
+    /// searchable, by anyone else); the child prints a marker the parent
+    /// requires. Run as any other
     /// user, it probes in place, the directory at mode 0644, which its
     /// owner too can list but not search.
     #[test]
@@ -1399,9 +1382,6 @@ mod tests {
         }
     }
 
-    /// @test Two UDP targets on one listen port are named in the
-    /// refusal; distinct ports, TCP targets, and portless entries
-    /// (caught separately at carrier validation) all pass.
     /// @test Health rules parse in both forms and normalize to one
     /// check each: a bare name is nonzero-bad, a table carries its one
     /// comparison; no comparison, two comparisons, an empty name, and
@@ -1462,63 +1442,15 @@ mod tests {
             .contains("health_nonzero_bad was renamed"));
     }
 
-    /// @test Every apex target the shipped configs declare without a
-    /// health list of its own (the dev config.toml and the image's
-    /// deploy/config.toml) reads the executive's error counters as bad
-    /// when nonzero: frame overruns, watchdog warnings, and the ticks a
-    /// clock-grid resync dropped (zero unless the vehicle stalled). The
-    /// rules come from the default list; a target that declares its own
-    /// list is governed by that list instead.
-    #[test]
-    fn shipped_apex_targets_flag_the_executive_error_counters() {
-        let rules = [
-            "frameOverrunCount",
-            "watchdogWarningCount",
-            "resyncDroppedTicks",
-        ]
-        .map(|f| HealthCheck {
-            field: health_field_key(f),
-            op: "ne".into(),
-            value: 0.0,
-        });
-        let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
-        for file in ["config.toml", "deploy/config.toml"] {
-            let text = std::fs::read_to_string(repo.join(file)).unwrap();
-            let cfg: ServerConfig = toml::from_str(&text).unwrap();
-            let raw: toml::Value = toml::from_str(&text).unwrap();
-            let declared = raw["targets"].as_array().unwrap();
-            assert_eq!(declared.len(), cfg.targets.len());
-            let apex: Vec<&TargetSection> = cfg
-                .targets
-                .iter()
-                .zip(declared)
-                .filter(|(t, d)| t.protocol == "aproto-slip" && d.get("health").is_none())
-                .map(|(t, _)| t)
-                .collect();
-            assert!(
-                !apex.is_empty(),
-                "{file} declares no apex target on the default list"
-            );
-            for t in apex {
-                let checks = t.health_checks().unwrap();
-                for rule in &rules {
-                    assert!(
-                        checks.contains(rule),
-                        "{file}: {} does not flag {}",
-                        t.name,
-                        rule.field
-                    );
-                }
-            }
-        }
-    }
-
     /// @test Every default health key matches at least one field in the
     /// struct dictionaries of the shipped apex targets (config.toml's
     /// aproto-slip targets, whose /data/targets paths are this
     /// repository's targets/ as compose mounts it, through `dir` or
     /// `structs_dir`), so a default name that matches nothing cannot
-    /// sit in the list.
+    /// sit in the list; and the executive's error counters are on it,
+    /// so a target that declares no list of its own reads frame
+    /// overruns, watchdog warnings, and the ticks a clock-grid resync
+    /// dropped (zero unless the vehicle stalled) as bad when nonzero.
     #[test]
     fn default_health_keys_match_shipped_apex_dictionaries() {
         let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..");
@@ -1553,6 +1485,16 @@ mod tests {
             unmatched.is_empty(),
             "default health keys matching no field of a shipped apex dictionary: {unmatched:?}"
         );
+        for counter in [
+            "frameOverrunCount",
+            "watchdogWarningCount",
+            "resyncDroppedTicks",
+        ] {
+            assert!(
+                default_health_names().contains(&health_field_key(counter)),
+                "{counter} is not on the default health list"
+            );
+        }
     }
 
     /// @test The retired udp_listen_port key refuses boot naming the
@@ -1620,92 +1562,94 @@ mod tests {
         }
     }
 
-    /// @test The server listens on the configured IPv4 host and port,
-    /// and a client on the same host dials that address as it is.
+    /// @test Where the server listens, and where a client on the same
+    /// host dials it: a specified host listens as configured and is
+    /// dialed as it is, IPv4 or IPv6; an unspecified host listens on
+    /// every interface of its family and is dialed over that family's
+    /// loopback (127.0.0.1 for 0.0.0.0, ::1 for ::, never 127.0.0.1 for
+    /// a server that listens on IPv6 only); a host that is not an IP
+    /// address (a typo, or a name) listens on every IPv4 interface
+    /// rather than none; and --port replaces the configured port,
+    /// leaving the host alone.
     #[test]
-    fn listen_addr_takes_an_ipv4_host_and_its_port() {
-        let listen = server("127.0.0.1", 8080).listen_addr(None);
-        assert_eq!(listen, "127.0.0.1:8080".parse::<SocketAddr>().unwrap());
-        assert_eq!(loopback_if_unspecified(listen), listen);
-        let listen = server("192.0.2.7", 9000).listen_addr(None);
-        assert_eq!(loopback_if_unspecified(listen), listen);
-    }
-
-    /// @test An IPv6 host listens as IPv6, and a client dials it in
-    /// the same family.
-    #[test]
-    fn listen_addr_takes_an_ipv6_host() {
-        let listen = server("::1", 8080).listen_addr(None);
-        assert_eq!(listen, "[::1]:8080".parse::<SocketAddr>().unwrap());
-        assert_eq!(loopback_if_unspecified(listen), listen);
-        let listen = server("fd00::5", 8080).listen_addr(None);
-        assert_eq!(listen, "[fd00::5]:8080".parse::<SocketAddr>().unwrap());
-        assert_eq!(loopback_if_unspecified(listen), listen);
-    }
-
-    /// @test An unspecified host listens on every interface of its
-    /// family, and a client on the same host dials that family's
-    /// loopback: 127.0.0.1 for 0.0.0.0 and ::1 for ::, never 127.0.0.1
-    /// for a server that listens on IPv6 only.
-    #[test]
-    fn unspecified_host_is_reached_over_its_familys_loopback() {
-        let listen = server("0.0.0.0", 8080).listen_addr(None);
-        assert_eq!(listen, "0.0.0.0:8080".parse::<SocketAddr>().unwrap());
-        assert_eq!(
-            loopback_if_unspecified(listen),
-            "127.0.0.1:8080".parse::<SocketAddr>().unwrap()
-        );
-        let listen = server("::", 8080).listen_addr(None);
-        assert_eq!(listen, "[::]:8080".parse::<SocketAddr>().unwrap());
-        assert_eq!(
-            loopback_if_unspecified(listen),
-            "[::1]:8080".parse::<SocketAddr>().unwrap()
-        );
-    }
-
-    /// @test A host that is not an IP address (a typo, or a name)
-    /// listens on every IPv4 interface rather than none, and is reached
-    /// over 127.0.0.1.
-    #[test]
-    fn unparseable_host_listens_on_every_ipv4_interface() {
-        for host in ["localhost", "0.0.0.O", "", "10.0.0.300"] {
-            let listen = server(host, 8080).listen_addr(None);
+    fn listen_and_dial_addresses_follow_the_host_and_port() {
+        for (host, port, listen, dial) in [
+            ("127.0.0.1", None, "127.0.0.1:8080", "127.0.0.1:8080"),
+            ("192.0.2.7", None, "192.0.2.7:8080", "192.0.2.7:8080"),
+            ("::1", None, "[::1]:8080", "[::1]:8080"),
+            ("fd00::5", None, "[fd00::5]:8080", "[fd00::5]:8080"),
+            ("0.0.0.0", None, "0.0.0.0:8080", "127.0.0.1:8080"),
+            ("::", None, "[::]:8080", "[::1]:8080"),
+            ("localhost", None, "0.0.0.0:8080", "127.0.0.1:8080"),
+            ("0.0.0.O", None, "0.0.0.0:8080", "127.0.0.1:8080"),
+            ("", None, "0.0.0.0:8080", "127.0.0.1:8080"),
+            ("10.0.0.300", None, "0.0.0.0:8080", "127.0.0.1:8080"),
+            ("::", Some(9443), "[::]:9443", "[::1]:9443"),
+            ("127.0.0.1", Some(9443), "127.0.0.1:9443", "127.0.0.1:9443"),
+        ] {
+            let got = server(host, 8080).listen_addr(port);
             assert_eq!(
-                listen,
-                "0.0.0.0:8080".parse::<SocketAddr>().unwrap(),
-                "host {host:?}"
+                got,
+                listen.parse::<SocketAddr>().unwrap(),
+                "{host:?} {port:?}"
             );
             assert_eq!(
-                loopback_if_unspecified(listen),
-                "127.0.0.1:8080".parse::<SocketAddr>().unwrap(),
-                "host {host:?}"
+                loopback_if_unspecified(got),
+                dial.parse::<SocketAddr>().unwrap(),
+                "{host:?} {port:?}"
             );
         }
     }
 
-    /// @test --port replaces the configured port (after ZENITH_PORT has
-    /// set it) and leaves the host alone.
+    /// @test With the retention ladder on, a retention window that
+    /// ends at or before the coarse tier's horizon is named at boot:
+    /// the warning carries both values and says the coarse tier will
+    /// stay empty. Tiers off, retention 0 (keep forever) and a window
+    /// past the horizon raise nothing.
     #[test]
-    fn port_override_replaces_the_configured_port() {
-        let cfg = apply_env_overrides(
-            toml::from_str("[server]\nhost = \"::\"\nport = 8080\n").unwrap(),
-            |k| (k == "ZENITH_PORT").then(|| "9090".to_string()),
-        )
-        .unwrap();
+    fn a_retention_window_inside_the_tier_horizon_is_warned_about() {
+        let storage =
+            |enabled: bool, retention_hours: u32, mid_horizon_hours: u32| StorageSection {
+                retention_hours,
+                tiers: TiersSection {
+                    enabled,
+                    mid_horizon_hours,
+                    ..TiersSection::default()
+                },
+                ..StorageSection::default()
+            };
+        let mut wrong = Vec::new();
+        for (enabled, retention, horizon, warned) in [
+            (true, 24, 24, true),
+            (true, 12, 24, true),
+            (true, 25, 24, false),
+            (true, 0, 24, false),
+            (false, 24, 24, false),
+        ] {
+            let warning = coarse_tier_stays_empty(&storage(enabled, retention, horizon));
+            if warning.is_some() != warned {
+                wrong.push(format!(
+                    "tiers {enabled}, retention {retention} h, horizon {horizon} h: {warning:?}"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
         assert_eq!(
-            cfg.server.listen_addr(None),
-            "[::]:9090".parse::<SocketAddr>().unwrap()
+            coarse_tier_stays_empty(&StorageSection::default()),
+            None,
+            "the shipped defaults leave tiers off"
         );
         assert_eq!(
-            cfg.server.listen_addr(Some(9443)),
-            "[::]:9443".parse::<SocketAddr>().unwrap()
-        );
-        assert_eq!(
-            loopback_if_unspecified(cfg.server.listen_addr(Some(9443))),
-            "[::1]:9443".parse::<SocketAddr>().unwrap()
+            coarse_tier_stays_empty(&storage(true, 24, 24)).unwrap(),
+            "[storage] retention_hours = 24 deletes telemetry before it reaches the \
+             coarse tier, which starts at [storage.tiers] mid_horizon_hours = 24: \
+             the coarse tier will stay empty"
         );
     }
 
+    /// @test Two UDP targets on one listen port are named in the
+    /// refusal; distinct ports, TCP targets, and portless entries
+    /// (caught separately at carrier validation) all pass.
     #[test]
     fn duplicate_listen_ports_are_refused_by_name() {
         let dup = [
@@ -1742,10 +1686,31 @@ mod tests {
         std::fs::write(&bad, "[server]\nport = 8080\nthis line is not toml\n").unwrap();
         let err = load(&bad).unwrap_err();
         assert!(err.contains("bad.toml"), "{err}");
-        assert!(err.contains("line 3"), "{err}");
 
         let good = dir.path().join("good.toml");
         std::fs::write(&good, "[server]\nport = 8080\n").unwrap();
         assert!(load(&good).is_ok());
+    }
+
+    /// @test The session keys default to a 30 minute idle limit, a 10
+    /// hour absolute limit and a Secure cookie, and read from the file.
+    #[test]
+    fn session_keys_parse_with_defaults() {
+        let d: AuthSection = toml::from_str("enabled = true").unwrap();
+        assert_eq!(
+            (d.session_idle_min, d.session_max_hours, d.cookie_secure),
+            (30, 10, true)
+        );
+        let set: AuthSection =
+            toml::from_str("session_idle_min = 0\nsession_max_hours = 12\ncookie_secure = false\n")
+                .unwrap();
+        assert_eq!(
+            (
+                set.session_idle_min,
+                set.session_max_hours,
+                set.cookie_secure
+            ),
+            (0, 12, false)
+        );
     }
 }

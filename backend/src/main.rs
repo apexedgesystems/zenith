@@ -2,10 +2,11 @@
 //!
 //! REST API + WebSocket server for commanding and monitoring Apex CSF applications.
 
-mod config;
-mod core;
-mod protocol;
-mod storage;
+// The server runs on the library crate's modules: they compile once, in
+// the library, and their tests run in its harness. This import is what
+// `crate::config` and the other `crate::` paths below name, and this
+// binary's own test harness holds only tests written in this file.
+use zenith::{config, core, protocol, storage};
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -33,7 +34,7 @@ use tracing_subscriber::EnvFilter;
 use crate::config::{FifoStrategy, ServerConfig};
 use crate::core::aproto_client::AprotoClient;
 use crate::core::auth::Credential;
-use crate::core::config_manager::StructDictionary;
+use crate::core::config_manager::{parse_num_u32, StructDictionary};
 use crate::core::metrics::TargetMetrics;
 use crate::core::session::{EndReason, Session, SessionPolicy, SessionStatus, SessionStore};
 use crate::core::telemetry::{self, TelemetrySample};
@@ -110,6 +111,17 @@ fn health_check(cli: &Cli) -> i32 {
     }
 }
 
+/// The password a `--hash-password` stdin line holds: the line as
+/// typed, only its line ending removed, since sign-in compares the
+/// password exactly as it is sent, edge spaces included. None for an
+/// empty or blank line.
+fn password_from_line(line: &str) -> Option<&str> {
+    let password = line
+        .strip_suffix('\n')
+        .map_or(line, |l| l.strip_suffix('\r').unwrap_or(l));
+    (!password.trim().is_empty()).then_some(password)
+}
+
 /// Authenticated principal for audit attribution, inserted by the auth
 /// middleware on every request: the token's sub or the browser
 /// session's user when auth is on, the anonymous "operator" when it is
@@ -153,10 +165,13 @@ struct TargetState {
     /// Timed block reads feeding the telemetry stream (config `poll`);
     /// torn down wherever the router is.
     _poll_handles: Vec<tokio::task::JoinHandle<()>>,
+    /// The thread writing this target's samples to the database. It
+    /// ends once every sender of `sample_tx` is gone, after writing
+    /// what it still holds.
+    sample_writer: Option<std::thread::JoinHandle<()>>,
 }
 
 struct SharedState {
-    #[allow(dead_code)]
     config: ServerConfig,
     targets: HashMap<String, TargetState>,
     db: Arc<TelemetryDb>,
@@ -251,9 +266,9 @@ struct InspectQuery {
 
 #[derive(Deserialize)]
 struct SendCommandRequest {
-    /// Component fullUid (hex string like "0x00D000" or decimal)
+    /// Component fullUid: "0x" hex ("0x00D000") or decimal ("53248")
     full_uid: String,
-    /// Opcode (hex string like "0x0100" or decimal)
+    /// Opcode: "0x" hex ("0x0100") or decimal ("256")
     opcode: String,
     /// Payload as hex string (optional, e.g., "0102030405")
     #[serde(default)]
@@ -332,11 +347,6 @@ async fn server_version() -> Json<serde_json::Value> {
     }))
 }
 
-/// Snapshot a target's client handle and the audit DB under a short
-/// read guard. Callers do target I/O only AFTER this returns: tokio's
-/// RwLock is writer-preferring, so a guard held across an APROTO round
-/// trip (worst case a multi-thousand-RTT file upload) parks the next
-/// writer and stalls every request behind it.
 /// Build the link a target's declared protocol asks for.
 fn build_link(
     protocol: Protocol,
@@ -377,14 +387,7 @@ fn build_link(
                     records: record_spec.expect("boot validated records_config for this protocol"),
                 },
                 Protocol::RawSlip => PipelineSpec::SlipRaw {
-                    uid: config.raw_uid.as_deref().and_then(|s| {
-                        let t = s.trim();
-                        if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-                            u32::from_str_radix(hex, 16).ok()
-                        } else {
-                            t.parse().ok()
-                        }
-                    }),
+                    uid: config.raw_uid.as_deref().and_then(parse_num_u32),
                 },
                 Protocol::AprotoSlip => unreachable!("guarded by the outer match"),
             };
@@ -567,7 +570,6 @@ fn carrier_from_config(
 fn record_spec_from_table(
     table: &crate::core::config_manager::RecordTable,
 ) -> crate::core::stream_link::RecordSpec {
-    use crate::core::config_manager::parse_num_u32;
     crate::core::stream_link::RecordSpec {
         record_apid: parse_num_u32(&table.record_apid).unwrap_or(0) as u16,
         packet_prefix: table.packet_prefix,
@@ -618,16 +620,8 @@ fn parse_apid_map(
     target_name: &str,
 ) -> std::collections::HashMap<u16, u32> {
     let mut out = std::collections::HashMap::new();
-    let parse_num = |s: &str| -> Option<u32> {
-        let t = s.trim();
-        if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
-            u32::from_str_radix(hex, 16).ok()
-        } else {
-            t.parse().ok()
-        }
-    };
     for (k, v) in raw.into_iter().flatten() {
-        match (parse_num(k), parse_num(v)) {
+        match (parse_num_u32(k), parse_num_u32(v)) {
             (Some(apid), Some(uid)) if apid <= 0x7FF => {
                 out.insert(apid as u16, uid);
             }
@@ -648,6 +642,24 @@ fn parse_apid_map(
     out
 }
 
+/// A component uid in a route path: hex digits, with or without a "0x"
+/// prefix. The console writes a manifest fullUid there without its
+/// prefix ("00D000"); request bodies use the 0x-or-decimal convention
+/// instead (`parse_num_u32`).
+fn path_uid(uid: &str) -> Result<u32, (StatusCode, String)> {
+    let digits = uid
+        .strip_prefix("0x")
+        .or_else(|| uid.strip_prefix("0X"))
+        .unwrap_or(uid);
+    u32::from_str_radix(digits, 16)
+        .map_err(|_| (StatusCode::BAD_REQUEST, format!("Invalid fullUid: {}", uid)))
+}
+
+/// Snapshot a target's client handle and the audit DB under a short
+/// read guard. Callers do target I/O only AFTER this returns: tokio's
+/// RwLock is writer-preferring, so a guard held across an APROTO round
+/// trip (worst case a multi-thousand-RTT file upload) parks the next
+/// writer and stalls every request behind it.
 async fn target_client(
     state: &AppState,
     id: &str,
@@ -927,13 +939,7 @@ async fn target_inspect(
     Path((id, uid_str)): Path<(String, String)>,
     axum::extract::Query(query): axum::extract::Query<InspectQuery>,
 ) -> Result<Json<CommandResponse>, (StatusCode, String)> {
-    let uid_clean = uid_str.trim_start_matches("0x").trim_start_matches("0X");
-    let full_uid = u32::from_str_radix(uid_clean, 16).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Invalid fullUid: {}", uid_str),
-        )
-    })?;
+    let full_uid = path_uid(&uid_str)?;
 
     let (client, _) = target_client(&state, &id).await?;
     let mut link = client.lock().await;
@@ -993,7 +999,7 @@ async fn upload_file(
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid base64: {}", e)))?;
 
     // RTS destinations get the author-time sequence check.
-    if body.remote_path.contains("rts/") {
+    if in_rts_directory(&body.remote_path) {
         let dicts = {
             state
                 .read()
@@ -1060,6 +1066,16 @@ async fn upload_file(
             Err((StatusCode::BAD_GATEWAY, err_msg))
         }
     }
+}
+
+/// Whether an upload's remote path puts the file in a directory named
+/// `rts`, where the vehicle loads sequence plans from (the console's
+/// destination is bank_a/rts/). A directory whose name merely ends in
+/// "rts" (parts/, shirts/) is not one, nor is a file named rts.
+fn in_rts_directory(remote_path: &str) -> bool {
+    let mut parts = remote_path.split('/');
+    parts.next_back();
+    parts.any(|dir| dir == "rts")
 }
 
 #[derive(Deserialize)]
@@ -1153,13 +1169,7 @@ async fn swap_library(
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let (client, db_for_audit) = target_client(&state, &id).await?;
 
-    let uid_clean = uid_str.trim_start_matches("0x").trim_start_matches("0X");
-    let full_uid = u32::from_str_radix(uid_clean, 16).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Invalid fullUid: {}", uid_str),
-        )
-    })?;
+    let full_uid = path_uid(&uid_str)?;
 
     use base64::Engine;
     let data = base64::engine::general_purpose::STANDARD
@@ -1289,28 +1299,18 @@ async fn send_command(
 ) -> Result<Json<CommandResponse>, (StatusCode, String)> {
     let (client, db_for_audit) = target_client(&state, &id).await?;
 
-    // Parse fullUid
-    let uid_clean = body
-        .full_uid
-        .trim_start_matches("0x")
-        .trim_start_matches("0X");
-    let full_uid = u32::from_str_radix(uid_clean, 16)
-        .or_else(|_| body.full_uid.parse::<u32>())
-        .map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                format!("Invalid fullUid: {}", body.full_uid),
-            )
-        })?;
-
-    // Parse opcode
-    let opc_clean = body
-        .opcode
-        .trim_start_matches("0x")
-        .trim_start_matches("0X");
-    let opcode = u16::from_str_radix(opc_clean, 16)
-        .or_else(|_| body.opcode.parse::<u16>())
-        .map_err(|_| {
+    // "0x" hex or decimal, the convention of every number in target
+    // configuration: the console sends 0x strings, and an all-digit
+    // string is decimal.
+    let full_uid = parse_num_u32(&body.full_uid).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("Invalid fullUid: {}", body.full_uid),
+        )
+    })?;
+    let opcode = parse_num_u32(&body.opcode)
+        .and_then(|v| u16::try_from(v).ok())
+        .ok_or_else(|| {
             (
                 StatusCode::BAD_REQUEST,
                 format!("Invalid opcode: {}", body.opcode),
@@ -1518,13 +1518,7 @@ async fn get_params(
         )
     };
 
-    let uid_clean = uid_str.trim_start_matches("0x").trim_start_matches("0X");
-    let full_uid = u32::from_str_radix(uid_clean, 16).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Invalid fullUid: {}", uid_str),
-        )
-    })?;
+    let full_uid = path_uid(&uid_str)?;
 
     // INSPECT TUNABLE_PARAM (category=1)
     let mut link = client.lock().await;
@@ -1625,13 +1619,7 @@ async fn update_params(
         )
     };
 
-    let uid_clean = uid_str.trim_start_matches("0x").trim_start_matches("0X");
-    let full_uid = u32::from_str_radix(uid_clean, 16).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Invalid fullUid: {}", uid_str),
-        )
-    })?;
+    let full_uid = path_uid(&uid_str)?;
 
     // Decode the original binary from the frontend (from the initial page
     // load). No hidden INSPECT -- the user sees what they're modifying.
@@ -1673,7 +1661,8 @@ async fn update_params(
             Some(key) => dicts.components.get(key).into_iter().collect(),
             None => dicts.components.values().collect(),
         };
-        let mut tunable_structs: Vec<&crate::core::config_manager::StructDef> = Vec::new();
+        // Each block with its dictionary's byte order.
+        let mut tunable_structs: Vec<(&crate::core::config_manager::StructDef, bool)> = Vec::new();
         for dict in search_dicts {
             if exact_key.is_none() {
                 if let Some(hint) = comp_name {
@@ -1686,11 +1675,11 @@ async fn update_params(
             }
             for sdef in dict.structs.values() {
                 if sdef.category == "TUNABLE_PARAM" && !sdef.fields.is_empty() && sdef.size > 0 {
-                    tunable_structs.push(sdef);
+                    tunable_structs.push((sdef, dict.big_endian()));
                 }
             }
         }
-        tunable_structs.sort_by_key(|s| s.size);
+        tunable_structs.sort_by_key(|(s, _)| s.size);
 
         if tunable_structs.len() < 2 {
             return Err((
@@ -1699,17 +1688,22 @@ async fn update_params(
             ));
         }
 
-        let hdr_struct = tunable_structs[0]; // smaller = header
-        let ent_struct = tunable_structs[1]; // larger = entry
+        let (hdr_struct, hdr_big_endian) = tunable_structs[0]; // smaller = header
+        let (ent_struct, ent_big_endian) = tunable_structs[1]; // larger = entry
         let entries = body
             .entries
             .as_ref()
             .ok_or((StatusCode::BAD_REQUEST, "Missing entries".to_string()))?;
 
-        let mut rail_violations = constraint_violations(&hdr_struct.fields, &body.fields);
+        let mut rail_violations =
+            constraint_violations(&hdr_struct.fields, &body.fields, hdr_big_endian);
         if let Some(entries) = body.entries.as_ref() {
             for e in entries {
-                rail_violations.extend(constraint_violations(&ent_struct.fields, e));
+                rail_violations.extend(constraint_violations(
+                    &ent_struct.fields,
+                    e,
+                    ent_big_endian,
+                ));
             }
         }
         if !rail_violations.is_empty() {
@@ -1726,8 +1720,8 @@ async fn update_params(
         // Encode header
         for field in &hdr_struct.fields {
             if let Some(value) = body.fields.get(&field.name) {
-                if !encode_field(&mut buf, field, value) {
-                    unencodable.push(field.name.clone());
+                if let Err(reason) = encode_field(&mut buf, field, value, hdr_big_endian) {
+                    unencodable.push(format!("{}: {}", field.name, reason));
                 }
             }
         }
@@ -1739,8 +1733,10 @@ async fn update_params(
                 if let Some(value) = entry_fields.get(&field.name) {
                     let mut adjusted_field = field.clone();
                     adjusted_field.offset = base + field.offset;
-                    if !encode_field(&mut buf, &adjusted_field, value) {
-                        unencodable.push(format!("entry[{}].{}", i, field.name));
+                    if let Err(reason) =
+                        encode_field(&mut buf, &adjusted_field, value, ent_big_endian)
+                    {
+                        unencodable.push(format!("entry[{}].{}: {}", i, field.name, reason));
                     }
                 }
             }
@@ -1748,7 +1744,7 @@ async fn update_params(
         if !unencodable.is_empty() {
             return Err((
                 StatusCode::BAD_REQUEST,
-                format!("Cannot encode edited field(s): {}", unencodable.join(", ")),
+                format!("Cannot encode edited field(s): {}", unencodable.join("; ")),
             ));
         }
 
@@ -1785,10 +1781,12 @@ async fn update_params(
     } else {
         // Flat: single struct
         let mut dict_hash: Option<u32> = None;
+        let mut big_endian = false;
         if let Some((comp, _sname, sdef)) =
             find_tunable_struct(&dicts, original_binary.len(), full_uid, manifest.as_deref())
         {
             struct_size = sdef.size;
+            big_endian = dicts.components.get(comp).is_some_and(|d| d.big_endian());
             // Expanded so nested fragments are editable leaf by leaf
             // (offsets payload-absolute; encode_field works unchanged).
             struct_fields = dicts
@@ -1809,7 +1807,7 @@ async fn update_params(
             ));
         }
 
-        let rail_violations = constraint_violations(&struct_fields, &body.fields);
+        let rail_violations = constraint_violations(&struct_fields, &body.fields, big_endian);
         if !rail_violations.is_empty() {
             return Err((
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -1817,28 +1815,28 @@ async fn update_params(
             ));
         }
 
-        // Start with the original binary from the page load (preserves arrays, padding, etc.)
-        // Then overwrite only the scalar fields the user edited.
+        // Start from the bytes the page read, which keep padding and any
+        // field the request leaves out, then encode every field the
+        // request carries over them. The console sends every field; one
+        // given back as the read returned it (an 8-byte integer as its
+        // exact decimal string) encodes to the bytes it was read from.
         let mut buf = if original_binary.len() == struct_size {
             original_binary.clone()
         } else {
             vec![0u8; struct_size]
         };
-        let mut unencodable: Vec<&str> = Vec::new();
+        let mut unencodable: Vec<String> = Vec::new();
         for field in &struct_fields {
             if let Some(value) = body.fields.get(&field.name) {
-                if !encode_field(&mut buf, field, value) {
-                    unencodable.push(&field.name);
+                if let Err(reason) = encode_field(&mut buf, field, value, big_endian) {
+                    unencodable.push(format!("{}: {}", field.name, reason));
                 }
             }
         }
         if !unencodable.is_empty() {
             return Err((
                 StatusCode::BAD_REQUEST,
-                format!(
-                    "Cannot encode edited field(s): {} -- unsupported type/size or wrong value type",
-                    unencodable.join(", ")
-                ),
+                format!("Cannot encode edited field(s): {}", unencodable.join("; ")),
             ));
         }
         // Producer-stated hash when the dictionary exports one -- that
@@ -2106,13 +2104,7 @@ async fn tprm_verify_staged(
     State(state): State<AppState>,
     Path((id, uid_str)): Path<(String, String)>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
-    let uid_clean = uid_str.trim_start_matches("0x").trim_start_matches("0X");
-    let full_uid = u32::from_str_radix(uid_clean, 16).map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("Invalid fullUid: {}", uid_str),
-        )
-    })?;
+    let full_uid = path_uid(&uid_str)?;
     let (client, _db) = target_client(&state, &id).await?;
     let mut link = client.lock().await;
     let proto = link.protocol();
@@ -2252,11 +2244,24 @@ async fn delete_pref(
 }
 
 /// Validate edited values against the dictionary's constraint rails
-/// before anything is encoded or uploaded. Arrays apply their rails
-/// per element. Returns "field: reason" strings for every violation.
+/// before anything is encoded or uploaded, whatever form a value comes
+/// in. Arrays apply their rails per element. A value is judged as the
+/// number its bytes will hold, whether it comes as a JSON number, as
+/// the hex of its bytes (a float, or an array, whole or element by
+/// element), or as an 8-byte integer's string: hex is decoded through
+/// the parameter read's own decode in the dictionary's byte order
+/// (`big_endian`), so every form of the same bytes gets the same
+/// verdict. An 8-byte integer is compared exactly, a float32 in
+/// float32 terms (`FieldConstraints::check_single`), any other number
+/// as an f64. A float that is not finite lies outside any rails. A
+/// value no number is read from (a string's text, a form its field does
+/// not take, a float32 past its range, which `encode_field` refuses) is
+/// left to `encode_field`. Returns "field: reason" strings for every
+/// violation.
 fn constraint_violations(
     fields: &[crate::core::config_manager::FieldDef],
     edits: &serde_json::Map<String, serde_json::Value>,
+    big_endian: bool,
 ) -> Vec<String> {
     let mut violations = Vec::new();
     for field in fields {
@@ -2264,12 +2269,15 @@ fn constraint_violations(
         else {
             continue;
         };
-        let numbers: Vec<f64> = match value {
-            serde_json::Value::Array(a) => a.iter().filter_map(|v| v.as_f64()).collect(),
-            v => v.as_f64().into_iter().collect(),
-        };
-        for n in numbers {
-            if let Err(reason) = rails.check(n) {
+        for judged in rail_values(field, value, big_endian) {
+            let verdict = match judged {
+                RailValue::Integer(n) => rails.check_integer(n),
+                RailValue::Single(x) if x.is_finite() => rails.check_single(x),
+                RailValue::Number(x) if x.is_finite() => rails.check(x),
+                RailValue::Single(x) => Err(format!("{x} is not finite, so outside the rails")),
+                RailValue::Number(x) => Err(format!("{x} is not finite, so outside the rails")),
+            };
+            if let Err(reason) = verdict {
                 violations.push(format!("{}: {}", field.name, reason));
             }
         }
@@ -2277,101 +2285,354 @@ fn constraint_violations(
     violations
 }
 
-/// Encode one edited field into the payload buffer. Returns false when
-/// the (type, size) shape is not encodable or the value has the wrong
-/// JSON type -- callers must surface that as an error: a silent skip
-/// here uploads the OLD value under a SUCCESS response, which reads as
-/// "applied" while changing nothing (this bit u64 swap thresholds).
+/// A number a field's rails judge: an 8-byte integer exactly, a float32
+/// as the float32 it is written as, any other as an f64.
+enum RailValue {
+    Integer(i128),
+    Single(f32),
+    Number(f64),
+}
+
+/// The numbers `value` gives `field` for its rails: one for a scalar,
+/// one per element for an array, none where no number is read from it.
+/// An array's elements come as JSON elements, each in any form an
+/// element takes, or together as the hex of the whole field.
+fn rail_values(
+    field: &crate::core::config_manager::FieldDef,
+    value: &serde_json::Value,
+    big_endian: bool,
+) -> Vec<RailValue> {
+    let array = field.field_type == "array";
+    // The field's own (count, size, type), or its elements'.
+    let shape = if array {
+        array_elements(field)
+    } else {
+        Some((1, field.size, field.field_type.as_str()))
+    };
+    let Some((count, size, ty)) = shape else {
+        return Vec::new();
+    };
+    let element = |v: &serde_json::Value| rail_value(field, v, ty, size, big_endian);
+    match value {
+        serde_json::Value::Array(a) if array => a.iter().filter_map(element).collect(),
+        serde_json::Value::String(_) if array => match hex_form(value, field.size) {
+            Some(bytes) => (0..count)
+                .filter_map(|i| decoded_rail_value(field, &bytes, i * size, size, ty, big_endian))
+                .collect(),
+            None => Vec::new(),
+        },
+        v if !array => element(v).into_iter().collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The number one value gives an element of (`ty`, `size`), in any form
+/// the encoder takes for it: an 8-byte integer's JSON integer or string
+/// (`wide_integer`), a float's number or the hex of its bytes, any other
+/// number as it is.
+fn rail_value(
+    field: &crate::core::config_manager::FieldDef,
+    v: &serde_json::Value,
+    ty: &str,
+    size: usize,
+    big_endian: bool,
+) -> Option<RailValue> {
+    match (ty, size) {
+        ("int" | "uint", 8) => wide_integer(v).ok().map(RailValue::Integer),
+        ("float", 4) | ("float" | "double", 8) => match v {
+            serde_json::Value::String(_) => {
+                decoded_rail_value(field, &hex_form(v, size)?, 0, size, ty, big_endian)
+            }
+            v => {
+                let x = v.as_f64()?;
+                // A float32 as the float32 it is written as; one past
+                // float32's range is refused by encode_field.
+                match size {
+                    4 => Some(x as f32)
+                        .filter(|s| s.is_finite())
+                        .map(RailValue::Single),
+                    _ => Some(RailValue::Number(x)),
+                }
+            }
+        },
+        _ => v.as_f64().map(RailValue::Number),
+    }
+}
+
+/// The number an element's bytes hold, at `offset` in `bytes`, as the
+/// parameter read decodes them: an 8-byte integer exactly, a float32 as
+/// itself, any other as an f64 (every narrower integer is exact there).
+fn decoded_rail_value(
+    field: &crate::core::config_manager::FieldDef,
+    bytes: &[u8],
+    offset: usize,
+    size: usize,
+    ty: &str,
+    big_endian: bool,
+) -> Option<RailValue> {
+    use crate::core::config_manager::{scalar, Scalar};
+    Some(
+        match scalar(bytes, &element_def(field, offset, size, ty), big_endian)? {
+            Scalar::Integer(n) if size == 8 => RailValue::Integer(n),
+            Scalar::Integer(n) => RailValue::Number(n as f64),
+            // A float32 widens to f64 exactly, and narrows back the same.
+            Scalar::Float(x) if size == 4 => RailValue::Single(x as f32),
+            Scalar::Float(x) => RailValue::Number(x),
+        },
+    )
+}
+
+/// Encode one edited field into the payload buffer, in its dictionary's
+/// byte order (`big_endian`). A field takes back what the parameter read
+/// returned for it and writes the bytes it was read from: a number; an
+/// 8-byte integer's decimal string (it also takes a 0x string or a JSON
+/// integer, see `wide_integer`); or, for a field the read returns as
+/// hex (a string, an array, a shape it reads no number from, a float
+/// that is not finite or is negative zero), that hex form, written as
+/// the bytes it holds. A value the field cannot hold is refused with
+/// the reason, never written: the wrong JSON type, an integer outside
+/// the field's width (an unchecked cast would store 300 in a uint8 as
+/// 44), a bool other than 0 or 1, a float beyond float32's range for a
+/// float32, a string longer than its buffer, an array of the wrong
+/// length, or a (type, size) given neither a value nor its hex form.
+/// Callers fail the request naming the field: a value skipped here
+/// would upload the OLD value under a SUCCESS response, which reads as
+/// "applied" while changing nothing.
 fn encode_field(
     buf: &mut [u8],
     field: &crate::core::config_manager::FieldDef,
     value: &serde_json::Value,
-) -> bool {
+    big_endian: bool,
+) -> Result<(), String> {
     let off = field.offset;
-    if off + field.size > buf.len() {
-        return false;
+    let size = field.size;
+    if off + size > buf.len() {
+        return Err(format!("lies past the {}-byte payload", buf.len()));
     }
-    match (field.field_type.as_str(), field.size) {
-        ("uint", 1) | ("bool", 1) => value.as_u64().map(|v| buf[off] = v as u8).is_some(),
-        ("uint", 2) => value
-            .as_u64()
-            .map(|v| buf[off..off + 2].copy_from_slice(&(v as u16).to_le_bytes()))
-            .is_some(),
-        ("uint", 4) => value
-            .as_u64()
-            .map(|v| buf[off..off + 4].copy_from_slice(&(v as u32).to_le_bytes()))
-            .is_some(),
-        ("uint", 8) => value
-            .as_u64()
-            .map(|v| buf[off..off + 8].copy_from_slice(&v.to_le_bytes()))
-            .is_some(),
-        ("int", 1) => value.as_i64().map(|v| buf[off] = v as u8).is_some(),
-        ("int", 2) => value
-            .as_i64()
-            .map(|v| buf[off..off + 2].copy_from_slice(&(v as i16).to_le_bytes()))
-            .is_some(),
-        ("int", 4) => value
-            .as_i64()
-            .map(|v| buf[off..off + 4].copy_from_slice(&(v as i32).to_le_bytes()))
-            .is_some(),
-        ("int", 8) => value
-            .as_i64()
-            .map(|v| buf[off..off + 8].copy_from_slice(&v.to_le_bytes()))
-            .is_some(),
-        ("float", 4) => value
-            .as_f64()
-            .map(|v| buf[off..off + 4].copy_from_slice(&(v as f32).to_le_bytes()))
-            .is_some(),
-        ("float", 8) | ("double", 8) => value
-            .as_f64()
-            .map(|v| buf[off..off + 8].copy_from_slice(&v.to_le_bytes()))
-            .is_some(),
+    let bits = size * 8;
+    // A scalar's little-endian bytes, put in the dictionary's order.
+    let mut put = |le: &[u8]| {
+        let dst = &mut buf[off..off + le.len()];
+        dst.copy_from_slice(le);
+        if big_endian {
+            dst.reverse();
+        }
+    };
+    match (field.field_type.as_str(), size) {
+        // An 8-byte integer is read exactly, in any of its forms, then
+        // checked against its type's range.
+        ("uint", 8) => {
+            let v = u64::try_from(wide_integer(value)?)
+                .map_err(|_| format!("{value} is outside uint64's range 0..={}", u64::MAX))?;
+            put(&v.to_le_bytes());
+        }
+        ("int", 8) => {
+            let v = i64::try_from(wide_integer(value)?).map_err(|_| {
+                format!(
+                    "{value} is outside int64's range {}..={}",
+                    i64::MIN,
+                    i64::MAX
+                )
+            })?;
+            put(&v.to_le_bytes());
+        }
+        // A narrower integer is checked against the field's width, then
+        // written as its low `size` bytes, exact for any value in range.
+        ("uint", 1 | 2 | 4) => {
+            let max = u64::MAX >> (64 - bits);
+            let v = match (value.as_u64(), value.as_i64()) {
+                (Some(v), _) if v <= max => v,
+                (Some(_), _) | (None, Some(_)) => {
+                    return Err(format!("{value} is outside uint{bits}'s range 0..={max}"));
+                }
+                (None, None) => return Err(format!("{value} is not an integer")),
+            };
+            put(&v.to_le_bytes()[..size]);
+        }
+        ("int", 1 | 2 | 4) => {
+            let (min, max) = (i64::MIN >> (64 - bits), i64::MAX >> (64 - bits));
+            let v = match (value.as_i64(), value.as_u64()) {
+                (Some(v), _) if (min..=max).contains(&v) => v,
+                (Some(_), _) | (None, Some(_)) => {
+                    return Err(format!(
+                        "{value} is outside int{bits}'s range {min}..={max}"
+                    ));
+                }
+                (None, None) => return Err(format!("{value} is not an integer")),
+            };
+            put(&v.to_le_bytes()[..size]);
+        }
+        ("bool", 1) => match value.as_u64() {
+            Some(v @ (0 | 1)) => put(&[v as u8]),
+            _ => return Err(format!("{value} is not a bool (0 or 1)")),
+        },
+        ("float", 4) => match (value.as_f64(), hex_form(value, 4)) {
+            (Some(v), _) => {
+                let v = v as f32;
+                if !v.is_finite() {
+                    return Err(format!("{value} is outside float32's range"));
+                }
+                put(&v.to_le_bytes());
+            }
+            (None, Some(bytes)) => buf[off..off + 4].copy_from_slice(&bytes),
+            (None, None) => return Err(format!("{value} is not a number")),
+        },
+        ("float", 8) | ("double", 8) => match (value.as_f64(), hex_form(value, 8)) {
+            (Some(v), _) => put(&v.to_le_bytes()),
+            (None, Some(bytes)) => buf[off..off + 8].copy_from_slice(&bytes),
+            (None, None) => return Err(format!("{value} is not a number")),
+        },
         // Bounded string: fixed char buffer, NUL-padded. A value longer
         // than the field is refused, never truncated -- the packer on
         // the producing side errors the same way.
+        // The hex form of its n bytes is 2n characters, which no text
+        // that fits can be.
         ("string", n) => match value.as_str() {
             Some(s) if s.len() <= n => {
                 buf[off..off + n].fill(0);
                 buf[off..off + s.len()].copy_from_slice(s.as_bytes());
-                true
             }
-            _ => false,
+            Some(s) => match hex_form(value, n) {
+                Some(bytes) => buf[off..off + n].copy_from_slice(&bytes),
+                None => return Err(format!("{} bytes do not fit {n}", s.len())),
+            },
+            None => return Err(format!("{value} is not a string")),
         },
         // Array: exact element count required; each element encodes by
         // element_type at its slot (strings recurse into the bounded-
         // string rule above).
         ("array", total) => {
-            let count = field
-                .dims
-                .as_ref()
-                .map(|d| d.iter().product::<usize>())
-                .unwrap_or(0);
             let Some(arr) = value.as_array() else {
-                return false;
-            };
-            if count == 0 || arr.len() != count || total % count != 0 {
-                return false;
-            }
-            let elem_size = total / count;
-            let elem_type = field.element_type.as_deref().unwrap_or("uint");
-            arr.iter().enumerate().all(|(i, v)| {
-                let elem = crate::core::config_manager::FieldDef {
-                    name: field.name.clone(),
-                    field_type: elem_type.to_string(),
-                    offset: off + i * elem_size,
-                    size: elem_size,
-                    value: serde_json::Value::Null,
-                    element_type: None,
-                    dims: None,
-                    constraints: None,
-                    struct_ref: None,
-                    enum_ref: None,
+                return match hex_form(value, total) {
+                    Some(bytes) => {
+                        buf[off..off + total].copy_from_slice(&bytes);
+                        Ok(())
+                    }
+                    None => Err(format!("{value} is not an array")),
                 };
-                encode_field(buf, &elem, v)
-            })
+            };
+            let Some((count, elem_size, elem_type)) = array_elements(field) else {
+                return Err("the dictionary gives this array no element size".to_string());
+            };
+            if arr.len() != count {
+                return Err(format!(
+                    "{} elements where the field holds {count}",
+                    arr.len()
+                ));
+            }
+            for (i, v) in arr.iter().enumerate() {
+                let elem = element_def(field, off + i * elem_size, elem_size, elem_type);
+                encode_field(buf, &elem, v, big_endian).map_err(|e| format!("element {i}: {e}"))?;
+            }
         }
-        _ => false,
+        (ty, _) => match hex_form(value, size) {
+            Some(bytes) => buf[off..off + size].copy_from_slice(&bytes),
+            None => {
+                return Err(format!(
+                    "a {size}-byte {ty} field takes only the hex form it reads as"
+                ))
+            }
+        },
     }
+    Ok(())
+}
+
+/// The bytes `value` holds as a field's hex form: hex digits for exactly
+/// `size` bytes, the form the parameter read returns a field in when it
+/// reads no number from it.
+fn hex_form(value: &serde_json::Value, size: usize) -> Option<Vec<u8>> {
+    let bytes = hex::decode(value.as_str()?).ok()?;
+    (bytes.len() == size).then_some(bytes)
+}
+
+/// An array field's elements: their count, size and type (uint when
+/// the dictionary names none). None when the dictionary gives the array
+/// no whole element size.
+fn array_elements(field: &crate::core::config_manager::FieldDef) -> Option<(usize, usize, &str)> {
+    let count = field
+        .dims
+        .as_ref()
+        .map(|d| d.iter().product::<usize>())
+        .unwrap_or(0);
+    (count > 0 && field.size.is_multiple_of(count)).then(|| {
+        (
+            count,
+            field.size / count,
+            field.element_type.as_deref().unwrap_or("uint"),
+        )
+    })
+}
+
+/// One element of an array field as a field of its own, of the
+/// element's type and size at `offset`: what the encoder writes and the
+/// rails decode.
+fn element_def(
+    field: &crate::core::config_manager::FieldDef,
+    offset: usize,
+    size: usize,
+    ty: &str,
+) -> crate::core::config_manager::FieldDef {
+    crate::core::config_manager::FieldDef {
+        name: field.name.clone(),
+        field_type: ty.to_string(),
+        offset,
+        size,
+        value: serde_json::Value::Null,
+        element_type: None,
+        dims: None,
+        constraints: None,
+        struct_ref: None,
+        enum_ref: None,
+    }
+}
+
+/// The integer an 8-byte integer field is given, read exactly: a JSON
+/// integer, or a string holding a whole number in decimal (digits with
+/// an optional leading minus; a string of digits is always decimal) or
+/// in hex after a 0x prefix. The read gives these fields as decimal
+/// strings, since a JSON number past 2^53 does not survive a browser's
+/// JSON.parse, and nothing here goes through a float: a fraction, an
+/// exponent and a hex-bytes string without the prefix are refused. An
+/// integer past both 64-bit ranges, which serde_json reads as a float,
+/// is returned past them for the range check to name; the result is
+/// not yet checked against the field's type.
+fn wide_integer(value: &serde_json::Value) -> Result<i128, String> {
+    let exact = match value {
+        serde_json::Value::Number(n) => n
+            .as_i64()
+            .map(i128::from)
+            .or_else(|| n.as_u64().map(i128::from))
+            .or_else(|| {
+                let f = n.as_f64()?;
+                let inside = -(2f64.powi(63))..2f64.powi(64);
+                (f.fract() == 0.0 && !inside.contains(&f)).then_some(f as i128)
+            }),
+        serde_json::Value::String(s) => whole_number_text(s),
+        _ => None,
+    };
+    exact.ok_or_else(|| {
+        format!("{value} is not an integer (a JSON integer, or a decimal or 0x string)")
+    })
+}
+
+/// A whole number written as text: decimal digits with an optional
+/// leading minus, or hex digits after a 0x (or 0X) prefix. Nothing else
+/// is taken: no sign on hex, no plus, no surrounding space. A value too
+/// large for i128 saturates, past every range a caller checks.
+fn whole_number_text(s: &str) -> Option<i128> {
+    let (negative, digits, radix) = match s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        Some(hex) => (false, hex, 16),
+        None => match s.strip_prefix('-') {
+            Some(decimal) => (true, decimal, 10),
+            None => (false, s, 10),
+        },
+    };
+    if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
+        return None;
+    }
+    let magnitude = u128::from_str_radix(digits, radix).unwrap_or(u128::MAX);
+    let magnitude = i128::try_from(magnitude).unwrap_or(i128::MAX);
+    Some(if negative { -magnitude } else { magnitude })
 }
 
 /* ----------------------------- Telemetry History ----------------------------- */
@@ -2676,7 +2937,7 @@ async fn telemetry_csv(
     drop(st);
 
     // Query AND row formatting both belong on the blocking pool: at
-    // the 100k-row limit the string build alone is milliseconds.
+    // the 200k-row limit the string build alone is milliseconds.
     let limit = query.clamped_limit();
     let target = id.clone();
     let csv = db_blocking(db, move |db| {
@@ -2784,16 +3045,40 @@ async fn target_storage_stats(
     Ok(Json(serde_json::to_value(stats).unwrap_or_default()))
 }
 
+/// Rewrite stored history: the last hour stays at full resolution,
+/// everything older becomes 1-minute envelope buckets. Audited like a
+/// trim, since what it converts is gone.
 async fn downsample_data(
     State(state): State<AppState>,
+    axum::Extension(actor): axum::Extension<Actor>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let st = state.read().await;
     let db = st.db.clone();
     drop(st);
 
-    // Keep last hour at full resolution, downsample older to 1-minute averages
-    let result = db_blocking(db, |db| db.downsample(3_600_000, 60_000)).await?;
-    Ok(Json(serde_json::to_value(result).unwrap_or_default()))
+    let result = db_blocking(db.clone(), |db| db.downsample(3_600_000, 60_000)).await;
+    let ip_str = addr.ip().to_string();
+    let (detail, status) = match &result {
+        Ok(r) => (
+            Some(format!(
+                "samples_before={} samples_after={} removed={}",
+                r.samples_before, r.samples_after, r.removed
+            )),
+            "ok".to_string(),
+        ),
+        Err((_, err_msg)) => (None, format!("err: {}", err_msg)),
+    };
+    record_audit(
+        &db,
+        &actor.0,
+        "downsample_telemetry",
+        None,
+        detail.as_deref(),
+        &status,
+        Some(&ip_str),
+    );
+    Ok(Json(serde_json::to_value(result?).unwrap_or_default()))
 }
 
 async fn delete_target_data(
@@ -2855,8 +3140,9 @@ async fn delete_target_data(
 
 #[derive(Deserialize)]
 struct TrimRequest {
-    /// Number of samples to delete (oldest first). If unset, defaults to
-    /// 25% of the current sample count for this target.
+    /// Number of samples to delete (oldest first); 0 deletes none. If
+    /// unset, defaults to 25% of the current sample count for this
+    /// target.
     #[serde(default)]
     count: Option<usize>,
 }
@@ -2878,8 +3164,8 @@ async fn trim_target_data(
     drop(st);
 
     let count = match body.count {
-        Some(n) if n > 0 => n,
-        _ => {
+        Some(n) => n,
+        None => {
             let db = db.clone();
             let id = id.clone();
             let stats = db_blocking(db, move |db| db.target_stats(&id)).await?;
@@ -3041,7 +3327,7 @@ async fn add_target(
     let metrics = TargetMetrics::new();
 
     // Spawn DB writer for new target
-    spawn_sample_writer(
+    let sample_writer = spawn_sample_writer(
         id.clone(),
         st.db.clone(),
         sample_tx.subscribe(),
@@ -3069,6 +3355,7 @@ async fn add_target(
             record_table: artifacts.record_table,
             _router_handle: None,
             _poll_handles: Vec::new(),
+            sample_writer: Some(sample_writer),
         },
     );
     drop(st);
@@ -3377,8 +3664,11 @@ struct LoginRequest {
     password: String,
 }
 
+/// The bearer-token login. Both outcomes are audited as signing in at
+/// the session door is, marked as this login; the password never is.
 async fn login(
     State(state): State<AppState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
     Json(body): Json<LoginRequest>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let st = state.read().await;
@@ -3394,6 +3684,7 @@ async fn login(
     // signing secret is never compared against user input. Boot
     // validation guarantees password_hash is present when auth is on.
     let auth = st.config.auth.clone();
+    let db = st.db.clone();
     drop(st);
 
     let ok = crate::core::auth::verify_credentials(
@@ -3402,27 +3693,48 @@ async fn login(
         &auth.username,
         &auth.password_hash,
     );
+    let ip = addr.ip().to_string();
+    const DETAIL: Option<&str> = Some("bearer token");
 
-    if ok {
-        let token = crate::core::auth::mint_token(
-            &body.username,
-            &auth.secret,
-            chrono::Utc::now().timestamp(),
-        )
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("JWT error: {}", e),
-            )
-        })?;
-
-        Ok(Json(serde_json::json!({
-            "token": token,
-            "expires_in": crate::core::auth::TOKEN_TTL_SECS,
-        })))
-    } else {
-        Err((StatusCode::UNAUTHORIZED, "Invalid credentials".to_string()))
+    if !ok {
+        let actor = crate::core::auth::refused_sign_in_actor(&body.username, &auth.username);
+        record_audit(
+            &db,
+            actor,
+            "sign_in",
+            None,
+            DETAIL,
+            "err: invalid credentials",
+            Some(&ip),
+        );
+        return Err((StatusCode::UNAUTHORIZED, "Invalid credentials".to_string()));
     }
+    let token =
+        crate::core::auth::mint_token(&body.username, &auth.secret, chrono::Utc::now().timestamp());
+    let outcome = match &token {
+        Ok(_) => "ok".to_string(),
+        Err(e) => format!("err: {}", e),
+    };
+    record_audit(
+        &db,
+        &body.username,
+        "sign_in",
+        None,
+        DETAIL,
+        &outcome,
+        Some(&ip),
+    );
+    let token = token.map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("JWT error: {}", e),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "token": token,
+        "expires_in": crate::core::auth::TOKEN_TTL_SECS,
+    })))
 }
 
 /// Mint a short-lived single-purpose WebSocket ticket for the caller.
@@ -3834,7 +4146,8 @@ fn record_audit(
 /// when auth is disabled in config (the default for development).
 ///
 /// Whitelisted paths bypass auth: `/api/auth/login` (otherwise nobody could
-/// log in) and `/api/health` (used by load balancers and `make health`).
+/// log in) and `/api/health` (used by load balancers and the image's
+/// health check, `zenith --health-check`).
 /// Signing in and out at `/api/auth/session` need no live credential.
 async fn auth_middleware(
     State(state): State<AppState>,
@@ -3854,6 +4167,7 @@ async fn auth_middleware(
     }
     let session_door =
         path == "/auth/session" && matches!(*request.method(), Method::POST | Method::DELETE);
+    let socket = opens_telemetry_socket(path);
 
     // CRITICAL: read the config under a SHORT-lived guard and then drop
     // it before calling next.run(). Holding the guard across the await
@@ -3880,10 +4194,11 @@ async fn auth_middleware(
     // WebSocket upgrades from API clients -- a short-lived ticket on
     // the query string, which MUST be a ticket (ws claim, 30 s expiry,
     // minted via POST /api/auth/ws-ticket) so long-lived tokens never
-    // land in request logs; else the browser's session cookie, which
-    // must come from the console's own origin for anything that is not
-    // a plain read. Validation lives in core (lib-testable); the
-    // subject becomes the audit actor for the request.
+    // land in request logs, and opens the telemetry socket only; else
+    // the browser's session cookie, which must come from the console's
+    // own origin for anything that is not a plain read. Validation
+    // lives in core (lib-testable); the subject becomes the audit actor
+    // for the request.
     let query = request.uri().query().map(str::to_owned);
     let user: Option<Arc<str>> = match crate::core::auth::credential(&headers, query.as_deref()) {
         Credential::Bearer(token) => Some(Arc::from(
@@ -3891,6 +4206,14 @@ async fn auth_middleware(
                 .map_err(|e| (StatusCode::UNAUTHORIZED, e))?
                 .as_str(),
         )),
+        Credential::Ticket(_) if !socket => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                "a socket ticket opens the telemetry socket only \
+                 (the request was not carried out)"
+                    .to_string(),
+            ));
+        }
         Credential::Ticket(ticket) => Some(Arc::from(
             crate::core::auth::validate_token(ticket, &secret, true)
                 .map_err(|e| (StatusCode::UNAUTHORIZED, e))?
@@ -3938,12 +4261,22 @@ async fn auth_middleware(
     }
 }
 
+/// Whether a request opens a target's telemetry socket, the one route
+/// a socket ticket authenticates: `/targets/{id}/telemetry/live`, as
+/// the middleware sees it under the /api prefix.
+fn opens_telemetry_socket(path: &str) -> bool {
+    path.strip_prefix("/targets/")
+        .and_then(|rest| rest.strip_suffix("/telemetry/live"))
+        .is_some_and(|id| !id.is_empty() && !id.contains('/'))
+}
+
 /* ----------------------------- Rate Limiting ----------------------------- */
 
-/// A simple per-IP token bucket for command-emitting endpoints. Not a
-/// production-grade solution -- the in-memory map grows unbounded if
-/// many distinct IPs hit the server -- but adequate for the MVP.
-/// Replace with `tower_governor` for production deployment.
+/// A per-IP token bucket for every POST under /api while auth is on: a
+/// burst of RATE_LIMIT_BURST, refilled at RATE_LIMIT_PER_SEC. Once the
+/// map holds 4096 addresses, each check first evicts the buckets idle
+/// long enough to be full again, so it outgrows that only while more
+/// addresses than that are active at once.
 #[derive(Default)]
 struct RateLimiter {
     buckets: tokio::sync::Mutex<HashMap<std::net::IpAddr, TokenBucket>>,
@@ -4142,7 +4475,7 @@ fn build_router(state: AppState, cors_origins: &[String], upload_max_mb: u32) ->
         ))
         .layer(cors)
         // Span carries method + path only: query strings are excluded
-        // deliberately (WebSocket auth falls back to a ?token= query
+        // deliberately (a socket ticket rides the ?ticket= query
         // parameter, which must never reach the request logs).
         .layer(TraceLayer::new_for_http().make_span_with(
             |req: &axum::http::Request<axum::body::Body>| {
@@ -4161,7 +4494,7 @@ fn spawn_sample_writer(
     db: Arc<TelemetryDb>,
     mut rx: broadcast::Receiver<TelemetrySample>,
     metrics: Arc<TargetMetrics>,
-) {
+) -> std::thread::JoinHandle<()> {
     use std::sync::atomic::Ordering;
 
     fn flush(
@@ -4278,7 +4611,94 @@ fn spawn_sample_writer(
             &mut failed_batches,
             &mut last_err_log,
         );
-    });
+    })
+}
+
+/// How long shutdown waits, in all, for the sample writers to write what
+/// they hold: one budget shared by every target's writer, so the rest of
+/// the shutdown fits the container's stop timeout (10 s). A writer can
+/// outlast it: each batch it holds may wait out SQLite's busy timeout
+/// (5 s) on a busy database.
+const SAMPLE_WRITER_FLUSH_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How often shutdown looks for sample writers that have finished.
+const SAMPLE_WRITER_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// Take every target down at the stop signal: close connections, then
+/// give the sample writers `writer_budget` to write what they hold. The
+/// write guard covers only what needs it (closing connect admission,
+/// stopping the routers and polls, closing each target's sample channel,
+/// collecting each link and writer); it is dropped before waiting on any
+/// link mutex, which a connect in its dial or an upload can hold for
+/// seconds while every request needs the state's guard. A connect that
+/// completes after this sees `stopping` and tears its link down.
+///
+/// Each writer is an OS thread, watched until it finishes or the budget
+/// runs out, and joined only once finished. One still running then is
+/// detached with a warning: joining it on the blocking pool would hold
+/// the runtime's teardown, which waits for every blocking task it
+/// started, past any budget.
+async fn shut_down_targets(state: &AppState, writer_budget: std::time::Duration) {
+    let mut links = Vec::new();
+    let mut routers = Vec::new();
+    let mut writers = Vec::new();
+    {
+        let mut st = state.write().await;
+        st.stopping = true;
+        for (id, target) in st.targets.iter_mut() {
+            if let Some(h) = target._router_handle.take() {
+                h.abort();
+                routers.push(h);
+            }
+            for h in target._poll_handles.drain(..) {
+                h.abort();
+            }
+            // A writer ends once every sender of its channel is gone:
+            // this one, replaced here, and the router's, which goes with
+            // the router.
+            target.sample_tx = broadcast::channel(1).0;
+            writers.extend(target.sample_writer.take());
+            links.push((id.clone(), target.client.clone()));
+        }
+    }
+    for (id, client) in links {
+        // Up from our side, peer or no peer: a listening link's
+        // socket and tasks end here too.
+        let mut cli = client.lock().await;
+        if cli.state_word().is_some() {
+            cli.disconnect();
+            tracing::info!("Disconnected target {} during shutdown", id);
+        }
+    }
+    for router in routers {
+        let _ = router.await;
+    }
+    let deadline = tokio::time::Instant::now() + writer_budget;
+    while writers.iter().any(|w| !w.is_finished()) && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep_until(deadline.min(tokio::time::Instant::now() + SAMPLE_WRITER_POLL))
+            .await;
+    }
+    let (finished, running): (Vec<_>, Vec<_>) = writers.into_iter().partition(|w| w.is_finished());
+    for writer in finished {
+        // Its function has returned, so the join is immediate.
+        let _ = writer.join();
+    }
+    if !running.is_empty() {
+        tracing::warn!(
+            "{} sample writer(s) still writing after {:?}; their last samples may be lost",
+            running.len(),
+            writer_budget
+        );
+    }
+}
+
+/// Time-based retention, the maintenance loop's safety net under the
+/// size cap: telemetry older than `retention_hours` goes, with its
+/// latest values. 0 keeps telemetry forever, as `audit_retention_days
+/// = 0` keeps the audit log. User layouts beyond each target's newest
+/// 100 go either way. Returns the samples deleted.
+fn prune_telemetry(db: &TelemetryDb, retention_hours: u32) -> Result<usize, DbError> {
+    db.prune((retention_hours > 0).then(|| u64::from(retention_hours) * 3_600_000))
 }
 
 #[tokio::main]
@@ -4292,13 +4712,17 @@ async fn main() {
     let cli = Cli::parse();
 
     if cli.hash_password {
-        let mut password = String::new();
+        let mut line = String::new();
         eprintln!("Password (echoed):");
-        if std::io::stdin().read_line(&mut password).is_err() || password.trim().is_empty() {
+        let password = match std::io::stdin().read_line(&mut line) {
+            Ok(_) => password_from_line(&line),
+            Err(_) => None,
+        };
+        let Some(password) = password else {
             eprintln!("no password read from stdin");
             std::process::exit(1);
-        }
-        match crate::core::auth::hash_password(password.trim()) {
+        };
+        match crate::core::auth::hash_password(password) {
             Ok(hash) => {
                 println!("{}", hash);
                 std::process::exit(0);
@@ -4490,6 +4914,7 @@ async fn main() {
                 record_table,
                 _router_handle: None,
                 _poll_handles: Vec::new(),
+                sample_writer: None,
             },
         );
     }
@@ -4514,21 +4939,23 @@ async fn main() {
     };
 
     // Spawn background writer: subscribes to each target's sample_tx and writes to DB.
-    // Each writer flushes remaining samples when the broadcast channel closes (shutdown).
-    for (id, target) in targets.iter() {
-        spawn_sample_writer(
+    // Each writer flushes remaining samples when the broadcast channel closes;
+    // shutdown closes the channels and waits for the writers (shut_down_targets).
+    for (id, target) in targets.iter_mut() {
+        target.sample_writer = Some(spawn_sample_writer(
             id.clone(),
             db.clone(),
             target.sample_tx.subscribe(),
             target.metrics.clone(),
-        );
+        ));
     }
 
     // Spawn periodic maintenance (every 60 seconds)
     // - Measure net fill rate for storage vitals
     // - Size-based FIFO when the DB exceeds its cap (fair waterline
     //   across targets by default; see storage.fifo_strategy)
-    // - Prune samples older than retention
+    // - Prune samples older than retention (retention_hours = 0 keeps
+    //   them all)
     // - Prune audit rows beyond their retention
     // - Clean up stale telemetry_latest entries and old user layouts
     // - WAL checkpoint after large deletions
@@ -4542,11 +4969,17 @@ async fn main() {
         .clamp(256, 102_400); // 256MB min, 100GB max
     let max_db_bytes: u64 = max_db_mb as u64 * 1024 * 1024;
     tracing::info!(
-        "Storage limits: max_db_size={}MB, retention={}h",
+        "Storage limits: max_db_size={}MB, retention={}",
         max_db_mb,
-        config.storage.retention_hours
+        match config.storage.retention_hours {
+            0 => "forever".to_string(),
+            hours => format!("{hours}h"),
+        }
     );
-    let retention_ms = config.storage.retention_hours as u64 * 3600 * 1000;
+    if let Some(warning) = config::coarse_tier_stays_empty(&config.storage) {
+        tracing::warn!("{warning}");
+    }
+    let retention_hours = config.storage.retention_hours;
     let audit_retention_days = config.storage.audit_retention_days;
     let fifo_strategy = config.storage.fifo_strategy;
     let storage_vitals = Arc::new(StorageVitals {
@@ -4711,7 +5144,7 @@ async fn main() {
                 }
 
                 // Time-based retention as a safety net
-                match db.prune(retention_ms) {
+                match prune_telemetry(&db, retention_hours) {
                     Ok(n) if n > 0 => {
                         vitals
                             .retention_pruned_samples
@@ -4890,39 +5323,7 @@ async fn main() {
             _ = ctrl_c => tracing::info!("Received SIGINT, shutting down"),
             _ = terminate => tracing::info!("Received SIGTERM, shutting down"),
         }
-
-        // Disconnect all targets to flush telemetry and close connections.
-        // The write guard covers only what needs it (closing connect
-        // admission, stopping the routers and polls, collecting each
-        // link); it is dropped before waiting on any link mutex, which a
-        // connect in its dial or an upload can hold for seconds while
-        // every request needs the state's guard. A connect that completes
-        // after this sees `stopping` and tears its link down.
-        let links: Vec<(String, Arc<Mutex<ProtocolLink>>)> = {
-            let mut st = shutdown_state.write().await;
-            st.stopping = true;
-            st.targets
-                .iter_mut()
-                .map(|(id, target)| {
-                    if let Some(h) = target._router_handle.take() {
-                        h.abort();
-                    }
-                    for h in target._poll_handles.drain(..) {
-                        h.abort();
-                    }
-                    (id.clone(), target.client.clone())
-                })
-                .collect()
-        };
-        for (id, client) in links {
-            // Up from our side, peer or no peer: a listening link's
-            // socket and tasks end here too.
-            let mut cli = client.lock().await;
-            if cli.state_word().is_some() {
-                cli.disconnect();
-                tracing::info!("Disconnected target {} during shutdown", id);
-            }
-        }
+        shut_down_targets(&shutdown_state, SAMPLE_WRITER_FLUSH_LIMIT).await;
     });
 
     if let Err(e) = server.await {
@@ -4931,4 +5332,2730 @@ async fn main() {
     }
 
     tracing::info!("Zenith shutdown complete");
+}
+
+/* ----------------------------- Tests ----------------------------- */
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::future::Future;
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
+    use std::time::Duration;
+
+    use axum::body::Body;
+    use axum::extract::connect_info::MockConnectInfo;
+    use serde_json::json;
+    use tempfile::TempDir;
+    use tower::ServiceExt;
+
+    use crate::core::config_manager::{ComponentDict, FieldDef};
+    use crate::core::transport::StateWord;
+    use crate::storage::telemetry_db::AuditEntry;
+
+    /// Where every test request comes from.
+    const CLIENT: SocketAddr =
+        SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 40_000);
+
+    /// One apex target. Its link is built and never dialed by these
+    /// tests, so every request that reaches it is refused "not
+    /// connected".
+    const APEX_TARGET: &str = r#"
+        [[targets]]
+        name = "apex"
+        host = "127.0.0.1"
+        port = 9
+    "#;
+
+    /// A server as boot assembles it, over a temporary database: the
+    /// config is config.toml text, and each `[[targets]]` entry becomes
+    /// a target under its positional id, its link built but not
+    /// connected, with the given dictionaries.
+    struct Server {
+        state: AppState,
+        db: Arc<TelemetryDb>,
+        dir: TempDir,
+    }
+
+    impl Server {
+        fn new(config: &str) -> Self {
+            Self::with_dicts(config, StructDictionary::default())
+        }
+
+        fn with_dicts(config: &str, dicts: StructDictionary) -> Self {
+            let config: ServerConfig = toml::from_str(config).unwrap();
+            let dir = TempDir::new().unwrap();
+            let db = Arc::new(TelemetryDb::open(&dir.path().join("zenith.db")).unwrap());
+            let dicts = Arc::new(dicts);
+            let targets = config
+                .targets
+                .iter()
+                .enumerate()
+                .map(|(i, tc)| (format!("target-{i}"), target_state(tc, &dicts)))
+                .collect();
+            let sessions = SessionStore::open(
+                db.clone(),
+                SessionPolicy::from_config(&config.auth),
+                now_ms(),
+            )
+            .unwrap();
+            let storage_vitals = StorageVitals {
+                cap_bytes: 0,
+                tiers: config.storage.tiers,
+                fill_bytes_per_min: Default::default(),
+                last_size: Default::default(),
+                fifo_evicted_samples: Default::default(),
+                retention_pruned_samples: Default::default(),
+                tiered_source_rows: Default::default(),
+                tier_band_rows: Default::default(),
+            };
+            let state = Arc::new(RwLock::new(SharedState {
+                config,
+                targets,
+                db: db.clone(),
+                struct_dicts: Arc::new(StructDictionary::default()),
+                rate_limiter: Arc::new(RateLimiter::default()),
+                storage_vitals: Arc::new(storage_vitals),
+                sessions: Arc::new(sessions),
+                stopping: false,
+            }));
+            Self { state, db, dir }
+        }
+
+        /// One request answered in process by the router the server
+        /// runs: its status and body text.
+        async fn call(&self, request: axum::http::Request<Body>) -> (StatusCode, String) {
+            let app = build_router(self.state.clone(), &[], 50).layer(MockConnectInfo(CLIENT));
+            let response = app.oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, String::from_utf8_lossy(&body).into_owned())
+        }
+
+        async fn get(&self, uri: &str) -> (StatusCode, String) {
+            self.call(axum::http::Request::get(uri).body(Body::empty()).unwrap())
+                .await
+        }
+
+        async fn post(&self, uri: &str, body: serde_json::Value) -> (StatusCode, String) {
+            self.post_text(uri, &body.to_string()).await
+        }
+
+        /// A POST whose body is JSON text as a client writes it.
+        async fn post_text(&self, uri: &str, body: &str) -> (StatusCode, String) {
+            self.call(
+                axum::http::Request::post(uri)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+        }
+
+        /// The audit log, oldest entry first.
+        fn audit(&self) -> Vec<AuditEntry> {
+            let mut entries = self.db.query_audit(1000, 0).unwrap();
+            entries.reverse();
+            entries
+        }
+
+        async fn link(&self, id: &str) -> Arc<Mutex<ProtocolLink>> {
+            self.state.read().await.targets[id].client.clone()
+        }
+    }
+
+    /// A request with the given headers and, when there is one, a JSON
+    /// body.
+    fn request(
+        method: Method,
+        uri: &str,
+        headers: &[(&str, &str)],
+        body: Option<serde_json::Value>,
+    ) -> axum::http::Request<Body> {
+        let mut builder = axum::http::Request::builder().method(method).uri(uri);
+        for (name, value) in headers {
+            builder = builder.header(*name, *value);
+        }
+        match body {
+            Some(json) => builder
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json.to_string())),
+            None => builder.body(Body::empty()),
+        }
+        .unwrap()
+    }
+
+    /// One target as boot builds it, its link not connected.
+    fn target_state(tc: &config::TargetSection, dicts: &Arc<StructDictionary>) -> TargetState {
+        let (push_tlm_tx, _) = broadcast::channel(64);
+        let (sample_tx, _) = broadcast::channel(64);
+        let protocol = Protocol::from_config(&tc.protocol).unwrap();
+        let metrics = TargetMetrics::new();
+        let mut link = build_link(protocol, push_tlm_tx.clone(), tc, None, None);
+        link.set_metrics(metrics.clone());
+        TargetState {
+            config: tc.clone(),
+            connected: link.connected_handle(),
+            listening: link.listening_handle(),
+            client: Arc::new(Mutex::new(link)),
+            metrics,
+            push_tlm_tx,
+            sample_tx,
+            struct_dicts: dicts.clone(),
+            manifest: None,
+            commands_config: None,
+            connect_init: None,
+            record_table: None,
+            _router_handle: None,
+            _poll_handles: Vec::new(),
+            sample_writer: None,
+        }
+    }
+
+    fn temp_db() -> (TempDir, TelemetryDb) {
+        let dir = TempDir::new().unwrap();
+        let db = TelemetryDb::open(&dir.path().join("zenith.db")).unwrap();
+        (dir, db)
+    }
+
+    fn sample(channel: &str, timestamp_ms: u64, value: f64) -> TelemetrySample {
+        TelemetrySample {
+            target_id: Arc::from("target-0"),
+            timestamp_ms,
+            channel: Arc::from(channel),
+            value,
+            envelope: None,
+        }
+    }
+
+    /* ---- Retention ---- */
+
+    /// @test retention_hours = 0 keeps telemetry forever, as
+    /// audit_retention_days = 0 keeps the audit log: the retention step
+    /// deletes no sample and no latest value, however old. A nonzero
+    /// retention deletes what is older than its window, latest values
+    /// with it, and keeps the rest.
+    #[test]
+    fn zero_retention_hours_keeps_telemetry_forever() {
+        const HOUR: u64 = 3_600_000;
+        let (_dir, db) = temp_db();
+        let now = now_ms();
+        db.insert_batch(&[
+            sample("Old.x", now - 30 * HOUR, 1.0),
+            sample("New.y", now - 25 * HOUR, 2.0),
+            sample("New.y", now - 5_000, 3.0),
+        ])
+        .unwrap();
+        let latest = |db: &TelemetryDb| {
+            let mut channels: Vec<String> = db
+                .query_latest("target-0")
+                .unwrap()
+                .into_iter()
+                .map(|s| s.channel.to_string())
+                .collect();
+            channels.sort();
+            channels
+        };
+
+        assert_eq!(
+            prune_telemetry(&db, 0).unwrap(),
+            0,
+            "retention_hours = 0 deleted telemetry"
+        );
+        assert_eq!(db.count().unwrap(), 3);
+        assert_eq!(latest(&db), ["New.y", "Old.x"]);
+
+        assert_eq!(prune_telemetry(&db, 24).unwrap(), 2);
+        assert_eq!(db.count().unwrap(), 1);
+        assert_eq!(latest(&db), ["New.y"]);
+    }
+
+    /* ---- Tunable encoding ---- */
+
+    fn field(field_type: &str, size: usize) -> FieldDef {
+        serde_json::from_value(json!({
+            "name": "f", "type": field_type, "offset": 0, "size": size,
+        }))
+        .unwrap()
+    }
+
+    /// `value` encoded into `field` alone: the bytes, or the refusal.
+    fn encoded(field: &FieldDef, value: &serde_json::Value) -> Result<Vec<u8>, String> {
+        let mut buf = vec![0u8; field.size];
+        encode_field(&mut buf, field, value, false).map(|()| buf)
+    }
+
+    /// @test A tunable value its field cannot hold is refused, never
+    /// written: an integer outside its field's width in either
+    /// direction, a bool other than 0 or 1, a fraction for an integer, a
+    /// float32 beyond its range, and an array element out of range. The
+    /// refusal names the value and the range; each width's own limits
+    /// encode exactly, little-endian.
+    #[test]
+    fn tunable_values_outside_their_field_are_refused() {
+        // A field, a value, and its bytes or a fragment of its refusal.
+        type Row = (FieldDef, serde_json::Value, Result<Vec<u8>, &'static str>);
+        let ff = |n: usize| Ok(vec![0xFF; n]);
+        let rows: Vec<Row> = vec![
+            (field("uint", 1), json!(255), ff(1)),
+            (
+                field("uint", 1),
+                json!(300),
+                Err("300 is outside uint8's range 0..=255"),
+            ),
+            (
+                field("uint", 1),
+                json!(-1),
+                Err("-1 is outside uint8's range 0..=255"),
+            ),
+            (field("uint", 2), json!(65_535), ff(2)),
+            (
+                field("uint", 2),
+                json!(70_000),
+                Err("70000 is outside uint16's range"),
+            ),
+            (field("uint", 4), json!(4_294_967_295u64), ff(4)),
+            (
+                field("uint", 4),
+                json!(5_000_000_000u64),
+                Err("outside uint32's range"),
+            ),
+            (field("uint", 8), json!(u64::MAX), ff(8)),
+            (
+                field("uint", 8),
+                json!(-1),
+                Err("-1 is outside uint64's range"),
+            ),
+            (field("int", 1), json!(-128), Ok(vec![0x80])),
+            (field("int", 1), json!(127), Ok(vec![0x7F])),
+            (
+                field("int", 1),
+                json!(200),
+                Err("200 is outside int8's range -128..=127"),
+            ),
+            (
+                field("int", 1),
+                json!(-200),
+                Err("-200 is outside int8's range -128..=127"),
+            ),
+            (field("int", 2), json!(-32_768), Ok(vec![0x00, 0x80])),
+            (
+                field("int", 2),
+                json!(32_768),
+                Err("32768 is outside int16's range"),
+            ),
+            (field("int", 4), json!(i32::MIN), Ok(vec![0, 0, 0, 0x80])),
+            (
+                field("int", 4),
+                json!(1u64 << 31),
+                Err("2147483648 is outside int32's range"),
+            ),
+            (
+                field("int", 8),
+                json!(i64::MIN),
+                Ok(vec![0, 0, 0, 0, 0, 0, 0, 0x80]),
+            ),
+            (
+                field("int", 8),
+                json!(u64::MAX),
+                Err("is outside int64's range"),
+            ),
+            (field("bool", 1), json!(0), Ok(vec![0])),
+            (field("bool", 1), json!(1), Ok(vec![1])),
+            (field("bool", 1), json!(2), Err("2 is not a bool (0 or 1)")),
+            (
+                field("bool", 1),
+                json!(-1),
+                Err("-1 is not a bool (0 or 1)"),
+            ),
+            (field("uint", 1), json!(1.5), Err("1.5 is not an integer")),
+            (
+                field("float", 4),
+                json!(f32::MAX),
+                Ok(f32::MAX.to_le_bytes().to_vec()),
+            ),
+            (
+                field("float", 4),
+                json!(3.5e38),
+                Err("3.5e+38 is outside float32's range"),
+            ),
+            (
+                field("float", 4),
+                json!(-3.5e38),
+                Err("-3.5e+38 is outside float32's range"),
+            ),
+        ];
+        let pair: FieldDef = serde_json::from_value(json!({
+            "name": "f", "type": "array", "offset": 0, "size": 2,
+            "element_type": "uint", "dims": [2],
+        }))
+        .unwrap();
+        let rows = rows.into_iter().chain([
+            (pair.clone(), json!([1, 2]), Ok(vec![1, 2])),
+            (
+                pair,
+                json!([1, 256]),
+                Err("element 1: 256 is outside uint8's range"),
+            ),
+        ]);
+
+        let mut written = Vec::new();
+        let mut refusals = Vec::new();
+        for (field, value, want) in rows {
+            let shape = format!("{}{} <- {}", field.field_type, field.size * 8, value);
+            match (want, encoded(&field, &value)) {
+                (Ok(bytes), got) => assert_eq!(got, Ok(bytes), "{shape}"),
+                (Err(_), Ok(bytes)) => written.push(format!("{shape} wrote {bytes:?}")),
+                (Err(reason), Err(said)) => refusals.push((shape, reason, said)),
+            }
+        }
+        assert!(
+            written.is_empty(),
+            "values their field cannot hold were written: {written:?}"
+        );
+        for (shape, reason, said) in refusals {
+            assert!(said.contains(reason), "{shape}: refused as {said:?}");
+        }
+    }
+
+    /// @test An 8-byte integer encodes exactly from each form the update
+    /// takes, in either byte order: a decimal string, a 0x string and a
+    /// JSON integer, at 2^53 + 1, the signed limits and the unsigned
+    /// maximum. A string of digits is decimal. A value past its type, a
+    /// fraction, an exponent, a hex-bytes string without the prefix, a
+    /// sign or space the forms do not take and another JSON type are
+    /// refused, naming the value.
+    #[test]
+    fn eight_byte_integers_encode_exactly_from_each_form() {
+        let (int64, uint64) = (field("int", 8), field("uint", 8));
+        let mut forms: Vec<(&FieldDef, serde_json::Value, [u8; 8])> = Vec::new();
+        for v in [
+            9_007_199_254_740_993i64,
+            -9_007_199_254_740_993,
+            i64::MAX,
+            i64::MIN,
+        ] {
+            forms.push((&int64, json!(v.to_string()), v.to_le_bytes()));
+            forms.push((&int64, json!(v), v.to_le_bytes()));
+            if v >= 0 {
+                forms.push((&int64, json!(format!("0x{v:X}")), v.to_le_bytes()));
+            }
+        }
+        for v in [
+            9_007_199_254_740_993u64,
+            9_223_372_036_854_775_807,
+            u64::MAX,
+        ] {
+            forms.push((&uint64, json!(v.to_string()), v.to_le_bytes()));
+            forms.push((&uint64, json!(v), v.to_le_bytes()));
+            forms.push((&uint64, json!(format!("0x{v:x}")), v.to_le_bytes()));
+        }
+        forms.push((
+            &int64,
+            json!("0100000000002000"),
+            100_000_000_002_000i64.to_le_bytes(),
+        ));
+
+        let mut wrong = Vec::new();
+        for big_endian in [false, true] {
+            for (field, value, le) in &forms {
+                let mut want = le.to_vec();
+                if big_endian {
+                    want.reverse();
+                }
+                let mut buf = vec![0u8; 8];
+                let got = encode_field(&mut buf, field, value, big_endian).map(|()| buf);
+                if got.as_ref() != Ok(&want) {
+                    wrong.push(format!(
+                        "{}64 <- {value} (be {big_endian}): {got:?}",
+                        field.field_type
+                    ));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "written otherwise: {wrong:#?}");
+
+        let past_both: serde_json::Value = serde_json::from_str("18446744073709551616").unwrap();
+        for (field, value, reason) in [
+            (
+                &int64,
+                json!("9223372036854775808"),
+                "\"9223372036854775808\" is outside int64's range \
+                 -9223372036854775808..=9223372036854775807",
+            ),
+            (
+                &int64,
+                json!("-9223372036854775809"),
+                "is outside int64's range",
+            ),
+            (
+                &int64,
+                json!(9_223_372_036_854_775_808u64),
+                "is outside int64's range",
+            ),
+            (
+                &uint64,
+                json!("18446744073709551616"),
+                "is outside uint64's range 0..=18446744073709551615",
+            ),
+            (&uint64, json!("-1"), "\"-1\" is outside uint64's range"),
+            (&uint64, past_both, "is outside uint64's range"),
+            (&int64, json!("1.5"), "\"1.5\" is not an integer"),
+            (&int64, json!(1.5), "1.5 is not an integer"),
+            (&int64, json!("1e3"), "is not an integer"),
+            (&int64, json!(1e3), "is not an integer"),
+            (&uint64, json!("ffffffffffffdfff"), "is not an integer"),
+            (&int64, json!("-0x10"), "is not an integer"),
+            (&int64, json!("+5"), "is not an integer"),
+            (&int64, json!(" 5"), "is not an integer"),
+            (&int64, json!("0x"), "is not an integer"),
+            (&int64, json!(""), "is not an integer"),
+            (&int64, json!(true), "true is not an integer"),
+        ] {
+            match encoded(field, &value) {
+                Err(said) => assert!(said.contains(reason), "{value}: refused as {said:?}"),
+                Ok(bytes) => wrong.push(format!("{value} wrote {bytes:?}")),
+            }
+        }
+        assert!(wrong.is_empty(), "values refused nowhere: {wrong:#?}");
+    }
+
+    /// @test The rails judge an 8-byte integer exactly, in whatever form
+    /// it comes: an int64 with max 2^53 refuses 2^53 + 1 as a decimal
+    /// string, a 0x string and a JSON integer, each of which an f64
+    /// reads as the max itself, passes 2^53, and judges each element of
+    /// an int64 array. A narrower field keeps the float check, and a
+    /// value no number is read from is left to the encoder.
+    #[test]
+    fn rails_judge_an_eight_byte_integer_exactly() {
+        let fields: Vec<FieldDef> = serde_json::from_value(json!([
+            { "name": "wide", "type": "int", "offset": 0, "size": 8,
+              "constraints": { "max": 9_007_199_254_740_992u64 } },
+            { "name": "lanes", "type": "array", "offset": 8, "size": 16,
+              "element_type": "int", "dims": [2],
+              "constraints": { "max": 9_007_199_254_740_992u64 } },
+            { "name": "level", "type": "uint", "offset": 24, "size": 1,
+              "constraints": { "max": 10 } },
+        ]))
+        .unwrap();
+        let violations = |edits: serde_json::Value| {
+            constraint_violations(&fields, edits.as_object().unwrap(), false)
+        };
+        for over in [
+            json!("9007199254740993"),
+            json!("0x20000000000001"),
+            json!(9_007_199_254_740_993u64),
+        ] {
+            assert_eq!(
+                violations(json!({ "wide": over })),
+                ["wide: 9007199254740993 above max 9007199254740992"],
+                "{over}"
+            );
+        }
+        assert!(violations(json!({ "wide": "9007199254740992", "level": 10 })).is_empty());
+        assert_eq!(
+            violations(json!({ "lanes": ["1", "9007199254740993"] })),
+            ["lanes: 9007199254740993 above max 9007199254740992"]
+        );
+        assert_eq!(
+            violations(json!({ "level": 11 })),
+            ["level: 11 above max 10"]
+        );
+        assert!(
+            violations(json!({ "wide": "ffff", "lanes": "00" })).is_empty(),
+            "left to the encoder"
+        );
+    }
+
+    /// Dictionaries with one tunable block: uint8 `level`, bool
+    /// `enabled` and int16 `trim`, four bytes.
+    fn tunable_dicts() -> StructDictionary {
+        let dict: ComponentDict = serde_json::from_value(json!({
+            "component": "Gain",
+            "structs": { "GainParams": {
+                "category": "TUNABLE_PARAM", "size": 4,
+                "fields": [
+                    { "name": "level", "type": "uint", "offset": 0, "size": 1 },
+                    { "name": "enabled", "type": "bool", "offset": 1, "size": 1 },
+                    { "name": "trim", "type": "int", "offset": 2, "size": 2 },
+                ],
+            }},
+        }))
+        .unwrap();
+        StructDictionary {
+            components: HashMap::from([("Gain".to_string(), dict)]),
+        }
+    }
+
+    /// @test A tunable update carrying a value its field cannot hold
+    /// fails before anything is sent: a 400 naming the field, the value
+    /// and the range, and no update reaches the link, so none is
+    /// audited. The same update in range goes on to the upload, which
+    /// the unconnected link refuses.
+    #[tokio::test]
+    async fn an_unholdable_tunable_fails_the_update_before_any_upload() {
+        let server = Server::with_dicts(APEX_TARGET, tunable_dicts());
+        let update = |level: i64| {
+            json!({
+                "fields": { "level": level, "enabled": 1, "trim": -5 },
+                "raw_hex": "00000000",
+            })
+        };
+        let uri = "/api/targets/target-0/params/00D000/update";
+
+        let (status, body) = server.post(uri, update(300)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.contains("level: 300 is outside uint8's range 0..=255"),
+            "{body}"
+        );
+        assert!(server.audit().is_empty(), "the update reached the link");
+
+        let (status, body) = server.post(uri, update(200)).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        let audit = server.audit();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(
+            (audit[0].action.as_str(), audit[0].status.as_str()),
+            ("update_tprm", "err: not connected")
+        );
+    }
+
+    /* ---- Request numbers ---- */
+
+    /// @test The command route reads a number as hex only with a 0x
+    /// prefix, and as decimal otherwise: the console's 0x body, its
+    /// upper-case spelling and the same uid and opcode in decimal are
+    /// one command at the link, each attempt audited as uid 0x00D000,
+    /// opcode 0x0100. Bare hex digits, an opcode past 16 bits and an
+    /// empty uid are refused before the link.
+    #[tokio::test]
+    async fn command_numbers_read_as_hex_with_0x_and_decimal_otherwise() {
+        let server = Server::new(APEX_TARGET);
+        let command = |uid: &str, opcode: &str| json!({ "full_uid": uid, "opcode": opcode });
+        let uri = "/api/targets/target-0/command";
+
+        for (uid, opcode) in [
+            ("0x00D000", "0x0100"),
+            ("0X00d000", "0X100"),
+            ("53248", "256"),
+        ] {
+            let (status, body) = server.post(uri, command(uid, opcode)).await;
+            assert_eq!(status, StatusCode::BAD_GATEWAY, "{uid} {opcode}: {body}");
+        }
+        let details: Vec<String> = server
+            .audit()
+            .into_iter()
+            .map(|e| e.detail.unwrap_or_default())
+            .collect();
+        assert_eq!(details, ["uid=0x00D000 opcode=0x0100 payload_len=0"; 3]);
+
+        for (uid, opcode, refusal) in [
+            ("D000", "0x0100", "Invalid fullUid: D000"),
+            ("0x00D000", "65536", "Invalid opcode: 65536"),
+            ("0x00D000", "0x10000", "Invalid opcode: 0x10000"),
+            ("", "0x0100", "Invalid fullUid: "),
+        ] {
+            let (status, body) = server.post(uri, command(uid, opcode)).await;
+            assert_eq!(
+                (status, body.as_str()),
+                (StatusCode::BAD_REQUEST, refusal),
+                "{uid} {opcode}"
+            );
+        }
+        assert_eq!(
+            server.audit().len(),
+            3,
+            "a refused command reached the link"
+        );
+    }
+
+    /// @test A uid in a route path is hex digits, with or without the 0x
+    /// prefix, as the console writes it there (a manifest fullUid
+    /// without its prefix): each form reaches the link, and a uid that
+    /// is not hex is refused before it.
+    #[tokio::test]
+    async fn path_uids_read_as_hex() {
+        let server = Server::new(APEX_TARGET);
+        for uid in ["00D000", "0x00D000", "d000"] {
+            let (status, body) = server
+                .get(&format!("/api/targets/target-0/inspect/{uid}?category=1"))
+                .await;
+            assert_eq!(status, StatusCode::BAD_GATEWAY, "{uid}: {body}");
+        }
+        let (status, body) = server
+            .get("/api/targets/target-0/inspect/0xZZ?category=1")
+            .await;
+        assert_eq!(
+            (status, body.as_str()),
+            (StatusCode::BAD_REQUEST, "Invalid fullUid: 0xZZ")
+        );
+    }
+
+    /* ---- Connect admission and shutdown ---- */
+
+    /// A context whose waker does nothing: the admission tests poll a
+    /// connect by hand, so each step it takes is one the test chose.
+    fn cx() -> Context<'static> {
+        Context::from_waker(Waker::noop())
+    }
+
+    /// A server with one apex target dialing `peer`, a loopback listener
+    /// nobody accepts on, and one poll row, so a connect that brings the
+    /// link up also starts a poll.
+    fn dialing_server() -> (std::net::TcpListener, Server) {
+        let peer = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        peer.set_nonblocking(true).unwrap();
+        let port = peer.local_addr().unwrap().port();
+        let server = Server::new(&format!(
+            r#"
+            [[targets]]
+            name = "apex"
+            host = "127.0.0.1"
+            port = {port}
+            [[targets.poll]]
+            uid = "0x00D000"
+            category = 4
+            rate_hz = 1.0
+            "#
+        ));
+        (peer, server)
+    }
+
+    /// Whether the target dialed `peer`: a connection its link opened is
+    /// queued for accept within moments of the connect returning.
+    async fn dialed(peer: &std::net::TcpListener) -> bool {
+        for _ in 0..50 {
+            match peer.accept() {
+                Ok(_) => return true,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    tokio::time::sleep(Duration::from_millis(1)).await
+                }
+                Err(e) => panic!("accept: {e}"),
+            }
+        }
+        false
+    }
+
+    /// @test Once shutdown has begun no connect is admitted: the entry
+    /// check refuses at once, without waiting for the link (held here,
+    /// as an upload holds it), and the target is never dialed.
+    #[tokio::test]
+    async fn a_connect_asked_for_once_shutdown_began_is_refused_at_entry() {
+        let (peer, server) = dialing_server();
+        server.state.write().await.stopping = true;
+        let link = server.link("target-0").await;
+        let held = link.lock().await;
+
+        let answer = pin!(do_connect_target(&server.state, "target-0")).poll(&mut cx());
+        assert!(
+            matches!(answer, Poll::Ready(Ok(ConnectAnswer::Refused))),
+            "{answer:?}"
+        );
+        drop(held);
+        assert!(!dialed(&peer).await, "a refused connect dialed the target");
+    }
+
+    /// @test A connect that waited for the link behind another caller
+    /// looks again once it holds it: shutdown began while it waited, so
+    /// it is refused and never dials, although it passed the entry check.
+    #[tokio::test]
+    async fn a_connect_that_waited_for_the_link_is_refused_once_shutdown_began() {
+        let (peer, server) = dialing_server();
+        let link = server.link("target-0").await;
+        let held = link.lock().await;
+
+        let mut connect = pin!(do_connect_target(&server.state, "target-0"));
+        assert!(
+            connect.as_mut().poll(&mut cx()).is_pending(),
+            "the connect did not wait for the link"
+        );
+        server.state.write().await.stopping = true;
+        drop(held);
+
+        assert_eq!(connect.await, Ok(ConnectAnswer::Refused));
+        assert!(
+            !dialed(&peer).await,
+            "the connect dialed once shutdown began"
+        );
+        assert_eq!(link.lock().await.state_word(), None);
+    }
+
+    /// @test A connect that completes after shutdown began is torn down
+    /// and refused: it passed both checks before shutdown began and
+    /// dialed, shutdown began before it finished, and it finds that under
+    /// the write guard, so it takes the link it brought up down again
+    /// and registers no router and no poll.
+    #[tokio::test]
+    async fn a_connect_completing_after_shutdown_began_is_torn_down_and_refused() {
+        let (peer, server) = dialing_server();
+        let state = &server.state;
+        let link = server.link("target-0").await;
+
+        // Park the connect at its second check: the link is held while
+        // it passes the entry check, the state's write guard while it
+        // takes the link.
+        let held = link.lock().await;
+        let mut connect = pin!(do_connect_target(state, "target-0"));
+        assert!(connect.as_mut().poll(&mut cx()).is_pending());
+        let guard = state.write().await;
+        drop(held);
+        assert!(connect.as_mut().poll(&mut cx()).is_pending());
+
+        // Release the second check with a writer queued behind it, the
+        // shutdown snapshot's stand-in: the connect reads shutdown not
+        // begun and dials, and the writer gets the guard before the
+        // connect's completion asks for it.
+        drop(guard);
+        let mut shutdown = pin!(state.write());
+        assert!(shutdown.as_mut().poll(&mut cx()).is_pending());
+        assert!(connect.as_mut().poll(&mut cx()).is_pending());
+        let Poll::Ready(mut st) = shutdown.as_mut().poll(&mut cx()) else {
+            panic!("the shutdown stand-in never got the guard");
+        };
+        st.stopping = true;
+        drop(st);
+
+        assert_eq!(connect.await, Ok(ConnectAnswer::Refused));
+        assert!(dialed(&peer).await, "the connect never dialed");
+        assert_eq!(
+            link.lock().await.state_word(),
+            None,
+            "the link it brought up is still up"
+        );
+        let st = state.read().await;
+        let target = &st.targets["target-0"];
+        assert!(target._router_handle.is_none(), "a router was registered");
+        assert!(target._poll_handles.is_empty(), "a poll was registered");
+    }
+
+    /// A task standing in for a router or a poll, and a receiver that
+    /// resolves once the task is cancelled and dropped.
+    fn stand_in() -> (
+        tokio::task::JoinHandle<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        let (alive, gone) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn(async move {
+            let _alive = alive;
+            std::future::pending::<()>().await
+        });
+        (task, gone)
+    }
+
+    /// @test The shutdown snapshot closes connect admission and stops
+    /// every target's router and polls under the write guard, then takes
+    /// each link that is up from our side down, waiting for a link an
+    /// upload holds without holding the guard, so requests are served
+    /// meanwhile. A listening link ends; a link never brought up stays
+    /// down; a connect asked for afterwards is refused.
+    #[tokio::test]
+    async fn shutdown_closes_admission_and_takes_every_link_down() {
+        let server = Server::new(
+            r#"
+            [[targets]]
+            name = "listener"
+            host = "127.0.0.1"
+            port = 9
+            protocol = "ccsds-spp"
+            carrier = "udp"
+            listen_port = 0
+            [[targets]]
+            name = "apex"
+            host = "127.0.0.1"
+            port = 9
+            "#,
+        );
+        let state = &server.state;
+        let listener = server.link("target-0").await;
+        listener.lock().await.connect("127.0.0.1", 9).await.unwrap();
+        assert_eq!(
+            listener.lock().await.state_word(),
+            Some(StateWord::Listening)
+        );
+        let (router, router_gone) = stand_in();
+        let (poll, poll_gone) = stand_in();
+        {
+            let mut st = state.write().await;
+            let target = st.targets.get_mut("target-0").unwrap();
+            target._router_handle = Some(router);
+            target._poll_handles.push(poll);
+        }
+
+        let apex = server.link("target-1").await;
+        let held = apex.lock().await;
+        let mut shutdown = pin!(shut_down_targets(state, SAMPLE_WRITER_FLUSH_LIMIT));
+        assert!(shutdown.as_mut().poll(&mut cx()).is_pending());
+        {
+            let st = state
+                .try_read()
+                .expect("the shutdown holds the state's guard while it waits for a link");
+            assert!(st.stopping);
+            assert!(st
+                .targets
+                .values()
+                .all(|t| t._router_handle.is_none() && t._poll_handles.is_empty()));
+        }
+        drop(held);
+        shutdown.await;
+
+        for (task, gone) in [("router", router_gone), ("poll", poll_gone)] {
+            let dropped = tokio::time::timeout(Duration::from_secs(1), gone).await;
+            assert!(matches!(dropped, Ok(Err(_))), "the {task} was not stopped");
+        }
+        assert_eq!(listener.lock().await.state_word(), None);
+        assert_eq!(apex.lock().await.state_word(), None);
+        assert_eq!(
+            do_connect_target(state, "target-1").await,
+            Ok(ConnectAnswer::Refused)
+        );
+    }
+
+    /* ---- Auth middleware ---- */
+
+    const SECRET: &str = "a-test-secret-of-decent-length";
+
+    /// Auth on, one apex target.
+    fn auth_on() -> String {
+        format!(
+            r#"
+            [auth]
+            enabled = true
+            secret = "{SECRET}"
+            username = "ops"
+            {APEX_TARGET}
+            "#
+        )
+    }
+
+    /// @test The auth middleware, through the server's router with auth
+    /// on. The open routes answer without a credential: health, the
+    /// bearer login, and signing in and out at the session door (the
+    /// session's status is no door). A protected route refuses no
+    /// credential, a malformed bearer token, a bearer token sent as a
+    /// query ticket, an unknown session cookie, and a bad bearer token
+    /// even beside a live cookie (the first credential present decides).
+    /// A bearer token, a session cookie (writing only from the console's
+    /// own origin) and a socket ticket on the telemetry socket pass, and
+    /// each write is audited under its credential's subject.
+    #[tokio::test]
+    async fn the_auth_middleware_admits_each_credential_only_where_it_belongs() {
+        let server = Server::new(&auth_on());
+        let now = chrono::Utc::now().timestamp();
+        let token = crate::core::auth::mint_token("api-client", SECRET, now).unwrap();
+        let bearer = format!("Bearer {token}");
+        let ticket = crate::core::auth::mint_ws_ticket("api-client", SECRET, now).unwrap();
+        let sessions = server.state.read().await.sessions.clone();
+        let (id, _) = sessions.create("ops", now_ms()).unwrap();
+        let cookie = format!("{}={id}", crate::core::session::COOKIE_NAME);
+        let upgrade = [
+            ("connection", "upgrade"),
+            ("upgrade", "websocket"),
+            ("sec-websocket-version", "13"),
+            ("sec-websocket-key", "AAAAAAAAAAAAAAAAAAAAAA=="),
+        ];
+        let socket =
+            |credential: &str| format!("/api/targets/target-0/telemetry/live?ticket={credential}");
+        let nobody = || Some(json!({ "username": "nobody", "password": "x" }));
+        let disconnect = "/api/targets/target-0/disconnect";
+        let (get, post) = (Method::GET, Method::POST);
+
+        type Row = (
+            &'static str,
+            axum::http::Request<Body>,
+            StatusCode,
+            &'static str,
+        );
+        let rows: Vec<Row> = vec![
+            (
+                "health is open",
+                request(get.clone(), "/api/health", &[], None),
+                StatusCode::OK,
+                "\"status\"",
+            ),
+            (
+                "the bearer login is open",
+                request(post.clone(), "/api/auth/login", &[], nobody()),
+                StatusCode::UNAUTHORIZED,
+                "Invalid credentials",
+            ),
+            (
+                "signing in needs no session",
+                request(post.clone(), "/api/auth/session", &[], nobody()),
+                StatusCode::UNAUTHORIZED,
+                "invalid credentials",
+            ),
+            (
+                "signing out needs no session",
+                request(Method::DELETE, "/api/auth/session", &[], None),
+                StatusCode::NO_CONTENT,
+                "",
+            ),
+            (
+                "the session's status is no door",
+                request(get.clone(), "/api/auth/session", &[], None),
+                StatusCode::UNAUTHORIZED,
+                "missing token or session",
+            ),
+            (
+                "no credential",
+                request(get.clone(), "/api/targets", &[], None),
+                StatusCode::UNAUTHORIZED,
+                "missing token or session",
+            ),
+            (
+                "a malformed bearer token",
+                request(
+                    get.clone(),
+                    "/api/targets",
+                    &[("authorization", "Bearer not-a-token")],
+                    None,
+                ),
+                StatusCode::UNAUTHORIZED,
+                "invalid token",
+            ),
+            (
+                "a bearer token as a query ticket",
+                request(get.clone(), &socket(&token), &upgrade, None),
+                StatusCode::UNAUTHORIZED,
+                "query credentials must be ws tickets",
+            ),
+            (
+                "an unknown session cookie",
+                request(
+                    get.clone(),
+                    "/api/targets",
+                    &[("cookie", "zenith_session=unknown")],
+                    None,
+                ),
+                StatusCode::UNAUTHORIZED,
+                "session ended or unknown",
+            ),
+            (
+                "a bad bearer token beside a live cookie",
+                request(
+                    get.clone(),
+                    "/api/targets",
+                    &[("authorization", "Bearer not-a-token"), ("cookie", &cookie)],
+                    None,
+                ),
+                StatusCode::UNAUTHORIZED,
+                "invalid token",
+            ),
+            (
+                "a bearer token",
+                request(
+                    get.clone(),
+                    "/api/targets",
+                    &[("authorization", &bearer)],
+                    None,
+                ),
+                StatusCode::OK,
+                "\"targets\"",
+            ),
+            (
+                "a session cookie",
+                request(get.clone(), "/api/targets", &[("cookie", &cookie)], None),
+                StatusCode::OK,
+                "\"targets\"",
+            ),
+            (
+                "a session write from another site",
+                request(
+                    post.clone(),
+                    disconnect,
+                    &[("cookie", &cookie), ("sec-fetch-site", "cross-site")],
+                    None,
+                ),
+                StatusCode::FORBIDDEN,
+                "cross-origin request with a session cookie refused",
+            ),
+            (
+                "a session write from the console",
+                request(
+                    post.clone(),
+                    disconnect,
+                    &[("cookie", &cookie), ("sec-fetch-site", "same-origin")],
+                    None,
+                ),
+                StatusCode::OK,
+                "disconnected",
+            ),
+            (
+                "a bearer write",
+                request(
+                    post.clone(),
+                    disconnect,
+                    &[("authorization", &bearer)],
+                    None,
+                ),
+                StatusCode::OK,
+                "disconnected",
+            ),
+            (
+                "a ticket on the telemetry socket",
+                request(get.clone(), &socket(&ticket), &upgrade, None),
+                StatusCode::UPGRADE_REQUIRED,
+                "",
+            ),
+        ];
+        for (label, request, status, fragment) in rows {
+            let (got, body) = server.call(request).await;
+            assert_eq!(got, status, "{label}: {body}");
+            assert!(body.contains(fragment), "{label}: {body}");
+        }
+
+        let audited: Vec<(String, String, String)> = server
+            .audit()
+            .into_iter()
+            .map(|e| (e.actor, e.action, e.status))
+            .collect();
+        let expected = [
+            ("(unknown user)", "sign_in", "err: invalid credentials"),
+            ("(unknown user)", "sign_in", "err: invalid credentials"),
+            ("ops", "disconnect_target", "ok"),
+            ("api-client", "disconnect_target", "ok"),
+        ]
+        .map(|(actor, action, status)| (actor.into(), action.into(), status.into()));
+        assert_eq!(audited, expected);
+    }
+
+    /// @test With auth off the middleware passes every request as the
+    /// anonymous operator: no credential is asked for, and a write is
+    /// audited under "operator".
+    #[tokio::test]
+    async fn with_auth_off_every_request_is_the_operator() {
+        let server = Server::new(APEX_TARGET);
+        let (status, body) = server
+            .call(request(
+                Method::POST,
+                "/api/targets/target-0/disconnect",
+                &[],
+                None,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let audit = server.audit();
+        assert_eq!(audit.len(), 1);
+        assert_eq!(audit[0].actor, "operator");
+    }
+
+    /* ---- Byte order, passwords, uploads, audit, tickets, writers, trim ---- */
+
+    /// A component with one tunable block and the given byte-order stamp.
+    fn block_dicts(
+        byte_order: Option<&str>,
+        fields: serde_json::Value,
+        size: usize,
+    ) -> StructDictionary {
+        let dict: ComponentDict = serde_json::from_value(json!({
+            "component": "Block",
+            "byte_order": byte_order,
+            "structs": { "BlockParams": {
+                "category": "TUNABLE_PARAM", "size": size, "fields": fields,
+            }},
+        }))
+        .unwrap();
+        StructDictionary {
+            components: HashMap::from([("Block".to_string(), dict)]),
+        }
+    }
+
+    /// @test A tunable value is written in its dictionary's byte order:
+    /// a big-endian field gets its most significant byte first, array
+    /// elements each in turn, and every scalar a block decodes to is
+    /// written back to the block's own bytes in either order, so the
+    /// values a read returns, given back, rewrite what was read.
+    #[test]
+    fn tunable_values_encode_in_the_dictionary_byte_order() {
+        let mut buf = [0u8; 2];
+        encode_field(&mut buf, &field("uint", 2), &json!(0x1234), true).unwrap();
+        assert_eq!(buf, [0x12, 0x34], "big-endian uint16");
+        let pair: FieldDef = serde_json::from_value(json!({
+            "name": "f", "type": "array", "offset": 0, "size": 4,
+            "element_type": "int", "dims": [2],
+        }))
+        .unwrap();
+        let mut buf = [0u8; 4];
+        encode_field(&mut buf, &pair, &json!([-2, 0x0102]), true).unwrap();
+        assert_eq!(buf, [0xFF, 0xFE, 0x01, 0x02], "big-endian int16 elements");
+
+        let fields = json!([
+            { "name": "wide", "type": "int", "offset": 0, "size": 8 },
+            { "name": "flag", "type": "bool", "offset": 8, "size": 1 },
+            { "name": "tiny", "type": "int", "offset": 9, "size": 1 },
+            { "name": "short", "type": "uint", "offset": 10, "size": 2 },
+            { "name": "word", "type": "int", "offset": 12, "size": 4 },
+            { "name": "ratio", "type": "float", "offset": 16, "size": 4 },
+            { "name": "precise", "type": "double", "offset": 20, "size": 8 },
+        ]);
+        // The block's values, each field's bytes in the given order.
+        let block = |big_endian: bool| {
+            let mut out = Vec::new();
+            for le in [
+                &(-2i64).to_le_bytes()[..],
+                &[1],
+                &(-5i8).to_le_bytes(),
+                &0x1234u16.to_le_bytes(),
+                &(-100_000i32).to_le_bytes(),
+                &1.5f32.to_le_bytes(),
+                &(-0.25f64).to_le_bytes(),
+            ] {
+                let mut bytes = le.to_vec();
+                if big_endian {
+                    bytes.reverse();
+                }
+                out.extend(bytes);
+            }
+            out
+        };
+        for (stamp, big_endian) in [(None, false), (Some("le"), false), (Some("be"), true)] {
+            let bytes = block(big_endian);
+            let dicts = block_dicts(stamp, fields.clone(), 28);
+            let decoded = dicts
+                .decode_payload("Block", "BlockParams", &bytes)
+                .unwrap();
+            let mut written = vec![0u8; 28];
+            for field in &dicts.components["Block"].structs["BlockParams"].fields {
+                encode_field(&mut written, field, &decoded[&field.name], big_endian)
+                    .unwrap_or_else(|e| panic!("{stamp:?} {}: {e}", field.name));
+            }
+            assert_eq!(written, bytes, "{stamp:?}: {decoded}");
+        }
+    }
+
+    /// @test `--hash-password` hashes the password as typed, only the
+    /// line ending removed, since sign-in compares the password exactly
+    /// as it is sent: edge spaces stay, a CRLF or no line ending at all
+    /// reads the same, and an empty or blank line holds no password.
+    #[test]
+    fn a_hashed_password_keeps_its_edge_spaces() {
+        assert_eq!(
+            password_from_line("  pass phrase \n"),
+            Some("  pass phrase ")
+        );
+        assert_eq!(password_from_line("secret\r\n"), Some("secret"));
+        assert_eq!(password_from_line("secret"), Some("secret"));
+        assert_eq!(password_from_line("\n"), None);
+        assert_eq!(password_from_line(" \t \n"), None);
+    }
+
+    /// Dictionaries describing a sequence plan, the vehicle's shape in
+    /// miniature: a 32-byte plan of an 8-byte header and two 12-byte
+    /// steps, each with its delay and timeout in cycles.
+    fn sequence_dicts() -> StructDictionary {
+        let dict: ComponentDict = serde_json::from_value(json!({
+            "component": "Action",
+            "structs": {
+                "StandaloneSequenceTprm": { "category": "PROTOCOL", "size": 32, "fields": [
+                    { "name": "sequenceId", "type": "uint", "offset": 0, "size": 2 },
+                    { "name": "stepCount", "type": "uint", "offset": 4, "size": 1 },
+                    { "name": "type", "type": "uint", "offset": 6, "size": 1 },
+                    { "name": "steps", "type": "array", "offset": 8, "size": 24 },
+                ]},
+                "StandaloneStepTprm": { "category": "STRUCT", "size": 12, "fields": [
+                    { "name": "actionType", "type": "uint", "offset": 0, "size": 1 },
+                    { "name": "delayCycles", "type": "uint", "offset": 4, "size": 4 },
+                    { "name": "timeoutCycles", "type": "uint", "offset": 8, "size": 4 },
+                ]},
+            },
+        }))
+        .unwrap();
+        StructDictionary {
+            components: HashMap::from([("Action".to_string(), dict)]),
+        }
+    }
+
+    /// @test An upload is checked as an RTS sequence only when it goes
+    /// into a directory named rts: a plan the vehicle would refuse at
+    /// load is refused (422) on its way to bank_a/rts/ or rts/, while
+    /// the same bytes to parts/, to shirts/ or to a file named rts go on
+    /// to the link.
+    #[tokio::test]
+    async fn only_uploads_into_an_rts_directory_are_checked_as_sequences() {
+        use base64::Engine;
+        let server = Server::with_dicts(APEX_TARGET, sequence_dicts());
+        // One RTS step whose timeout expires within its own delay.
+        let mut plan = vec![0u8; 32];
+        plan[4] = 1;
+        plan[12..16].copy_from_slice(&30u32.to_le_bytes());
+        plan[16..20].copy_from_slice(&30u32.to_le_bytes());
+        let plan = base64::engine::general_purpose::STANDARD.encode(&plan);
+        let upload = |path: &str| json!({ "remote_path": path, "content_base64": plan });
+        let uri = "/api/targets/target-0/upload";
+
+        for path in ["bank_a/rts/seq1.bin", "rts/seq1.bin"] {
+            let (status, body) = server.post(uri, upload(path)).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{path}: {body}");
+            assert!(
+                body.contains("TIMEOUT_SHORTER_THAN_DELAY"),
+                "{path}: {body}"
+            );
+        }
+        for path in ["parts/blob.bin", "bank_a/shirts/seq1.bin", "bank_a/rts"] {
+            let (status, body) = server.post(uri, upload(path)).await;
+            assert_eq!(
+                (status, body.as_str()),
+                (StatusCode::BAD_GATEWAY, "Upload failed: not connected"),
+                "{path}"
+            );
+        }
+    }
+
+    /// @test Downsampling rewrites stored history, so it is audited like
+    /// a trim: under the actor, with the rows it converted.
+    #[tokio::test]
+    async fn downsampling_is_audited() {
+        let server = Server::new(APEX_TARGET);
+        // Two samples in one minute bucket, two hours old.
+        let minute = (now_ms() - 2 * 3_600_000) / 60_000 * 60_000;
+        server
+            .db
+            .insert_batch(&[
+                sample("A.x", minute, 1.0),
+                sample("A.x", minute + 1_000, 3.0),
+            ])
+            .unwrap();
+
+        let (status, body) = server
+            .call(request(
+                Method::POST,
+                "/api/telemetry/downsample",
+                &[],
+                None,
+            ))
+            .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let audit = server.audit();
+        assert_eq!(audit.len(), 1, "downsampling wrote no audit row");
+        assert_eq!(
+            (
+                audit[0].actor.as_str(),
+                audit[0].action.as_str(),
+                audit[0].status.as_str()
+            ),
+            ("operator", "downsample_telemetry", "ok")
+        );
+        assert_eq!(
+            audit[0].detail.as_deref(),
+            Some("samples_before=2 samples_after=1 removed=1")
+        );
+    }
+
+    /// @test With auth on the bearer login is audited as signing in at
+    /// the session door is: a refusal under "(unknown user)" for a name
+    /// that is not the configured one, never the name submitted, and a
+    /// success under the user, both marked as the bearer login.
+    #[tokio::test]
+    async fn the_bearer_login_is_audited_like_a_sign_in() {
+        let hash = crate::core::auth::hash_password("pass phrase").unwrap();
+        let server = Server::new(&format!(
+            r#"
+            [auth]
+            enabled = true
+            secret = "{SECRET}"
+            username = "ops"
+            password_hash = "{hash}"
+            {APEX_TARGET}
+            "#
+        ));
+        let login = |user: &str, password: &str| {
+            request(
+                Method::POST,
+                "/api/auth/login",
+                &[],
+                Some(json!({ "username": user, "password": password })),
+            )
+        };
+
+        let (status, body) = server.call(login("hunter2", "x")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        let (status, body) = server.call(login("ops", "pass phrase")).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert!(body.contains("\"token\""), "{body}");
+
+        let audited: Vec<(String, String, Option<String>, String)> = server
+            .audit()
+            .into_iter()
+            .map(|e| (e.actor, e.action, e.detail, e.status))
+            .collect();
+        let bearer = Some("bearer token".to_string());
+        assert_eq!(
+            audited,
+            [
+                (
+                    "(unknown user)".to_string(),
+                    "sign_in".to_string(),
+                    bearer.clone(),
+                    "err: invalid credentials".to_string()
+                ),
+                (
+                    "ops".to_string(),
+                    "sign_in".to_string(),
+                    bearer,
+                    "ok".to_string()
+                ),
+            ]
+        );
+    }
+
+    /// @test A socket ticket opens the telemetry socket and nothing else:
+    /// on another route's query string, for a read or a write, or in any
+    /// route's Authorization header, it is refused, and nothing is done;
+    /// on the socket's query string it passes.
+    #[tokio::test]
+    async fn a_socket_ticket_opens_only_the_telemetry_socket() {
+        let server = Server::new(&auth_on());
+        let now = chrono::Utc::now().timestamp();
+        let ticket = crate::core::auth::mint_ws_ticket("api-client", SECRET, now).unwrap();
+        let as_bearer = format!("Bearer {ticket}");
+        let upgrade = [
+            ("connection", "upgrade"),
+            ("upgrade", "websocket"),
+            ("sec-websocket-version", "13"),
+            ("sec-websocket-key", "AAAAAAAAAAAAAAAAAAAAAA=="),
+        ];
+        let mut upgrade_as_bearer = upgrade.to_vec();
+        upgrade_as_bearer.push(("authorization", as_bearer.as_str()));
+        let socket = format!("/api/targets/target-0/telemetry/live?ticket={ticket}");
+
+        for (label, request) in [
+            (
+                "a read",
+                request(
+                    Method::GET,
+                    &format!("/api/targets?ticket={ticket}"),
+                    &[],
+                    None,
+                ),
+            ),
+            (
+                "a write",
+                request(
+                    Method::POST,
+                    &format!("/api/targets/target-0/disconnect?ticket={ticket}"),
+                    &[],
+                    None,
+                ),
+            ),
+            (
+                "a header",
+                request(
+                    Method::GET,
+                    "/api/targets",
+                    &[("authorization", &as_bearer)],
+                    None,
+                ),
+            ),
+            (
+                "a header on the socket",
+                request(
+                    Method::GET,
+                    "/api/targets/target-0/telemetry/live",
+                    &upgrade_as_bearer,
+                    None,
+                ),
+            ),
+        ] {
+            let (status, body) = server.call(request).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{label}: {body}");
+        }
+        assert!(
+            server.audit().is_empty(),
+            "a refused ticket's write was carried out"
+        );
+
+        let (status, body) = server
+            .call(request(Method::GET, &socket, &upgrade, None))
+            .await;
+        assert_eq!(status, StatusCode::UPGRADE_REQUIRED, "{body}");
+    }
+
+    /// @test Shutdown waits for each target's sample writer to write what
+    /// it holds: the samples broadcast before the stop signal are in the
+    /// database when shutdown returns, though another connection held
+    /// the database's write lock when it began.
+    #[tokio::test]
+    async fn shutdown_waits_for_the_sample_writers() {
+        let server = Server::new(APEX_TARGET);
+        let blocker = rusqlite::Connection::open(server.dir.path().join("zenith.db")).unwrap();
+        blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+        {
+            let mut st = server.state.write().await;
+            let target = st.targets.get_mut("target-0").unwrap();
+            target.sample_writer = Some(spawn_sample_writer(
+                "target-0".to_string(),
+                server.db.clone(),
+                target.sample_tx.subscribe(),
+                target.metrics.clone(),
+            ));
+            for i in 0..10u64 {
+                target
+                    .sample_tx
+                    .send(sample("A.x", 1_000 + i, i as f64))
+                    .unwrap();
+            }
+        }
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            blocker.execute_batch("ROLLBACK").unwrap();
+        });
+
+        shut_down_targets(&server.state, SAMPLE_WRITER_FLUSH_LIMIT).await;
+        assert_eq!(
+            server.db.count().unwrap(),
+            10,
+            "shutdown returned before the writer wrote its samples"
+        );
+        release.join().unwrap();
+    }
+
+    /// @test The writers' budget bounds the process, not only the
+    /// shutdown call: with a stand-in writer that blocks 25 times its
+    /// budget, shutdown waits out the budget and returns, and the
+    /// runtime it ran on, dropped as main's is on return, ends at once
+    /// instead of waiting for the writer.
+    #[test]
+    fn a_writer_past_its_budget_does_not_hold_the_runtime() {
+        const BUDGET: Duration = Duration::from_millis(200);
+        const WRITER_BLOCKS: Duration = Duration::from_secs(5);
+        let (release, held) = std::sync::mpsc::channel::<()>();
+        let started = std::time::Instant::now();
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let returned = runtime.block_on(async move {
+            let server = Server::new(APEX_TARGET);
+            let writer = std::thread::spawn(move || {
+                let _ = held.recv_timeout(WRITER_BLOCKS);
+            });
+            let mut st = server.state.write().await;
+            st.targets.get_mut("target-0").unwrap().sample_writer = Some(writer);
+            drop(st);
+            shut_down_targets(&server.state, BUDGET).await;
+            started.elapsed()
+        });
+        drop(runtime);
+        let ended = started.elapsed();
+        let _ = release.send(());
+
+        assert!(
+            returned >= BUDGET && returned < WRITER_BLOCKS / 2,
+            "shutdown returned after {returned:?}, its writers' budget {BUDGET:?}"
+        );
+        assert!(
+            ended < WRITER_BLOCKS / 2,
+            "the runtime ended after {ended:?}, held by a writer past its {BUDGET:?} budget"
+        );
+    }
+
+    /// @test A trim deletes the number of samples asked for, oldest
+    /// first: none for a count of 0, and a quarter of the target's
+    /// samples only when no count is given.
+    #[tokio::test]
+    async fn a_trim_deletes_what_it_is_asked_for() {
+        let server = Server::new(APEX_TARGET);
+        let samples: Vec<TelemetrySample> = (0..8u64)
+            .map(|i| sample("A.x", 1_000 + i, i as f64))
+            .collect();
+        server.db.insert_batch(&samples).unwrap();
+        let uri = "/api/targets/target-0/storage/trim";
+
+        for (body, deleted, left) in [
+            (json!({ "count": 0 }), 0, 8),
+            (json!({}), 2, 6),
+            (json!({ "count": 3 }), 3, 3),
+        ] {
+            let (status, answer) = server.post(uri, body.clone()).await;
+            assert_eq!(status, StatusCode::OK, "{body}: {answer}");
+            let answer: serde_json::Value = serde_json::from_str(&answer).unwrap();
+            assert_eq!(answer["deleted"], json!(deleted), "{body}");
+            assert_eq!(server.db.count().unwrap(), left, "{body}");
+        }
+    }
+
+    /* ---- What the read returns, the update takes back ---- */
+
+    /// @test Every field a tunable block reads takes the read's value
+    /// back and writes the block's own bytes: numbers as numbers, an
+    /// 8-byte integer as its decimal text, and a field the read returns
+    /// as hex (a string, an array, a shape it reads no number from, a
+    /// float that is not finite or is negative zero) as that hex, so the
+    /// values a read returns, given back, rewrite the block unchanged in
+    /// either byte order, junk after a string's NUL included. None of
+    /// those forms is one a browser's JSON changes: no number past 2^53
+    /// and no negative zero, which it writes as 0. Edits still go in as
+    /// values: text for a string, elements for an array.
+    #[test]
+    fn every_field_takes_back_what_the_read_returned() {
+        let fields = json!([
+            { "name": "count", "type": "uint", "offset": 0, "size": 2 },
+            { "name": "tag", "type": "string", "offset": 2, "size": 6 },
+            { "name": "taps", "type": "array", "offset": 8, "size": 8,
+              "element_type": "float", "dims": [2] },
+            { "name": "names", "type": "array", "offset": 16, "size": 8,
+              "element_type": "string", "dims": [2] },
+            { "name": "odd", "type": "uint", "offset": 24, "size": 3 },
+            { "name": "blob", "type": "nested", "offset": 27, "size": 5 },
+            { "name": "gain", "type": "float", "offset": 32, "size": 4 },
+            { "name": "scale", "type": "double", "offset": 36, "size": 8 },
+            { "name": "nought", "type": "float", "offset": 44, "size": 4 },
+            { "name": "nil", "type": "double", "offset": 48, "size": 8 },
+            { "name": "wide", "type": "int", "offset": 56, "size": 8 },
+            { "name": "huge", "type": "uint", "offset": 64, "size": 8 },
+        ]);
+        // The block in the given byte order: each scalar's bytes, and
+        // each element's, ordered as a big-endian writer would.
+        let block = |big_endian: bool| {
+            let order = |le: &[u8]| {
+                let mut bytes = le.to_vec();
+                if big_endian {
+                    bytes.reverse();
+                }
+                bytes
+            };
+            let mut out = order(&0x0102u16.to_le_bytes());
+            out.extend(b"ab\0\x7f\x01\x02");
+            out.extend(order(&1.5f32.to_le_bytes()));
+            out.extend(order(&(-2.0f32).to_le_bytes()));
+            out.extend(b"x\0\0\0yz\0\0");
+            out.extend([1, 2, 3, 9, 8, 7, 6, 5]);
+            out.extend(order(&f32::NAN.to_le_bytes()));
+            out.extend(order(&f64::INFINITY.to_le_bytes()));
+            out.extend(order(&(-0.0f32).to_le_bytes()));
+            out.extend(order(&(-0.0f64).to_le_bytes()));
+            out.extend(order(&(-9_007_199_254_740_993i64).to_le_bytes()));
+            out.extend(order(&u64::MAX.to_le_bytes()));
+            out
+        };
+
+        let mut refused = Vec::new();
+        for (stamp, big_endian) in [(None, false), (Some("le"), false), (Some("be"), true)] {
+            let bytes = block(big_endian);
+            assert_eq!(bytes.len(), 72);
+            let dicts = block_dicts(stamp, fields.clone(), 72);
+            let decoded = dicts
+                .decode_payload("Block", "BlockParams", &bytes)
+                .unwrap();
+            for (name, form) in [
+                ("nought", json!(hex::encode(&bytes[44..48]))),
+                ("nil", json!(hex::encode(&bytes[48..56]))),
+                ("wide", json!("-9007199254740993")),
+                ("huge", json!("18446744073709551615")),
+            ] {
+                assert_eq!(decoded[name], form, "{stamp:?} {name}");
+            }
+            let mut written = vec![0u8; 72];
+            for field in &dicts.components["Block"].structs["BlockParams"].fields {
+                let value = &decoded[&field.name];
+                if let Err(e) = encode_field(&mut written, field, value, big_endian) {
+                    refused.push(format!("{stamp:?} {}: {e}", field.name));
+                }
+            }
+            if refused.is_empty() {
+                assert_eq!(written, bytes, "{stamp:?}: {decoded}");
+            }
+        }
+        assert!(refused.is_empty(), "read values refused: {refused:#?}");
+
+        let dicts = block_dicts(None, fields, 72);
+        let fields = &dicts.components["Block"].structs["BlockParams"].fields;
+        let mut edited = block(false);
+        encode_field(&mut edited, &fields[1], &json!("new"), false).unwrap();
+        assert_eq!(&edited[2..8], b"new\0\0\0");
+        encode_field(&mut edited, &fields[2], &json!([0.5, 4.0]), false).unwrap();
+        assert_eq!(&edited[8..12], 0.5f32.to_le_bytes());
+        assert_eq!(&edited[12..16], 4.0f32.to_le_bytes());
+        for (field, wrong) in [
+            (&fields[1], json!("0102030405")),
+            (&fields[2], json!("abcd")),
+            (&fields[4], json!("01")),
+        ] {
+            assert!(
+                encode_field(&mut edited, field, &wrong, false).is_err(),
+                "{}: {wrong} taken",
+                field.name
+            );
+        }
+    }
+
+    /// @test An unedited Apply of the shipped SpecProtoMax tunable block
+    /// (float, string and integer arrays, a bounded string, scalars of
+    /// every width) is accepted: every field goes back as the read
+    /// returned it, and the update goes on to the upload, which the
+    /// unconnected link refuses.
+    #[tokio::test]
+    async fn an_unedited_apply_of_the_shipped_spec_block_goes_to_the_upload() {
+        let text = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../targets/sil-ops-demo/structs/SpecProtoMax.json"
+        ))
+        .unwrap();
+        let dict: ComponentDict = serde_json::from_str(&text).unwrap();
+        let dicts = StructDictionary {
+            components: HashMap::from([(dict.component.clone(), dict)]),
+        };
+        let mut raw = vec![0u8; 80];
+        raw[0..8].copy_from_slice(&2.5f64.to_le_bytes());
+        raw[24..28].copy_from_slice(&0.5f32.to_le_bytes());
+        for (i, tap) in [1.5f32, -2.0, 0.25].iter().enumerate() {
+            raw[36 + 4 * i..40 + 4 * i].copy_from_slice(&tap.to_le_bytes());
+        }
+        raw[52..55].copy_from_slice(b"abc");
+        raw[60..62].copy_from_slice(b"ab");
+        raw[64] = b'c';
+        raw[68..72].copy_from_slice(&[1, 2, 3, 4]);
+        raw[72] = 50;
+        raw[73] = (-3i8) as u8;
+        raw[74] = 1;
+        let fields = dicts
+            .decode_payload("SpecProtoMax", "SpecProtoMaxTunableParams", &raw)
+            .unwrap();
+
+        let server = Server::with_dicts(APEX_TARGET, dicts);
+        let (status, body) = server
+            .post(
+                "/api/targets/target-0/params/00D000/update",
+                json!({ "fields": fields, "raw_hex": hex::encode(&raw) }),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY, "{body}");
+        let audit = server.audit();
+        assert_eq!(
+            (audit[0].action.as_str(), audit[0].status.as_str()),
+            ("update_tprm", "err: not connected")
+        );
+    }
+
+    /// The commands a vehicle was sent: (opcode, payload), in order.
+    type SentCommands = Arc<std::sync::Mutex<Vec<(u16, Vec<u8>)>>>;
+
+    /// A vehicle on loopback for one connection: it answers an INSPECT
+    /// with `block`, and every other command with SUCCESS, and keeps
+    /// each command it is sent.
+    async fn fake_vehicle(block: Vec<u8>) -> (SocketAddr, SentCommands) {
+        use protocol::{aproto, slip};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let sent = SentCommands::default();
+        let log = sent.clone();
+        tokio::spawn(async move {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                return;
+            };
+            let mut decoder = slip::Decoder::new();
+            let mut buf = [0u8; 65536];
+            while let Ok(n @ 1..) = sock.read(&mut buf).await {
+                for frame in decoder.feed(&buf[..n]) {
+                    let Some(cmd) = aproto::parse_packet(&frame) else {
+                        continue;
+                    };
+                    log.lock()
+                        .unwrap()
+                        .push((cmd.header.opcode, cmd.payload.clone()));
+                    // ACK: the command's opcode and sequence, status
+                    // SUCCESS, an immediate result, then the extra.
+                    let mut ack = Vec::new();
+                    ack.extend(cmd.header.opcode.to_le_bytes());
+                    ack.extend(cmd.header.sequence.to_le_bytes());
+                    ack.extend([0, aproto::STAGE_RESULT, 0, 0]);
+                    if cmd.header.opcode == aproto::EXEC_INSPECT {
+                        ack.extend(&block);
+                    }
+                    let mut reply = Vec::new();
+                    reply.extend(aproto::MAGIC.to_le_bytes());
+                    reply.extend([aproto::VERSION, aproto::FLAG_RESPONSE]);
+                    reply.extend(0u32.to_le_bytes());
+                    reply.extend(aproto::SYS_ACK.to_le_bytes());
+                    reply.extend(0u16.to_le_bytes());
+                    reply.extend((ack.len() as u16).to_le_bytes());
+                    reply.extend(ack);
+                    if sock.write_all(&slip::encode(&reply)).await.is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        (addr, sent)
+    }
+
+    /// The tunable payload one upload carried: its FILE_CHUNK payloads
+    /// joined, each without its two-byte index, then past the v4
+    /// prelude.
+    fn uploaded_payload(sent: &SentCommands) -> Vec<u8> {
+        let stamped: Vec<u8> = sent
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(opcode, _)| *opcode == protocol::aproto::FILE_CHUNK)
+            .flat_map(|(_, payload)| payload[2..].to_vec())
+            .collect();
+        tprm::parse_v4(&stamped).unwrap().1.to_vec()
+    }
+
+    /// @test 8-byte integers keep every bit from the vehicle through the
+    /// console and back, in either byte order. The read of the shipped
+    /// SpecMatrix block gives iWide = 2^53 + 1 and uWide = 2^64 - 1 as
+    /// decimal strings in its JSON text, which a browser's JSON keeps
+    /// (it rounds a number past 2^53), and the console's unedited Apply,
+    /// that read sent back as JSON text, uploads the block's own bytes:
+    /// iWide's 0100000000002000 little-endian. Edits written as decimal
+    /// strings, 0x strings and JSON integers upload exactly at the signed
+    /// limits and 2^53 + 1. A value past its type, a fraction, an
+    /// exponent and a hex-bytes string fail with 400 naming the field,
+    /// and nothing reaches the vehicle.
+    #[tokio::test]
+    async fn eight_byte_tunables_cross_the_read_and_the_update_exactly() {
+        let shipped = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../targets/sil-ops-demo/structs/SpecMatrix.json"
+        ))
+        .unwrap();
+        let read_uri = "/api/targets/target-0/params/00D000";
+        let update_uri = "/api/targets/target-0/params/00D000/update";
+        for (byte_order, big_endian) in [(None, false), (Some("be"), true)] {
+            let mut dict: ComponentDict = serde_json::from_str(&shipped).unwrap();
+            dict.byte_order = byte_order.map(str::to_string);
+            let dicts = StructDictionary {
+                components: HashMap::from([(dict.component.clone(), dict)]),
+            };
+            // A value's bytes in this dictionary's order.
+            let ordered = |le: [u8; 8]| {
+                let mut bytes = le.to_vec();
+                if big_endian {
+                    bytes.reverse();
+                }
+                bytes
+            };
+            // SpecMatrixTunableParams: iWide int64 at 0, uWide uint64 at
+            // 8, precise double at 16, the rest left zero.
+            let mut block = vec![0u8; 80];
+            block[0..8].copy_from_slice(&ordered(9_007_199_254_740_993i64.to_le_bytes()));
+            block[8..16].copy_from_slice(&ordered(u64::MAX.to_le_bytes()));
+            block[16..24].copy_from_slice(&ordered(2.5f64.to_le_bytes()));
+            let raw_hex = hex::encode(&block);
+
+            let (vehicle, sent) = fake_vehicle(block.clone()).await;
+            let server = Server::with_dicts(APEX_TARGET, dicts);
+            let link = server.link("target-0").await;
+            link.lock()
+                .await
+                .connect(&vehicle.ip().to_string(), vehicle.port())
+                .await
+                .unwrap();
+
+            let (status, read) = server.get(read_uri).await;
+            assert_eq!(status, StatusCode::OK, "{read}");
+            assert!(
+                read.contains(r#""iWide":"9007199254740993""#)
+                    && read.contains(r#""uWide":"18446744073709551615""#),
+                "{byte_order:?}: {read}"
+            );
+
+            // The console's unedited Apply: the read's fields and bytes,
+            // back as JSON text.
+            let read: serde_json::Value = serde_json::from_str(&read).unwrap();
+            let unedited = json!({ "fields": read["fields"], "raw_hex": read["raw_hex"] });
+            sent.lock().unwrap().clear();
+            let (status, body) = server.post_text(update_uri, &unedited.to_string()).await;
+            assert_eq!(status, StatusCode::OK, "{byte_order:?}: {body}");
+            let payload = uploaded_payload(&sent);
+            assert_eq!(hex::encode(&payload), raw_hex, "{byte_order:?}: unedited");
+            if !big_endian {
+                assert_eq!(hex::encode(&payload[..8]), "0100000000002000");
+            }
+
+            for (fields, i_wide, u_wide) in [
+                (
+                    r#""iWide":"-9007199254740993","uWide":"0xFFFFFFFFFFFFFFFF""#,
+                    -9_007_199_254_740_993i64,
+                    u64::MAX,
+                ),
+                (
+                    r#""iWide":9223372036854775807,"uWide":9007199254740993"#,
+                    i64::MAX,
+                    9_007_199_254_740_993,
+                ),
+                (
+                    r#""iWide":"-9223372036854775808","uWide":"0x20000000000001""#,
+                    i64::MIN,
+                    9_007_199_254_740_993,
+                ),
+            ] {
+                sent.lock().unwrap().clear();
+                let text = format!(r#"{{"fields":{{{fields}}},"raw_hex":"{raw_hex}"}}"#);
+                let (status, body) = server.post_text(update_uri, &text).await;
+                assert_eq!(status, StatusCode::OK, "{byte_order:?} {fields}: {body}");
+                let mut want = block.clone();
+                want[0..8].copy_from_slice(&ordered(i_wide.to_le_bytes()));
+                want[8..16].copy_from_slice(&ordered(u_wide.to_le_bytes()));
+                assert_eq!(uploaded_payload(&sent), want, "{byte_order:?} {fields}");
+            }
+
+            for (fields, refusal) in [
+                (
+                    r#""iWide":"9223372036854775808""#,
+                    r#"iWide: "9223372036854775808" is outside int64's range"#,
+                ),
+                (
+                    r#""uWide":"18446744073709551616""#,
+                    r#"uWide: "18446744073709551616" is outside uint64's range"#,
+                ),
+                (r#""uWide":-1"#, "uWide: -1 is outside uint64's range"),
+                (r#""iWide":1.5"#, "iWide: 1.5 is not an integer"),
+                (r#""iWide":"1e3""#, r#"iWide: "1e3" is not an integer"#),
+                (
+                    r#""uWide":"ffffffffffffffff""#,
+                    r#"uWide: "ffffffffffffffff" is not an integer"#,
+                ),
+            ] {
+                sent.lock().unwrap().clear();
+                let text = format!(r#"{{"fields":{{{fields}}},"raw_hex":"{raw_hex}"}}"#);
+                let (status, body) = server.post_text(update_uri, &text).await;
+                assert_eq!(
+                    status,
+                    StatusCode::BAD_REQUEST,
+                    "{byte_order:?} {fields}: {body}"
+                );
+                assert!(body.contains(refusal), "{byte_order:?} {fields}: {body}");
+                assert!(
+                    sent.lock().unwrap().is_empty(),
+                    "{byte_order:?} {fields}: reached the vehicle"
+                );
+            }
+            link.lock().await.disconnect();
+        }
+    }
+
+    /// The text of the object or array `key` holds in JSON text, as it
+    /// stands: what a client that keeps a read's values sends back,
+    /// never parsed on the way.
+    fn member_text<'a>(json: &'a str, key: &str) -> &'a str {
+        let start = json.find(&format!("\"{key}\":")).unwrap() + key.len() + 3;
+        let (mut depth, mut in_string, mut escaped) = (0, false, false);
+        for (i, c) in json[start..].char_indices() {
+            if in_string {
+                match c {
+                    _ if escaped => escaped = false,
+                    '\\' => escaped = true,
+                    '"' => in_string = false,
+                    _ => {}
+                }
+                continue;
+            }
+            match c {
+                '"' => in_string = true,
+                '{' | '[' => depth += 1,
+                '}' | ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return &json[start..=start + i];
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("{key}: no object or array in {json}");
+    }
+
+    /// @test An unedited Apply writes every field back byte for byte,
+    /// in either byte order, read and sent through the real router as
+    /// JSON text. The read's text goes back unparsed, as a client that
+    /// keeps the read's values sends it, so a change could only come
+    /// from the server's own reading of its numbers. One flat block
+    /// holds a field of every kind the read distinguishes: unsigned and
+    /// signed integers of each width (8-byte ones as decimal text), a
+    /// bool, float32 values whose f64 text runs to 17 digits (0.1, the
+    /// smallest subnormal, the maximum), doubles that a parse correct
+    /// only to within a unit in the last place reads off by one
+    /// (0.23217103109965914 among them), both float spellings, negative
+    /// zero and non-finite floats, a string with bytes after its NUL,
+    /// numeric and string arrays, an odd width, an opaque blob, the
+    /// leaves of a nested fragment, and a byte no field covers. A header
+    /// + entries block of doubles, float32s and int64s does the same.
+    #[tokio::test]
+    async fn an_unedited_apply_writes_every_field_back_byte_for_byte() {
+        let read_uri = "/api/targets/target-0/params/00D000";
+        let update_uri = "/api/targets/target-0/params/00D000/update";
+        // Doubles serde_json's default float parsing reads back one unit
+        // in the last place off.
+        let doubles: [f64; 5] = [
+            0.23217103109965914,
+            1.0715660391465826e-75,
+            -1.603964615428183e143,
+            -1.81996730402717e-179,
+            1.5860846119992697e-265,
+        ];
+        let mut changed: Vec<String> = Vec::new();
+        let flat_fields = json!([
+            { "name": "u8", "type": "uint", "offset": 0, "size": 1 },
+            { "name": "u16", "type": "uint", "offset": 1, "size": 2 },
+            { "name": "u32", "type": "uint", "offset": 3, "size": 4 },
+            { "name": "u64", "type": "uint", "offset": 7, "size": 8 },
+            { "name": "i8", "type": "int", "offset": 15, "size": 1 },
+            { "name": "i16", "type": "int", "offset": 16, "size": 2 },
+            { "name": "i32", "type": "int", "offset": 18, "size": 4 },
+            { "name": "i64", "type": "int", "offset": 22, "size": 8 },
+            { "name": "flag", "type": "bool", "offset": 30, "size": 1 },
+            { "name": "tenth", "type": "float", "offset": 32, "size": 4 },
+            { "name": "least", "type": "float", "offset": 36, "size": 4 },
+            { "name": "most", "type": "float", "offset": 40, "size": 4 },
+            { "name": "nought", "type": "float", "offset": 44, "size": 4 },
+            { "name": "nan", "type": "float", "offset": 48, "size": 4 },
+            { "name": "gain", "type": "float", "offset": 52, "size": 8 },
+            { "name": "tiny", "type": "float", "offset": 60, "size": 8 },
+            { "name": "vast", "type": "double", "offset": 68, "size": 8 },
+            { "name": "nil", "type": "double", "offset": 76, "size": 8 },
+            { "name": "inf", "type": "double", "offset": 84, "size": 8 },
+            { "name": "tag", "type": "string", "offset": 92, "size": 6 },
+            { "name": "taps", "type": "array", "offset": 98, "size": 8,
+              "element_type": "float", "dims": [2] },
+            { "name": "names", "type": "array", "offset": 106, "size": 8,
+              "element_type": "string", "dims": [2] },
+            { "name": "odd", "type": "uint", "offset": 114, "size": 3 },
+            { "name": "blob", "type": "nested", "offset": 117, "size": 5 },
+            { "name": "pair", "type": "nested", "offset": 122, "size": 20, "struct": "Pair" },
+        ]);
+        for (byte_order, big_endian) in [(None, false), (Some("be"), true)] {
+            // A value's bytes in this dictionary's order.
+            let ordered = |le: &[u8]| {
+                let mut bytes = le.to_vec();
+                if big_endian {
+                    bytes.reverse();
+                }
+                bytes
+            };
+            let mut block = vec![200u8];
+            for le in [
+                &0xBEEFu16.to_le_bytes()[..],
+                &0xDEAD_BEEFu32.to_le_bytes(),
+                &9_007_199_254_740_993u64.to_le_bytes(),
+                &(-5i8).to_le_bytes(),
+                &(-300i16).to_le_bytes(),
+                &(-70_000i32).to_le_bytes(),
+                &(-9_007_199_254_740_993i64).to_le_bytes(),
+            ] {
+                block.extend(ordered(le));
+            }
+            block.extend([1, 0x5A]);
+            for v in [0.1f32, f32::from_bits(1), f32::MAX, -0.0, f32::NAN] {
+                block.extend(ordered(&v.to_le_bytes()));
+            }
+            for v in [doubles[0], doubles[1], doubles[2], -0.0, f64::INFINITY] {
+                block.extend(ordered(&v.to_le_bytes()));
+            }
+            block.extend(b"ab\0\x7f\x01\x02");
+            block.extend(ordered(&1.5f32.to_le_bytes()));
+            block.extend(ordered(&(-2.0f32).to_le_bytes()));
+            block.extend(b"x\0\0\0yz\0\0");
+            block.extend([1, 2, 3, 9, 8, 7, 6, 5]);
+            for (lo, d) in [(0x0102u16, doubles[3]), (0x0304, doubles[4])] {
+                block.extend(ordered(&lo.to_le_bytes()));
+                block.extend(ordered(&d.to_le_bytes()));
+            }
+            assert_eq!(block.len(), 142);
+            let dict: ComponentDict = serde_json::from_value(json!({
+                "component": "Mix",
+                "byte_order": byte_order,
+                "structs": {
+                    "MixParams": { "category": "TUNABLE_PARAM", "size": 142, "fields": flat_fields },
+                    "Pair": { "category": "STRUCT", "size": 10, "fields": [
+                        { "name": "lo", "type": "uint", "offset": 0, "size": 2 },
+                        { "name": "d", "type": "float", "offset": 2, "size": 8 },
+                    ]},
+                },
+            }))
+            .unwrap();
+            let leaves = crate::core::config_manager::expanded_fields(
+                &dict,
+                &dict.structs["MixParams"].fields,
+                0,
+            );
+            let dicts = StructDictionary {
+                components: HashMap::from([("Mix".to_string(), dict)]),
+            };
+
+            let (vehicle, sent) = fake_vehicle(block.clone()).await;
+            let server = Server::with_dicts(APEX_TARGET, dicts);
+            let link = server.link("target-0").await;
+            link.lock()
+                .await
+                .connect(&vehicle.ip().to_string(), vehicle.port())
+                .await
+                .unwrap();
+            let (status, read) = server.get(read_uri).await;
+            assert_eq!(status, StatusCode::OK, "{read}");
+            assert!(read.contains("\"gain\":0.23217103109965914"), "{read}");
+            sent.lock().unwrap().clear();
+            let unedited = format!(
+                r#"{{"fields":{},"raw_hex":"{}"}}"#,
+                member_text(&read, "fields"),
+                hex::encode(&block)
+            );
+            let (status, body) = server.post_text(update_uri, &unedited).await;
+            assert_eq!(status, StatusCode::OK, "{byte_order:?}: {body}");
+            let payload = uploaded_payload(&sent);
+            changed.extend(
+                leaves
+                    .iter()
+                    .map(|f| (f.name.as_str(), f.offset..f.offset + f.size))
+                    .chain([("(no field)", 31..32)])
+                    .filter(|(_, at)| payload[at.clone()] != block[at.clone()])
+                    .map(|(name, at)| {
+                        format!(
+                            "{byte_order:?} {name}: wrote {} for {}",
+                            hex::encode(&payload[at.clone()]),
+                            hex::encode(&block[at])
+                        )
+                    }),
+            );
+            link.lock().await.disconnect();
+
+            // A header + entries block: a uint16 count, then entries of
+            // a double, a float32 and an int64.
+            let mut table = ordered(&2u16.to_le_bytes());
+            for (d, f, w) in [
+                (doubles[0], 0.1f32, -9_007_199_254_740_993i64),
+                (doubles[2], f32::MAX, i64::MAX),
+            ] {
+                table.extend(ordered(&d.to_le_bytes()));
+                table.extend(ordered(&f.to_le_bytes()));
+                table.extend(ordered(&w.to_le_bytes()));
+            }
+            let dict: ComponentDict = serde_json::from_value(json!({
+                "component": "Table",
+                "byte_order": byte_order,
+                "structs": {
+                    "TableHeader": { "category": "TUNABLE_PARAM", "size": 2, "fields": [
+                        { "name": "n", "type": "uint", "offset": 0, "size": 2 },
+                    ]},
+                    "TableEntry": { "category": "TUNABLE_PARAM", "size": 20, "fields": [
+                        { "name": "d", "type": "float", "offset": 0, "size": 8 },
+                        { "name": "f", "type": "float", "offset": 8, "size": 4 },
+                        { "name": "w", "type": "int", "offset": 12, "size": 8 },
+                    ]},
+                },
+            }))
+            .unwrap();
+            let dicts = StructDictionary {
+                components: HashMap::from([("Table".to_string(), dict)]),
+            };
+            let (vehicle, sent) = fake_vehicle(table.clone()).await;
+            let server = Server::with_dicts(APEX_TARGET, dicts);
+            let link = server.link("target-0").await;
+            link.lock()
+                .await
+                .connect(&vehicle.ip().to_string(), vehicle.port())
+                .await
+                .unwrap();
+            let (status, read) = server.get(read_uri).await;
+            assert_eq!(status, StatusCode::OK, "{read}");
+            assert!(read.contains(r#""variable_length":true"#), "{read}");
+            let fields = member_text(&read, "fields");
+            sent.lock().unwrap().clear();
+            let unedited = format!(
+                r#"{{"fields":{},"entries":{},"variable_length":true,"raw_hex":"{}"}}"#,
+                member_text(fields, "header"),
+                member_text(fields, "entries"),
+                hex::encode(&table)
+            );
+            let (status, body) = server.post_text(update_uri, &unedited).await;
+            assert_eq!(status, StatusCode::OK, "{byte_order:?}: {body}");
+            let payload = uploaded_payload(&sent);
+            for (i, at) in [0..2, 2..10, 10..14, 14..22, 22..30, 30..34, 34..42]
+                .into_iter()
+                .enumerate()
+            {
+                if payload[at.clone()] != table[at.clone()] {
+                    changed.push(format!(
+                        "{byte_order:?} table bytes {at:?} (part {i}): wrote {} for {}",
+                        hex::encode(&payload[at.clone()]),
+                        hex::encode(&table[at.clone()])
+                    ));
+                }
+            }
+            link.lock().await.disconnect();
+        }
+        assert!(changed.is_empty(), "changed: {changed:#?}");
+    }
+
+    /* ---- The rails judge a field sent in its hex form ---- */
+
+    /// @test The rails judge a field sent as the hex of its bytes by the
+    /// value those bytes hold, through the real router: 11.0's hex on a
+    /// double with max 10, the hex of +inf there, and a uint64 array's
+    /// hex holding 2^64 - 1 under max 100 are each refused with 422
+    /// naming the field, and nothing reaches the vehicle, as their JSON
+    /// forms (11, [101, 1]) are. Hex forms inside the rails upload.
+    #[tokio::test]
+    async fn the_rails_judge_a_field_sent_as_its_hex() {
+        let dict: ComponentDict = serde_json::from_value(json!({
+            "component": "Rails",
+            "structs": { "RailsParams": { "category": "TUNABLE_PARAM", "size": 24, "fields": [
+                { "name": "d", "type": "double", "offset": 0, "size": 8,
+                  "constraints": { "max": 10 } },
+                { "name": "list", "type": "array", "offset": 8, "size": 16,
+                  "element_type": "uint", "dims": [2], "constraints": { "max": 100 } },
+            ]}},
+        }))
+        .unwrap();
+        let dicts = StructDictionary {
+            components: HashMap::from([("Rails".to_string(), dict)]),
+        };
+        let mut block = 1.0f64.to_le_bytes().to_vec();
+        block.extend(1u64.to_le_bytes());
+        block.extend(2u64.to_le_bytes());
+        let raw_hex = hex::encode(&block);
+        let (vehicle, sent) = fake_vehicle(block).await;
+        let server = Server::with_dicts(APEX_TARGET, dicts);
+        let link = server.link("target-0").await;
+        link.lock()
+            .await
+            .connect(&vehicle.ip().to_string(), vehicle.port())
+            .await
+            .unwrap();
+        let uri = "/api/targets/target-0/params/00D000/update";
+        let update = |fields: &str| format!(r#"{{"fields":{{{fields}}},"raw_hex":"{raw_hex}"}}"#);
+        let mut wrong = Vec::new();
+
+        for (fields, refusal) in [
+            (r#""d":"0000000000002640""#, "d: 11 above max 10"),
+            (
+                r#""d":"000000000000f07f""#,
+                "d: inf is not finite, so outside the rails",
+            ),
+            (
+                r#""list":"ffffffffffffffff0100000000000000""#,
+                "list: 18446744073709551615 above max 100",
+            ),
+            (r#""d":11"#, "d: 11 above max 10"),
+            (r#""list":[101,1]"#, "list: 101 above max 100"),
+        ] {
+            sent.lock().unwrap().clear();
+            let (status, body) = server.post_text(uri, &update(fields)).await;
+            let reached = !sent.lock().unwrap().is_empty();
+            let want = format!("Constraint violation(s): {refusal}");
+            if (status, body.as_str(), reached)
+                != (StatusCode::UNPROCESSABLE_ENTITY, want.as_str(), false)
+            {
+                wrong.push(format!(
+                    "{fields}: {status} {body} (reached the vehicle: {reached})"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+
+        sent.lock().unwrap().clear();
+        let inside = r#""d":"0000000000002440","list":"64000000000000000100000000000000""#;
+        let (status, body) = server.post_text(uri, &update(inside)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let mut want = 10.0f64.to_le_bytes().to_vec();
+        want.extend(100u64.to_le_bytes());
+        want.extend(1u64.to_le_bytes());
+        assert_eq!(uploaded_payload(&sent), want);
+        link.lock().await.disconnect();
+    }
+
+    /// @test The hex and JSON forms of the same bytes get one verdict
+    /// from the rails, in either byte order: a double past its max, at
+    /// it and at negative zero; float32s at the nearest value to a
+    /// decimal rail and one step past, and exactly at a rail and one step
+    /// past; uint64 and int16 arrays one past a rail and at it; a float32
+    /// array at both rails and one step past. A non-finite element in
+    /// hex is outside the rails.
+    #[test]
+    fn hex_and_json_forms_of_the_same_bytes_get_one_verdict() {
+        // A field's definition, the values its bytes hold, and whether
+        // they lie outside its rails.
+        enum Held {
+            Double(f64),
+            Single(f32),
+            Wide(Vec<u64>),
+            Short(Vec<i16>),
+            Singles(Vec<f32>),
+        }
+        // The next float32 above a positive value, and below a nonzero one.
+        let above = |x: f32| f32::from_bits(x.to_bits() + 1);
+        let below = |x: f32| {
+            if x > 0.0 {
+                f32::from_bits(x.to_bits() - 1)
+            } else {
+                f32::from_bits(x.to_bits() + 1)
+            }
+        };
+        let field = |ty: &str,
+                     size: usize,
+                     element: Option<(&str, usize)>,
+                     rails: serde_json::Value| {
+            let mut def =
+                json!({ "name": "f", "type": ty, "offset": 0, "size": size, "constraints": rails });
+            if let Some((element_type, count)) = element {
+                def["element_type"] = json!(element_type);
+                def["dims"] = json!([count]);
+            }
+            serde_json::from_value::<FieldDef>(def).unwrap()
+        };
+        let double = field("double", 8, None, json!({ "min": 0, "max": 10 }));
+        let tenth = field("float", 4, None, json!({ "min": 0.1 }));
+        let capped = field("float", 4, None, json!({ "max": 2.5 }));
+        let wide = field("array", 16, Some(("uint", 2)), json!({ "max": 100 }));
+        let short = field("array", 4, Some(("int", 2)), json!({ "min": -5 }));
+        let gains = field(
+            "array",
+            16,
+            Some(("float", 4)),
+            json!({ "min": -1.0, "max": 1.0 }),
+        );
+        let rows: Vec<(&FieldDef, Held, bool)> = vec![
+            (&double, Held::Double(11.0), true),
+            (&double, Held::Double(10.0), false),
+            (&double, Held::Double(-0.0), false),
+            (&tenth, Held::Single(0.1), false),
+            (&tenth, Held::Single(below(0.1)), true),
+            (&capped, Held::Single(2.5), false),
+            (&capped, Held::Single(above(2.5)), true),
+            (&wide, Held::Wide(vec![u64::MAX, 1]), true),
+            (&wide, Held::Wide(vec![101, 1]), true),
+            (&wide, Held::Wide(vec![100, 0]), false),
+            (&short, Held::Short(vec![-6, 0]), true),
+            (&short, Held::Short(vec![-5, 3]), false),
+            (&gains, Held::Singles(vec![1.0, -1.0, 0.5, 0.0]), false),
+            (&gains, Held::Singles(vec![above(1.0), 0.0, 0.0, 0.0]), true),
+            (
+                &gains,
+                Held::Singles(vec![0.0, below(-1.0), 0.0, 0.0]),
+                true,
+            ),
+        ];
+
+        let mut wrong = Vec::new();
+        for big_endian in [false, true] {
+            let ordered = |le: &[u8]| {
+                let mut bytes = le.to_vec();
+                if big_endian {
+                    bytes.reverse();
+                }
+                bytes
+            };
+            for (def, held, outside) in &rows {
+                let (bytes, json_form): (Vec<u8>, serde_json::Value) = match held {
+                    Held::Double(x) => (ordered(&x.to_le_bytes()), json!(x)),
+                    Held::Single(x) => (ordered(&x.to_le_bytes()), json!(f64::from(*x))),
+                    Held::Wide(v) => (
+                        v.iter().flat_map(|x| ordered(&x.to_le_bytes())).collect(),
+                        json!(v),
+                    ),
+                    Held::Short(v) => (
+                        v.iter().flat_map(|x| ordered(&x.to_le_bytes())).collect(),
+                        json!(v),
+                    ),
+                    Held::Singles(v) => (
+                        v.iter().flat_map(|x| ordered(&x.to_le_bytes())).collect(),
+                        json!(v.iter().map(|x| f64::from(*x)).collect::<Vec<_>>()),
+                    ),
+                };
+                let verdict = |form: serde_json::Value| {
+                    let edits = serde_json::Map::from_iter([("f".to_string(), form)]);
+                    constraint_violations(std::slice::from_ref(*def), &edits, big_endian)
+                };
+                let (by_hex, by_json) = (verdict(json!(hex::encode(&bytes))), verdict(json_form));
+                if by_hex != by_json || by_hex.is_empty() == *outside {
+                    wrong.push(format!(
+                        "be {big_endian} {} {}: hex {by_hex:?}, json {by_json:?}",
+                        def.field_type,
+                        hex::encode(&bytes)
+                    ));
+                }
+            }
+            let nan: Vec<u8> = [f32::NAN, 0.0, 0.0, 0.0]
+                .iter()
+                .flat_map(|x| ordered(&x.to_le_bytes()))
+                .collect();
+            let edits = serde_json::Map::from_iter([("f".to_string(), json!(hex::encode(&nan)))]);
+            let verdict = constraint_violations(std::slice::from_ref(&gains), &edits, big_endian);
+            if verdict != ["f: NaN is not finite, so outside the rails"] {
+                wrong.push(format!("be {big_endian} NaN element: {verdict:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "verdicts differ or miss: {wrong:#?}");
+    }
+
+    /// @test Every railed tunable block the shipped dictionaries define
+    /// applies unedited: filled with each field's dictionary value, read
+    /// through the router and sent back as the read's JSON text, its hex
+    /// forms included, each passes its rails and uploads its own bytes.
+    #[tokio::test]
+    async fn every_railed_shipped_block_applies_unedited() {
+        let targets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../targets");
+        let mut seen = std::collections::HashSet::new();
+        let mut blocks = Vec::new();
+        let mut dirs: Vec<_> = std::fs::read_dir(&targets)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        dirs.sort();
+        for dir in dirs {
+            let Ok(files) = std::fs::read_dir(dir.join("structs")) else {
+                continue;
+            };
+            let mut files: Vec<_> = files.flatten().map(|e| e.path()).collect();
+            files.sort();
+            for path in files {
+                let Ok(dict) = serde_json::from_str::<ComponentDict>(
+                    &std::fs::read_to_string(&path).unwrap_or_default(),
+                ) else {
+                    continue;
+                };
+                for (name, sdef) in &dict.structs {
+                    let railed = sdef.fields.iter().any(|f| f.constraints.is_some());
+                    let key = (
+                        dict.component.clone(),
+                        name.clone(),
+                        serde_json::to_string(&sdef.fields).unwrap(),
+                    );
+                    if sdef.category == "TUNABLE_PARAM" && railed && seen.insert(key) {
+                        blocks.push((dict.clone(), name.clone()));
+                    }
+                }
+            }
+        }
+        assert!(!blocks.is_empty(), "no railed shipped block found");
+
+        let uri = "/api/targets/target-0/params/00D000";
+        let mut refused = Vec::new();
+        for (mut dict, name) in blocks {
+            // This block and the fragments it nests, nothing a read could
+            // pair it with.
+            dict.structs
+                .retain(|n, s| *n == name || s.category != "TUNABLE_PARAM");
+            let sdef = &dict.structs[&name];
+            let mut block = vec![0u8; sdef.size];
+            for field in crate::core::config_manager::expanded_fields(&dict, &sdef.fields, 0) {
+                if !field.value.is_null() {
+                    let _ = encode_field(&mut block, &field, &field.value, dict.big_endian());
+                }
+            }
+            let component = dict.component.clone();
+            let dicts = StructDictionary {
+                components: HashMap::from([(component.clone(), dict)]),
+            };
+            let (vehicle, sent) = fake_vehicle(block.clone()).await;
+            let server = Server::with_dicts(APEX_TARGET, dicts);
+            let link = server.link("target-0").await;
+            link.lock()
+                .await
+                .connect(&vehicle.ip().to_string(), vehicle.port())
+                .await
+                .unwrap();
+            let (status, read) = server.get(uri).await;
+            assert_eq!(status, StatusCode::OK, "{component} {name}: {read}");
+            sent.lock().unwrap().clear();
+            let unedited = format!(
+                r#"{{"fields":{},"raw_hex":"{}"}}"#,
+                member_text(&read, "fields"),
+                hex::encode(&block)
+            );
+            let (status, body) = server.post_text(&format!("{uri}/update"), &unedited).await;
+            if status != StatusCode::OK {
+                refused.push(format!("{component} {name}: {status} {body}"));
+            } else if uploaded_payload(&sent) != block {
+                refused.push(format!("{component} {name}: uploaded other bytes"));
+            }
+            link.lock().await.disconnect();
+        }
+        assert!(refused.is_empty(), "{refused:#?}");
+    }
+
+    /// @test The rails judge each element of an array by the value its
+    /// bytes hold, whatever form it comes in, through the real router:
+    /// a float32 element sent as the hex of 11.0 or of +inf under max 10,
+    /// and a double element sent as the hex of 11.0 or of NaN there, are
+    /// refused with 422 naming the field, and nothing reaches the
+    /// vehicle, as 11 as a number and the whole field's hex are. Element
+    /// hex inside the rails uploads.
+    #[tokio::test]
+    async fn the_rails_judge_each_array_element_in_any_form() {
+        let dict: ComponentDict = serde_json::from_value(json!({
+            "component": "Elements",
+            "structs": { "ElementsParams": { "category": "TUNABLE_PARAM", "size": 16, "fields": [
+                { "name": "fl", "type": "array", "offset": 0, "size": 8,
+                  "element_type": "float", "dims": [2], "constraints": { "max": 10 } },
+                { "name": "dl", "type": "array", "offset": 8, "size": 8,
+                  "element_type": "double", "dims": [1], "constraints": { "max": 10 } },
+            ]}},
+        }))
+        .unwrap();
+        let dicts = StructDictionary {
+            components: HashMap::from([("Elements".to_string(), dict)]),
+        };
+        let mut block = 1.0f32.to_le_bytes().to_vec();
+        block.extend(2.0f32.to_le_bytes());
+        block.extend(3.0f64.to_le_bytes());
+        let raw_hex = hex::encode(&block);
+        let (vehicle, sent) = fake_vehicle(block).await;
+        let server = Server::with_dicts(APEX_TARGET, dicts);
+        let link = server.link("target-0").await;
+        link.lock()
+            .await
+            .connect(&vehicle.ip().to_string(), vehicle.port())
+            .await
+            .unwrap();
+        let uri = "/api/targets/target-0/params/00D000/update";
+        let update = |fields: &str| format!(r#"{{"fields":{{{fields}}},"raw_hex":"{raw_hex}"}}"#);
+        let mut wrong = Vec::new();
+
+        for (fields, refusal) in [
+            (r#""fl":["00003041",0]"#, "fl: 11 above max 10"),
+            (
+                r#""fl":[0,"0000807f"]"#,
+                "fl: inf is not finite, so outside the rails",
+            ),
+            (r#""dl":["0000000000002640"]"#, "dl: 11 above max 10"),
+            (
+                r#""dl":["000000000000f87f"]"#,
+                "dl: NaN is not finite, so outside the rails",
+            ),
+            (r#""fl":[11,0]"#, "fl: 11 above max 10"),
+            (r#""fl":"0000304100000000""#, "fl: 11 above max 10"),
+        ] {
+            sent.lock().unwrap().clear();
+            let (status, body) = server.post_text(uri, &update(fields)).await;
+            let reached = !sent.lock().unwrap().is_empty();
+            let want = format!("Constraint violation(s): {refusal}");
+            if (status, body.as_str(), reached)
+                != (StatusCode::UNPROCESSABLE_ENTITY, want.as_str(), false)
+            {
+                wrong.push(format!(
+                    "{fields}: {status} {body} (reached the vehicle: {reached})"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+
+        sent.lock().unwrap().clear();
+        let inside = r#""fl":["00002041",1],"dl":["0000000000002440"]"#;
+        let (status, body) = server.post_text(uri, &update(inside)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let mut want = 10.0f32.to_le_bytes().to_vec();
+        want.extend(1.0f32.to_le_bytes());
+        want.extend(10.0f64.to_le_bytes());
+        assert_eq!(uploaded_payload(&sent), want);
+        link.lock().await.disconnect();
+    }
+
+    /// @test A float32 gets one verdict from its rails in every form,
+    /// in either byte order, as a field or as an array element: the
+    /// number as an operator writes it, the hex of the bytes it is
+    /// written as (whole, or as the element's own hex), and the number
+    /// the read gives for those bytes. A value equal to a rail as the
+    /// dictionary writes it is inside: 0.1 under max 0.1, 0.2, 0.3 and
+    /// 0.001 likewise, 0.7 over min 0.7, 0.1 and 0.5 in the allowed set
+    /// [0.1, 0.5], 1000.1 and 100000.1 on a step of 0.1, and the largest
+    /// float32 under max 3.4028234663852886e38. The float32 one step past
+    /// each rail, and a value off its step or out of its set, is outside.
+    #[test]
+    fn a_float32_gets_one_verdict_in_every_form() {
+        // The float32 one step above, and below, a positive value.
+        let above = |x: f32| f32::from_bits(x.to_bits() + 1);
+        let below = |x: f32| f32::from_bits(x.to_bits() - 1);
+        // Rails, an element inside them to pair a value with in an
+        // array, then each value as written (a float32, and the number
+        // text an operator types for it) and whether it is inside.
+        type Row = (serde_json::Value, f32, Vec<(f32, String, bool)>);
+        let past = |x: f32| (x, format!("{x}"), false);
+        let rows: Vec<Row> = vec![
+            (
+                json!({ "max": 0.1 }),
+                0.0,
+                vec![(0.1, "0.1".into(), true), past(above(0.1))],
+            ),
+            (
+                json!({ "max": 0.2 }),
+                0.0,
+                vec![(0.2, "0.2".into(), true), past(above(0.2))],
+            ),
+            (
+                json!({ "max": 0.3 }),
+                0.0,
+                vec![(0.3, "0.3".into(), true), past(above(0.3))],
+            ),
+            (
+                json!({ "max": 0.001 }),
+                0.0,
+                vec![(0.001, "0.001".into(), true), past(above(0.001))],
+            ),
+            (
+                json!({ "min": 0.7 }),
+                0.7,
+                vec![(0.7, "0.7".into(), true), past(below(0.7))],
+            ),
+            (
+                json!({ "allowed": [0.1, 0.5] }),
+                0.5,
+                vec![
+                    (0.1, "0.1".into(), true),
+                    (0.5, "0.5".into(), true),
+                    (0.3, "0.3".into(), false),
+                    past(above(0.1)),
+                ],
+            ),
+            (
+                json!({ "step": 0.1 }),
+                0.0,
+                vec![
+                    (1000.1, "1000.1".into(), true),
+                    (100000.1, "100000.1".into(), true),
+                    (1000.15, "1000.15".into(), false),
+                    (0.15, "0.15".into(), false),
+                ],
+            ),
+            (
+                json!({ "max": 3.4028234663852886e38 }),
+                0.0,
+                vec![(
+                    f32::MAX,
+                    "340282350000000000000000000000000000000".into(),
+                    true,
+                )],
+            ),
+        ];
+
+        let mut wrong = Vec::new();
+        for big_endian in [false, true] {
+            let ordered = |x: f32| {
+                let mut bytes = x.to_le_bytes().to_vec();
+                if big_endian {
+                    bytes.reverse();
+                }
+                bytes
+            };
+            for (rails, filler, values) in &rows {
+                let scalar: FieldDef = serde_json::from_value(json!({
+                    "name": "f", "type": "float", "offset": 0, "size": 4, "constraints": rails,
+                }))
+                .unwrap();
+                let pair: FieldDef = serde_json::from_value(json!({
+                    "name": "f", "type": "array", "offset": 0, "size": 8,
+                    "element_type": "float", "dims": [2], "constraints": rails,
+                }))
+                .unwrap();
+                for (x, typed, inside) in values {
+                    let typed: serde_json::Value = serde_json::from_str(typed).unwrap();
+                    assert_eq!(
+                        typed.as_f64().map(|t| t as f32),
+                        Some(*x),
+                        "{typed} is not {x}"
+                    );
+                    let hex = json!(hex::encode(ordered(*x)));
+                    let read = json!(f64::from(*x));
+                    let mut pair_hex = ordered(*x);
+                    pair_hex.extend(ordered(*filler));
+                    let other = json!(f64::from(*filler));
+                    let forms = [
+                        (&scalar, typed.clone()),
+                        (&scalar, hex.clone()),
+                        (&scalar, read.clone()),
+                        (&pair, json!([typed, other])),
+                        (&pair, json!([hex, other])),
+                        (&pair, json!([read, other])),
+                        (&pair, json!(hex::encode(pair_hex))),
+                    ];
+                    let verdicts: Vec<Vec<String>> = forms
+                        .iter()
+                        .map(|(def, form)| {
+                            let edits =
+                                serde_json::Map::from_iter([("f".to_string(), form.clone())]);
+                            constraint_violations(std::slice::from_ref(*def), &edits, big_endian)
+                        })
+                        .collect();
+                    if verdicts.iter().any(|v| *v != verdicts[0])
+                        || verdicts[0].is_empty() != *inside
+                    {
+                        wrong.push(format!("be {big_endian} {rails} {x}: {verdicts:?}"));
+                    }
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "verdicts differ or miss: {wrong:#?}");
+    }
+
+    /// @test A float32 applied at its rail applies again unedited, in
+    /// either byte order, through the real router: 0.1 under max 0.1 is
+    /// accepted and written as the float32 nearest 0.1, the read then
+    /// gives that float32 as 0.10000000149011612, and sending the read
+    /// back unedited is accepted and writes the same bytes.
+    #[tokio::test]
+    async fn a_float32_applied_at_its_rail_applies_again_unedited() {
+        for (byte_order, big_endian) in [(None, false), (Some("be"), true)] {
+            let dicts = || {
+                let dict: ComponentDict = serde_json::from_value(json!({
+                    "component": "Fine",
+                    "byte_order": byte_order,
+                    "structs": { "FineParams": { "category": "TUNABLE_PARAM", "size": 4, "fields": [
+                        { "name": "f", "type": "float", "offset": 0, "size": 4,
+                          "constraints": { "max": 0.1 } },
+                    ]}},
+                }))
+                .unwrap();
+                StructDictionary {
+                    components: HashMap::from([("Fine".to_string(), dict)]),
+                }
+            };
+            let mut tenth = 0.1f32.to_le_bytes().to_vec();
+            if big_endian {
+                tenth.reverse();
+            }
+            let uri = "/api/targets/target-0/params/00D000";
+
+            let (vehicle, sent) = fake_vehicle(vec![0; 4]).await;
+            let server = Server::with_dicts(APEX_TARGET, dicts());
+            let link = server.link("target-0").await;
+            link.lock()
+                .await
+                .connect(&vehicle.ip().to_string(), vehicle.port())
+                .await
+                .unwrap();
+            let (status, body) = server
+                .post_text(
+                    &format!("{uri}/update"),
+                    r#"{"fields":{"f":0.1},"raw_hex":"00000000"}"#,
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{byte_order:?} apply: {body}");
+            let written = uploaded_payload(&sent);
+            assert_eq!(written, tenth, "{byte_order:?}");
+            link.lock().await.disconnect();
+
+            // The vehicle now holds what was written; read it back and
+            // send the read back unedited.
+            let (vehicle, sent) = fake_vehicle(written.clone()).await;
+            link.lock()
+                .await
+                .connect(&vehicle.ip().to_string(), vehicle.port())
+                .await
+                .unwrap();
+            let (status, read) = server.get(uri).await;
+            assert_eq!(status, StatusCode::OK, "{read}");
+            assert!(read.contains(r#""f":0.10000000149011612"#), "{read}");
+            sent.lock().unwrap().clear();
+            let unedited = format!(
+                r#"{{"fields":{},"raw_hex":"{}"}}"#,
+                member_text(&read, "fields"),
+                hex::encode(&written)
+            );
+            let (status, body) = server.post_text(&format!("{uri}/update"), &unedited).await;
+            assert_eq!(status, StatusCode::OK, "{byte_order:?} re-apply: {body}");
+            assert_eq!(uploaded_payload(&sent), written, "{byte_order:?}");
+            link.lock().await.disconnect();
+        }
+    }
 }

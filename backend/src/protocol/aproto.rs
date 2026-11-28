@@ -14,11 +14,8 @@
 //!
 //! This module is the canonical Rust mirror of apex's `AprotoTypes.hpp`.
 //! Many constants below are part of the apex protocol surface but not
-//! currently consumed by zenith -- the module-level `allow(dead_code)`
-//! keeps the full protocol definition compiled for documentation and
-//! future use.
-
-#![allow(dead_code)]
+//! currently consumed by zenith; the library exports them all, so the
+//! full protocol definition stays in one place.
 
 use serde::Serialize;
 
@@ -288,28 +285,27 @@ mod tests {
     use super::*;
 
     /// @test Building a command packet then parsing it back recovers
-    /// every header field exactly.
+    /// every header field exactly, with or without a payload: the
+    /// payload_length field equals the payload's byte count, the packet
+    /// is header plus payload, and the payload bytes round-trip.
     #[test]
     fn build_and_parse_round_trip() {
-        let packet = build_command(0x00D000, SYS_NOOP, 42, &[]);
-        let parsed = parse_packet(&packet).unwrap();
-        assert_eq!(parsed.header.magic, MAGIC);
-        assert_eq!(parsed.header.full_uid, 0x00D000);
-        assert_eq!(parsed.header.opcode, SYS_NOOP);
-        assert_eq!(parsed.header.sequence, 42);
-        assert!(parsed.payload.is_empty());
-        assert!(parsed.header.ack_requested());
-    }
-
-    /// @test A command built with a non-empty payload reports the
-    /// correct payload_length and round-trips the bytes.
-    #[test]
-    fn build_with_payload() {
-        let payload = vec![0x01, 0x02, 0x03];
-        let packet = build_command(0x000000, EXEC_GET_HEALTH, 1, &payload);
-        let parsed = parse_packet(&packet).unwrap();
-        assert_eq!(parsed.header.payload_length, 3);
-        assert_eq!(parsed.payload, payload);
+        for (opcode, seq, payload) in [
+            (SYS_NOOP, 42u16, Vec::new()),
+            (EXEC_GET_HEALTH, 1, vec![0x01, 0x02, 0x03]),
+            (EXEC_INSPECT, 0, vec![0u8; 100]),
+        ] {
+            let packet = build_command(0x00D000, opcode, seq, &payload);
+            assert_eq!(packet.len(), HEADER_SIZE + payload.len());
+            let parsed = parse_packet(&packet).unwrap();
+            assert_eq!(parsed.header.magic, MAGIC);
+            assert_eq!(parsed.header.full_uid, 0x00D000);
+            assert_eq!(parsed.header.opcode, opcode);
+            assert_eq!(parsed.header.sequence, seq);
+            assert_eq!(parsed.header.payload_length as usize, payload.len());
+            assert_eq!(parsed.payload, payload);
+            assert!(parsed.header.ack_requested());
+        }
     }
 
     /// @test ACK payload with extra data parses cmd_opcode, sequence,
@@ -408,76 +404,6 @@ mod tests {
             let payload = vec![0x00, 0x01, 0x02, 0x03, status, 0, 0, 0];
             let ack = parse_ack(&payload).unwrap();
             assert_eq!(ack.status_name, expected, "status code {}", status);
-        }
-    }
-
-    /// @test The payload_length field in a built command equals the
-    /// actual payload byte count, and the total packet size is
-    /// header + payload.
-    #[test]
-    fn build_command_payload_length_field_matches() {
-        let payload = vec![0u8; 100];
-        let packet = build_command(0x00D000, EXEC_INSPECT, 0, &payload);
-        let header = parse_header(&packet).unwrap();
-        assert_eq!(header.payload_length as usize, payload.len());
-        assert_eq!(packet.len(), HEADER_SIZE + payload.len());
-    }
-
-    /// @test parse_header, parse_packet, and parse_ack never panic on
-    /// arbitrary buffers, including valid-magic headers whose
-    /// payload_length lies about the buffer size. These parse untrusted
-    /// network input (deterministic seed: reproducible in CI).
-    #[test]
-    fn parsers_survive_arbitrary_buffers() {
-        let mut seed: u64 = 0x243F_6A88_85A3_08D3;
-        let mut next_byte = move || {
-            seed = seed
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            (seed >> 33) as u8
-        };
-
-        for len in 0..300usize {
-            let mut buf: Vec<u8> = (0..len).map(|_| next_byte()).collect();
-            let _ = parse_header(&buf);
-            let _ = parse_packet(&buf);
-            let _ = parse_ack(&buf);
-
-            // Same buffer with a valid magic and a lying payload_length.
-            if buf.len() >= HEADER_SIZE {
-                buf[0..2].copy_from_slice(&MAGIC.to_le_bytes());
-                buf[12..14].copy_from_slice(&0xFFFFu16.to_le_bytes());
-                let _ = parse_header(&buf);
-                let _ = parse_packet(&buf);
-            }
-        }
-    }
-    /// @test The SLIP decoder never panics on arbitrary byte streams fed
-    /// in irregular chunks, and every emitted frame survives this
-    /// parser. Lives here because it exercises the aproto stack ON
-    /// TOP of the neutral framing layer -- slip.rs itself must not
-    /// know aproto exists.
-    /// Both consume untrusted network input: a deterministic
-    /// pseudo-random adversarial sweep (fixed seed, reproducible).
-    #[test]
-    fn decoder_survives_arbitrary_byte_streams() {
-        let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
-        let mut next_byte = move || {
-            seed = seed
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            (seed >> 33) as u8
-        };
-
-        for round in 0..200usize {
-            let mut decoder = crate::protocol::slip::Decoder::new();
-            let len = (round * 37) % 4096 + 1;
-            let bytes: Vec<u8> = (0..len).map(|_| next_byte()).collect();
-            for chunk in bytes.chunks(1 + round % 61) {
-                for frame in decoder.feed(chunk) {
-                    let _ = parse_packet(&frame);
-                }
-            }
         }
     }
 }

@@ -6,8 +6,7 @@
 //! library constants (6-octet header; version/type/secondary-flag/
 //! APID-high in octet 0, APID-low in octet 1, sequence flags+count in
 //! octets 2-3, packet-data-length-minus-one big-endian in octets
-//! 4-5). Golden-vector byte pinning against that library follows the
-//! compat/ pattern once the producer relays the vector set.
+//! 4-5).
 
 /// Primary header length in octets.
 pub const HEADER_SIZE: usize = 6;
@@ -60,9 +59,7 @@ pub fn parse_header(b: &[u8]) -> Option<SppHeader> {
 }
 
 /// Pack a telemetry packet (version 0, unsegmented). The fake-target
-/// tests and any future command path share this one packer; compiled
-/// for the full surface although the server binary does not call it.
-#[allow(dead_code)]
+/// tests and any future command path share this one packer.
 pub fn pack(apid: u16, seq_count: u16, payload: &[u8]) -> Vec<u8> {
     let apid = apid & 0x07FF;
     let seq = seq_count & 0x3FFF;
@@ -199,8 +196,8 @@ mod tests {
     }
 
     /// @test A garbage gap mid-stream is skipped and the following
-    /// packet still extracts -- the resync behavior the producer's
-    /// vector set will pin byte-for-byte.
+    /// packet still extracts: the extractor resyncs on the next
+    /// plausible header.
     #[test]
     fn extractor_resyncs_past_garbage() {
         let good = pack(0x42, 7, &[9, 8, 7]);

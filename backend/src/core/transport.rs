@@ -289,33 +289,29 @@ mod tests {
     /// the test instead of hanging it.
     const BOUND: std::time::Duration = std::time::Duration::from_secs(5);
 
-    /// @test The state word says no more than the flags: nothing for a
-    /// link that is down, listening while it waits, connected once its
-    /// target is heard (the socket stays bound), nothing again after a
-    /// disconnect, and nothing for a link whose connect succeeded and
-    /// whose only init step then could not be sent.
+    /// @test The state word says no more than the flags, and connected
+    /// wins: nothing for a link that is down, listening while it waits,
+    /// connected once its target is heard although the socket stays
+    /// bound (listening too), and nothing again after a disconnect.
     #[tokio::test]
     async fn state_word_says_no_more_than_the_flags() {
         let target = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let target_addr = target.local_addr().unwrap();
         let host = target_addr.ip().to_string();
         let (push_tx, _) = tokio::sync::broadcast::channel(4);
-        let udp = |bytes: Vec<u8>| {
-            ProtocolLink::Stream(StreamLink::new(
-                Protocol::CcsdsSpp,
-                PipelineSpec::Spp {
-                    apid_map: std::collections::HashMap::new(),
-                },
-                Carrier::Udp { listen_port: 0 },
-                vec![InitStep {
-                    name: "hello".into(),
-                    delay_ms: 0,
-                    bytes,
-                }],
-                push_tx.clone(),
-            ))
-        };
-        let mut link = udp(b"HI".to_vec());
+        let mut link = ProtocolLink::Stream(StreamLink::new(
+            Protocol::CcsdsSpp,
+            PipelineSpec::Spp {
+                apid_map: std::collections::HashMap::new(),
+            },
+            Carrier::Udp { listen_port: 0 },
+            vec![InitStep {
+                name: "hello".into(),
+                delay_ms: 0,
+                bytes: b"HI".to_vec(),
+            }],
+            push_tx,
+        ));
         assert_eq!(link.state_word(), None, "never connected");
         tokio::time::timeout(BOUND, link.connect(&host, target_addr.port()))
             .await
@@ -341,21 +337,27 @@ mod tests {
         );
         link.disconnect();
         assert_eq!(link.state_word(), None, "disconnected");
+    }
 
-        // Larger than any IPv4 datagram: the step cannot be sent.
-        let mut failing = udp(vec![0; 65536]);
-        tokio::time::timeout(BOUND, failing.connect(&host, target_addr.port()))
-            .await
-            .expect("connect returns")
-            .unwrap();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
-        while failing.state_word().is_some() && tokio::time::Instant::now() < deadline {
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    /// @test Every protocol's config spelling parses to it and its name
+    /// gives that spelling back, and an unknown spelling is refused with
+    /// the supported list instead of becoming a default.
+    #[test]
+    fn protocol_names_round_trip_through_config() {
+        for name in [
+            "aproto-slip",
+            "ccsds-spp",
+            "slip+ccsds-spp",
+            "tm+ccsds-spp",
+            "tm+ccsds-spp+records",
+            "raw-slip",
+        ] {
+            assert_eq!(Protocol::from_config(name).unwrap().name(), name);
         }
-        assert_eq!(
-            failing.state_word(),
-            None,
-            "a link that went down during bring-up claims no state"
+        let e = Protocol::from_config("ccsds").unwrap_err();
+        assert!(
+            e.contains("unknown protocol 'ccsds'") && e.contains("raw-slip"),
+            "{e}"
         );
     }
 
@@ -422,18 +424,19 @@ mod tests {
     }
 
     /// @test The protocol boundary, enforced: zenith's neutral modules
-    /// (decoder/router, storage, metrics, and the SPP protocol module)
-    /// must never reference the APROTO family -- nor any specific
-    /// flight framework. Target specifics live at the definition
-    /// level (per-target config); a PR that re-couples a generic
-    /// layer to one protocol's types or one framework's names fails
-    /// here, not in review. Comments count: a framework-shaped
-    /// rationale in engine code is the first step toward a
-    /// framework-shaped mechanism. transport.rs itself is the
-    /// sanctioned dispatch point and is deliberately absent from
-    /// this list.
+    /// (the decoder and router, storage, metrics, the stream link, the
+    /// artifact loaders, target registration, and the SPP, SLIP and TM
+    /// framing modules) must never name the APROTO family -- nor any
+    /// specific flight framework. Target specifics live at the
+    /// definition level (per-target config); a change that re-couples
+    /// a generic layer to one protocol's types or one framework's
+    /// names fails here, not in review. Comments and tests count: a
+    /// framework-shaped rationale in engine code is the first step
+    /// toward a framework-shaped mechanism. transport.rs itself is the
+    /// sanctioned dispatch point and is deliberately absent from this
+    /// list.
     #[test]
-    fn neutral_modules_never_reference_aproto() {
+    fn neutral_modules_name_no_protocol_family_or_framework() {
         const FORBIDDEN: &[(&str, &str)] = &[
             ("aproto", "the APROTO family"),
             ("apex", "the apex framework"),

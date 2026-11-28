@@ -17,50 +17,202 @@ use serde_json::Value as Json;
 
 /// Constraint rails exported per field by the dictionary generator.
 /// The vehicle enforces the same rails on load; ground-side checks are
-/// the front door, the vehicle is the backstop.
+/// the front door, the vehicle is the backstop. Each rail is held as
+/// the dictionary wrote it, so an integer rail past 2^53 stays exact.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FieldConstraints {
     #[serde(default)]
-    pub min: Option<f64>,
+    pub min: Option<serde_json::Number>,
     #[serde(default)]
-    pub max: Option<f64>,
+    pub max: Option<serde_json::Number>,
     #[serde(default)]
-    pub step: Option<f64>,
+    pub step: Option<serde_json::Number>,
     #[serde(default)]
-    pub allowed: Option<Vec<f64>>,
+    pub allowed: Option<Vec<serde_json::Number>>,
 }
 
 impl FieldConstraints {
-    /// Check one numeric value against the rails. Step granularity is
-    /// measured from min (or zero) with a small epsilon for float
-    /// representation.
+    /// Check one numeric value against the rails, each rail read as an
+    /// f64. Step granularity is measured from min (or zero) with a small
+    /// epsilon for float representation.
     pub fn check(&self, v: f64) -> Result<(), String> {
-        if let Some(min) = self.min {
+        let rail = |r: &Option<serde_json::Number>| r.as_ref().and_then(serde_json::Number::as_f64);
+        if let Some(min) = rail(&self.min) {
             if v < min {
                 return Err(format!("{} below min {}", v, min));
             }
         }
-        if let Some(max) = self.max {
+        if let Some(max) = rail(&self.max) {
             if v > max {
                 return Err(format!("{} above max {}", v, max));
             }
         }
-        if let Some(step) = self.step {
-            if step > 0.0 {
-                let base = self.min.unwrap_or(0.0);
-                let n = (v - base) / step;
-                if (n - n.round()).abs() > 1e-6 {
-                    return Err(format!("{} not on step {} from {}", v, step, base));
-                }
+        if let Some(step) = rail(&self.step) {
+            let base = rail(&self.min).unwrap_or(0.0);
+            if !on_float_step(v, step, base) {
+                return Err(format!("{} not on step {} from {}", v, step, base));
             }
         }
         if let Some(allowed) = &self.allowed {
+            let allowed: Vec<f64> = allowed.iter().filter_map(|a| a.as_f64()).collect();
             if !allowed.iter().any(|a| (a - v).abs() < 1e-9) {
                 return Err(format!("{} not in allowed set {:?}", v, allowed));
             }
         }
         Ok(())
     }
+
+    /// Check one integer value against the rails exactly. An 8-byte
+    /// integer field holds more than an f64 carries (2^53 + 1 reads as
+    /// 2^53 there), so neither the value nor an integer rail passes
+    /// through one, and a rail written with a fraction is compared as
+    /// the real number it is. Step granularity is exact when the step
+    /// and its base (min, or zero) are whole numbers; a fractional step
+    /// takes the float rule of [`Self::check`].
+    pub fn check_integer(&self, v: i128) -> Result<(), String> {
+        use std::cmp::Ordering;
+        if let Some(min) = &self.min {
+            if compare_integer(v, min) == Some(Ordering::Less) {
+                return Err(format!("{} below min {}", v, min));
+            }
+        }
+        if let Some(max) = &self.max {
+            if compare_integer(v, max) == Some(Ordering::Greater) {
+                return Err(format!("{} above max {}", v, max));
+            }
+        }
+        if let Some(step) = &self.step {
+            let zero = serde_json::Number::from(0);
+            let base = self.min.as_ref().unwrap_or(&zero);
+            let on_step = match (whole_number(step), whole_number(base)) {
+                (Some(s), Some(b)) if s > 0 => v.rem_euclid(s) == b.rem_euclid(s),
+                (Some(_), Some(_)) => true,
+                _ => on_float_step(
+                    v as f64,
+                    step.as_f64().unwrap_or(0.0),
+                    base.as_f64().unwrap_or(0.0),
+                ),
+            };
+            if !on_step {
+                return Err(format!("{} not on step {} from {}", v, step, base));
+            }
+        }
+        if let Some(allowed) = &self.allowed {
+            if !allowed
+                .iter()
+                .any(|a| compare_integer(v, a) == Some(Ordering::Equal))
+            {
+                let set: Vec<String> = allowed.iter().map(|a| a.to_string()).collect();
+                return Err(format!("{} not in allowed set [{}]", v, set.join(", ")));
+            }
+        }
+        Ok(())
+    }
+
+    /// Check one float32 value against the rails in float32 terms: the
+    /// value as it is written, against each rail as a float32 holds it
+    /// (the float32 nearest the rail as the dictionary writes it). A
+    /// number, the hex of the bytes it is written as and the number a
+    /// read gives those bytes are one float32, so they get one verdict,
+    /// and a value equal to a rail as written lies inside it: 0.1 under
+    /// max 0.1, though the float32 holding 0.1 exceeds 0.1 as a double.
+    /// A value is on its step when it is the float32 that some on-step
+    /// value (min, or zero, plus a whole number of steps) is written as.
+    pub fn check_single(&self, v: f32) -> Result<(), String> {
+        let rail = |r: &Option<serde_json::Number>| r.as_ref().and_then(serde_json::Number::as_f64);
+        if let Some(min) = rail(&self.min) {
+            if v < min as f32 {
+                return Err(format!("{} below min {}", v, min));
+            }
+        }
+        if let Some(max) = rail(&self.max) {
+            if v > max as f32 {
+                return Err(format!("{} above max {}", v, max));
+            }
+        }
+        if let Some(step) = rail(&self.step) {
+            let base = rail(&self.min).unwrap_or(0.0);
+            if !on_single_step(v, step, base) {
+                return Err(format!("{} not on step {} from {}", v, step, base));
+            }
+        }
+        if let Some(allowed) = &self.allowed {
+            let allowed: Vec<f64> = allowed.iter().filter_map(|a| a.as_f64()).collect();
+            if !allowed.iter().any(|&a| a as f32 == v) {
+                return Err(format!("{} not in allowed set {:?}", v, allowed));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The float32 step rule: `v` is the float32 that some on-step value,
+/// `base` plus a whole number of steps, is written as. The nearest
+/// whole number of steps, or one either side of it, finds that value
+/// whatever the float32 spacing is there. A step that is not positive
+/// checks nothing.
+fn on_single_step(v: f32, step: f64, base: f64) -> bool {
+    if step <= 0.0 {
+        return true;
+    }
+    let k = ((f64::from(v) - base) / step).round();
+    [k - 1.0, k, k + 1.0]
+        .iter()
+        .any(|k| (base + k * step) as f32 == v)
+}
+
+/// The float step rule: `v` lies a whole number of steps from `base`,
+/// within a small epsilon for float representation. A step that is not
+/// positive checks nothing.
+fn on_float_step(v: f64, step: f64, base: f64) -> bool {
+    if step <= 0.0 {
+        return true;
+    }
+    let n = (v - base) / step;
+    (n - n.round()).abs() <= 1e-6
+}
+
+/// A rail as a whole number, when it is one: an integer rail, or a
+/// float rail without a fraction inside i128.
+fn whole_number(rail: &serde_json::Number) -> Option<i128> {
+    if let Some(r) = rail.as_i64() {
+        return Some(r.into());
+    }
+    if let Some(r) = rail.as_u64() {
+        return Some(r.into());
+    }
+    let r = rail.as_f64()?;
+    (r.fract() == 0.0 && r.abs() < 2f64.powi(127)).then_some(r as i128)
+}
+
+/// How an integer compares with a rail, exactly. An integer rail is
+/// compared as an integer. A float rail is compared as the real number
+/// it is, through its floor: an integer equal to the floor of a rail
+/// with a fraction lies below the rail.
+fn compare_integer(v: i128, rail: &serde_json::Number) -> Option<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    if let Some(r) = rail.as_i64() {
+        return Some(v.cmp(&r.into()));
+    }
+    if let Some(r) = rail.as_u64() {
+        return Some(v.cmp(&r.into()));
+    }
+    let r = rail.as_f64()?;
+    let bound = 2f64.powi(127);
+    if r.is_nan() {
+        return None;
+    }
+    if r >= bound {
+        return Some(Ordering::Less);
+    }
+    if r < -bound {
+        return Some(Ordering::Greater);
+    }
+    let floor = r.floor();
+    Some(match v.cmp(&(floor as i128)) {
+        Ordering::Equal if floor < r => Ordering::Less,
+        order => order,
+    })
 }
 
 /// A single field in a struct.
@@ -334,7 +486,8 @@ impl StructDictionary {
         Ok(Self { components })
     }
 
-    /// Decode a binary payload using a struct definition.
+    /// Decode a binary payload using a struct definition, each value in
+    /// the dictionary's byte order.
     ///
     /// Returns a JSON object with field names mapped to decoded values.
     pub fn decode_payload(
@@ -354,7 +507,7 @@ impl StructDictionary {
             if field.offset + field.size > data.len() {
                 continue;
             }
-            let value = decode_field(data, field);
+            let value = decode_field(data, field, dict.big_endian());
             fields.insert(field.name.clone(), value);
         }
 
@@ -453,14 +606,18 @@ impl StructDictionary {
                     let mut count_matches = false;
                     for field in &hdr_def.fields {
                         if field.offset + field.size <= hdr_def.size {
-                            let val = decode_field(data, field);
-                            // Check if this field's value matches the entry count
-                            if let Some(n) = val.as_u64() {
-                                if n == n_entries as u64 {
-                                    count_matches = true;
-                                }
+                            // An integer field of any width holding the
+                            // entry count, read from its bytes (an 8-byte
+                            // one reads as text).
+                            if scalar(data, field, dict.big_endian())
+                                == Some(Scalar::Integer(n_entries as i128))
+                            {
+                                count_matches = true;
                             }
-                            hdr_fields.insert(field.name.clone(), val);
+                            hdr_fields.insert(
+                                field.name.clone(),
+                                decode_field(data, field, dict.big_endian()),
+                            );
                         }
                     }
 
@@ -481,8 +638,10 @@ impl StructDictionary {
                         let mut ent_fields = serde_json::Map::new();
                         for field in &ent_def.fields {
                             if field.offset + field.size <= ent_def.size {
-                                ent_fields
-                                    .insert(field.name.clone(), decode_field(entry_data, field));
+                                ent_fields.insert(
+                                    field.name.clone(),
+                                    decode_field(entry_data, field, dict.big_endian()),
+                                );
                             }
                         }
                         entries.push(serde_json::Value::Object(ent_fields));
@@ -505,60 +664,64 @@ impl StructDictionary {
 
 /* ----------------------------- Field Decoding ----------------------------- */
 
-fn decode_field(data: &[u8], field: &FieldDef) -> serde_json::Value {
+/// A scalar field's value as its bytes hold it: an integer exactly, a
+/// float as the f64 it widens to, which is the number a parameter read
+/// gives it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Scalar {
+    Integer(i128),
+    Float(f64),
+}
+
+/// The scalar `field` holds in `data`, read by its (type, size) in the
+/// dictionary's byte order; None for a (type, size) that holds none (an
+/// array, a string, a nested blob, an odd width). A bool is its byte.
+/// The parameter read decodes every scalar through this, and the update's
+/// rails judge a field sent as the hex of its bytes through it too.
+pub fn scalar(data: &[u8], field: &FieldDef, big_endian: bool) -> Option<Scalar> {
     let off = field.offset;
-    match (field.field_type.as_str(), field.size) {
-        ("uint", 1) => serde_json::json!(data[off]),
-        ("uint", 2) => serde_json::json!(u16::from_le_bytes([data[off], data[off + 1]])),
-        ("uint", 4) => {
-            serde_json::json!(u32::from_le_bytes([
-                data[off],
-                data[off + 1],
-                data[off + 2],
-                data[off + 3]
-            ]))
+    // The field's N bytes, least significant first.
+    let le = |n: usize| {
+        let mut bytes = [0u8; 8];
+        bytes[..n].copy_from_slice(&data[off..off + n]);
+        if big_endian {
+            bytes[..n].reverse();
         }
-        ("uint", 8) => {
-            serde_json::json!(u64::from_le_bytes([
-                data[off],
-                data[off + 1],
-                data[off + 2],
-                data[off + 3],
-                data[off + 4],
-                data[off + 5],
-                data[off + 6],
-                data[off + 7],
-            ]))
-        }
-        ("int", 1) => serde_json::json!(data[off] as i8),
-        ("int", 2) => serde_json::json!(i16::from_le_bytes([data[off], data[off + 1]])),
-        ("int", 4) => {
-            serde_json::json!(i32::from_le_bytes([
-                data[off],
-                data[off + 1],
-                data[off + 2],
-                data[off + 3]
-            ]))
-        }
-        ("float", 4) => {
-            let v = f32::from_le_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
-            serde_json::json!(v)
-        }
-        ("float", 8) | ("double", 8) => {
-            let v = f64::from_le_bytes([
-                data[off],
-                data[off + 1],
-                data[off + 2],
-                data[off + 3],
-                data[off + 4],
-                data[off + 5],
-                data[off + 6],
-                data[off + 7],
-            ]);
+        bytes
+    };
+    let unsigned = |n: usize| u64::from_le_bytes(le(n));
+    // Sign-extended from the field's top bit.
+    let signed = |n: usize| ((unsigned(n) << (64 - 8 * n)) as i64) >> (64 - 8 * n);
+    Some(match (field.field_type.as_str(), field.size) {
+        ("uint" | "bool", 1) | ("uint", 2 | 4 | 8) => Scalar::Integer(unsigned(field.size).into()),
+        ("int", n @ (1 | 2 | 4 | 8)) => Scalar::Integer(signed(n).into()),
+        ("float", 4) => Scalar::Float(f32::from_bits(unsigned(4) as u32).into()),
+        ("float" | "double", 8) => Scalar::Float(f64::from_bits(unsigned(8))),
+        _ => return None,
+    })
+}
+
+/// One field's value from a parameter block, read by its (type, size)
+/// in the dictionary's byte order. An 8-byte integer reads as a string
+/// holding its exact decimal value: a JSON number past 2^53 does not
+/// survive a browser's JSON.parse, so a number there would come back
+/// changed. A narrower integer, and a bool (its byte, so a value other
+/// than 0 or 1 shows as it is), reads as a number. A float reads as a
+/// number unless JSON cannot carry it through a browser: one that is
+/// not finite (JSON has no NaN or infinity) or is negative zero (a
+/// browser writes -0 as 0). That float, and a type no scalar arm reads
+/// (an array, a string, a nested blob), comes back as the hex of its
+/// bytes, the form an update takes back unchanged.
+fn decode_field(data: &[u8], field: &FieldDef, big_endian: bool) -> serde_json::Value {
+    let off = field.offset;
+    match scalar(data, field, big_endian) {
+        Some(Scalar::Integer(v)) if field.size == 8 => serde_json::Value::String(v.to_string()),
+        // Every narrower integer fits an i64.
+        Some(Scalar::Integer(v)) => serde_json::Value::from(v as i64),
+        Some(Scalar::Float(v)) if v.is_finite() && !(v == 0.0 && v.is_sign_negative()) => {
             serde_json::json!(v)
         }
         _ => {
-            // Unknown type -- return hex
             let bytes = &data[off..off + field.size.min(data.len() - off)];
             serde_json::json!(hex::encode(bytes))
         }
@@ -995,7 +1158,9 @@ pub fn check_byte_order(stamp: Option<&str>) -> Result<(), String> {
     }
 }
 
-/// "0x" hex or decimal, the target-config number convention.
+/// "0x" hex or decimal, surrounding whitespace ignored: the convention
+/// of every number in target configuration and in command requests,
+/// all read by this one parser. An all-digit string is decimal.
 pub fn parse_num_u32(s: &str) -> Option<u32> {
     let t = s.trim();
     if let Some(hex) = t.strip_prefix("0x").or_else(|| t.strip_prefix("0X")) {
@@ -1227,23 +1392,72 @@ mod tests {
         assert!(allowed.check(2.0).is_err());
     }
 
-    /// @test A dictionary entry carrying the producer-stated layout
-    /// hash exposes the u32 the prelude carries; entries without one
-    /// (dictionaries predating the export) return None.
+    /// @test An integer meets its rails exactly, past where an f64 is
+    /// exact (2^53 = 9007199254740992): integer rails at 2^53 + 1 and
+    /// 2^53 + 3, which round to 2^53 and 2^53 + 4 as floats, refuse the
+    /// value one beyond each; an allowed set and a whole step compare
+    /// exactly there too. A rail with a fraction bounds as the real
+    /// number it is, whole rails written as floats count as whole, the
+    /// 64-bit limits pass their own rails, and a fractional step takes
+    /// the float rule.
     #[test]
-    fn struct_def_layout_hash_parses() {
-        let json = r#"{
-            "category": "TUNABLE_PARAM",
-            "size": 80,
-            "fields": [],
-            "layout_hash": "0xC93CD892",
-            "canonical_spec": "a:uint:1;"
-        }"#;
-        let sdef: StructDef = serde_json::from_str(json).unwrap();
-        assert_eq!(sdef.layout_hash_u32(), Some(0xC93C_D892));
-
-        let bare: StructDef = serde_json::from_str(r#"{"size": 4}"#).unwrap();
-        assert_eq!(bare.layout_hash_u32(), None);
+    fn integer_values_meet_their_rails_exactly() {
+        let c = |j: &str| serde_json::from_str::<FieldConstraints>(j).unwrap();
+        const P53: i128 = 9_007_199_254_740_992;
+        // Rails, then (value, whether it is in) rows.
+        let cases: Vec<(&str, Vec<(i128, bool)>)> = vec![
+            (
+                r#"{"min": 9007199254740993, "max": 9007199254740995}"#,
+                vec![
+                    (P53, false),
+                    (P53 + 1, true),
+                    (P53 + 3, true),
+                    (P53 + 4, false),
+                ],
+            ),
+            (
+                r#"{"allowed": [9007199254740993]}"#,
+                vec![(P53, false), (P53 + 1, true)],
+            ),
+            (
+                r#"{"min": 1, "step": 2}"#,
+                vec![(P53 + 1, true), (P53 + 2, false)],
+            ),
+            (
+                r#"{"min": -2.5, "max": 2.5}"#,
+                vec![(-3, false), (-2, true), (2, true), (3, false)],
+            ),
+            (r#"{"min": 0.0, "step": 3.0}"#, vec![(9, true), (10, false)]),
+            (
+                r#"{"min": -9223372036854775808, "max": 18446744073709551615}"#,
+                vec![
+                    (i64::MIN.into(), true),
+                    (u64::MAX.into(), true),
+                    (i128::from(u64::MAX) + 1, false),
+                    (i128::from(i64::MIN) - 1, false),
+                ],
+            ),
+            (r#"{"step": 0.5}"#, vec![(7, true)]),
+        ];
+        let mut wrong = Vec::new();
+        for (rails, rows) in cases {
+            let rails_def = c(rails);
+            for (v, inside) in rows {
+                let verdict = rails_def.check_integer(v);
+                if verdict.is_ok() != inside {
+                    wrong.push(format!("{rails} {v}: {verdict:?}"));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "rails judged otherwise: {wrong:#?}");
+        assert_eq!(
+            c(r#"{"min": 9007199254740993}"#).check_integer(P53),
+            Err("9007199254740992 below min 9007199254740993".to_string())
+        );
+        assert_eq!(
+            c(r#"{"allowed": [1, 9007199254740993]}"#).check_integer(2),
+            Err("2 not in allowed set [1, 9007199254740993]".to_string())
+        );
     }
 }
 
@@ -1269,10 +1483,11 @@ mod nested_tests {
     /// @test A nested field spanning multiple fragment instances
     /// expands to indexed leaves at payload-absolute offsets, and a
     /// fragment containing its own nested field expands one level
-    /// deeper (two levels max: a third level stays opaque).
+    /// deeper; two levels is the most: a nested field met at the third
+    /// level stays one opaque field under its full path.
     #[test]
     fn nested_fields_expand_to_absolute_leaves() {
-        let mut sub = StructDef {
+        let sub = StructDef {
             category: "STRUCT".to_string(),
             size: 4,
             opcode: None,
@@ -1292,7 +1507,6 @@ mod nested_tests {
             canonical_spec: None,
             packed: None,
         };
-        sub.packed = Some(true);
 
         let mut top_ref = f("subs", "nested", 4, 8);
         top_ref.struct_ref = Some("Sub".to_string());
@@ -1317,6 +1531,32 @@ mod nested_tests {
             packed: None,
         };
 
+        // Three levels: ThreeLevel.outer -> Outer.mid -> Mid.deepest,
+        // whose fragment would be a third expansion.
+        let one_ref = |name: &str, frag: &str| {
+            let mut r = f(name, "nested", 0, 2);
+            r.struct_ref = Some(frag.to_string());
+            StructDef {
+                category: "STRUCT".to_string(),
+                size: 2,
+                opcode: None,
+                fields: vec![r],
+                layout_hash: None,
+                canonical_spec: None,
+                packed: None,
+            }
+        };
+        let leaf = StructDef {
+            category: "STRUCT".to_string(),
+            size: 2,
+            opcode: None,
+            fields: vec![f("z", "uint", 0, 2)],
+            layout_hash: None,
+            canonical_spec: None,
+            packed: None,
+        };
+        let three_level = one_ref("outer", "Outer");
+
         let dict = ComponentDict {
             component: "C".to_string(),
             byte_order: None,
@@ -1325,6 +1565,9 @@ mod nested_tests {
                 ("Deep".to_string(), deep),
                 ("Top".to_string(), top.clone()),
                 ("TwoLevel".to_string(), two_level.clone()),
+                ("Outer".to_string(), one_ref("mid", "Mid")),
+                ("Mid".to_string(), one_ref("deepest", "Leaf")),
+                ("Leaf".to_string(), leaf),
             ]),
             enums: HashMap::new(),
             capabilities: Vec::new(),
@@ -1349,6 +1592,401 @@ mod nested_tests {
         let out = expanded_fields(&dict, &two_level.fields, 0);
         let names: Vec<(&str, usize)> = out.iter().map(|x| (x.name.as_str(), x.offset)).collect();
         assert_eq!(names, vec![("d.x", 0), ("d.pair.a", 2), ("d.pair.b", 4)]);
+
+        let out = expanded_fields(&dict, &three_level.fields, 0);
+        let names: Vec<(&str, &str)> = out
+            .iter()
+            .map(|x| (x.name.as_str(), x.field_type.as_str()))
+            .collect();
+        assert_eq!(names, vec![("outer.mid.deepest", "nested")]);
+    }
+
+    /// @test Parameter decode over a synthetic dictionary. A fixed block
+    /// decodes each field by its declared (type, size), little-endian --
+    /// unsigned, signed and float widths, both float spellings, a uint64
+    /// as its decimal text -- with a nested field read as its fragment's
+    /// leaves, a type no numeric arm reads as hex, and a field past the
+    /// data left out. A header +
+    /// entries block of 1 + 2N bytes decodes as the header whose count
+    /// field equals N, then its N entries; a length no (header, entry)
+    /// pair explains, or another category, decodes as nothing.
+    #[test]
+    fn parameter_blocks_decode_by_the_dictionary() {
+        let mut pair_ref = f("pair", "nested", 46, 4);
+        pair_ref.struct_ref = Some("Pair".to_string());
+        let tunable = |size: usize, fields: Vec<FieldDef>| StructDef {
+            category: "TUNABLE_PARAM".to_string(),
+            size,
+            opcode: None,
+            fields,
+            layout_hash: None,
+            canonical_spec: None,
+            packed: None,
+        };
+        let pair = StructDef {
+            category: "STRUCT".to_string(),
+            ..tunable(4, vec![f("lo", "uint", 0, 2), f("hi", "uint", 2, 2)])
+        };
+        let gain = tunable(
+            54,
+            vec![
+                f("u8", "uint", 0, 1),
+                f("u16", "uint", 1, 2),
+                f("u32", "uint", 3, 4),
+                f("u64", "uint", 7, 8),
+                f("i8", "int", 15, 1),
+                f("i16", "int", 16, 2),
+                f("i32", "int", 18, 4),
+                f("f32", "float", 22, 4),
+                f("f64", "float", 26, 8),
+                f("d64", "double", 34, 8),
+                f("tag", "string", 42, 4),
+                pair_ref,
+                f("late", "uint", 50, 4),
+            ],
+        );
+        let comp = |name: &str, structs: Vec<(&str, StructDef)>| ComponentDict {
+            component: name.to_string(),
+            byte_order: None,
+            structs: structs
+                .into_iter()
+                .map(|(n, s)| (n.to_string(), s))
+                .collect(),
+            enums: HashMap::new(),
+            capabilities: Vec::new(),
+        };
+        let dicts = StructDictionary {
+            components: HashMap::from([
+                (
+                    "Gain".to_string(),
+                    comp("Gain", vec![("Gains", gain), ("Pair", pair)]),
+                ),
+                (
+                    "Ctl".to_string(),
+                    comp(
+                        "Ctl",
+                        vec![
+                            ("Header", tunable(1, vec![f("count", "uint", 0, 1)])),
+                            ("Entry", tunable(2, vec![f("a", "uint", 0, 2)])),
+                        ],
+                    ),
+                ),
+            ]),
+        };
+
+        let mut data = vec![200u8];
+        data.extend_from_slice(&0x1234u16.to_le_bytes());
+        data.extend_from_slice(&70_000u32.to_le_bytes());
+        data.extend_from_slice(&(1u64 << 40).to_le_bytes());
+        data.extend_from_slice(&(-5i8).to_le_bytes());
+        data.extend_from_slice(&(-300i16).to_le_bytes());
+        data.extend_from_slice(&(-70_000i32).to_le_bytes());
+        data.extend_from_slice(&1.5f32.to_le_bytes());
+        data.extend_from_slice(&(-0.25f64).to_le_bytes());
+        data.extend_from_slice(&2.0f64.to_le_bytes());
+        data.extend_from_slice(b"abcd");
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&2u16.to_le_bytes());
+        // 50 bytes: `late` (50..54) lies past the data.
+        assert_eq!(data.len(), 50);
+        assert_eq!(
+            dicts.decode_payload("Gain", "Gains", &data),
+            Some(serde_json::json!({
+                "u8": 200, "u16": 0x1234, "u32": 70_000, "u64": (1u64 << 40).to_string(),
+                "i8": -5, "i16": -300, "i32": -70_000,
+                "f32": 1.5, "f64": -0.25, "d64": 2.0,
+                "tag": "61626364", "pair.lo": 1, "pair.hi": 2,
+            }))
+        );
+        assert_eq!(dicts.decode_payload("Gain", "Nope", &data), None);
+
+        let table = [3u8, 1, 0, 2, 0, 3, 1];
+        assert_eq!(
+            dicts.decode_variable_length_for("TUNABLE_PARAM", &table, Some("Ctl")),
+            Some((
+                "Ctl".to_string(),
+                "Header".to_string(),
+                "Entry".to_string(),
+                serde_json::json!({
+                    "header": {"count": 3},
+                    "entries": [{"a": 1}, {"a": 2}, {"a": 259}],
+                })
+            ))
+        );
+        assert_eq!(
+            dicts.decode_variable_length_for("TUNABLE_PARAM", &[2, 1, 0, 9], Some("Ctl")),
+            None,
+            "1 + 2N fits no 4-byte block"
+        );
+        assert_eq!(
+            dicts.decode_variable_length_for("STATE", &table, Some("Ctl")),
+            None
+        );
+    }
+
+    /// @test Parameter values decode by their type in their dictionary's
+    /// byte order: a bool reads as a number and an int64 as its decimal
+    /// text, neither as hex, and a big-endian dictionary's fields read
+    /// big-endian, in a fixed block and in a header + entries block
+    /// alike. The same values stamped little-endian decode the same
+    /// under a little-endian dictionary, stamped or not.
+    #[test]
+    fn parameter_values_decode_by_type_in_the_dictionary_byte_order() {
+        let tunable = |size: usize, fields: Vec<FieldDef>| StructDef {
+            category: "TUNABLE_PARAM".to_string(),
+            size,
+            opcode: None,
+            fields,
+            layout_hash: None,
+            canonical_spec: None,
+            packed: None,
+        };
+        let dicts = |byte_order: Option<&str>| StructDictionary {
+            components: HashMap::from([(
+                "Wide".to_string(),
+                ComponentDict {
+                    component: "Wide".to_string(),
+                    byte_order: byte_order.map(str::to_string),
+                    structs: HashMap::from([
+                        (
+                            "Params".to_string(),
+                            tunable(
+                                24,
+                                vec![
+                                    f("wide", "int", 0, 8),
+                                    f("flag", "bool", 8, 1),
+                                    f("tiny", "int", 9, 1),
+                                    f("short", "uint", 10, 2),
+                                    f("word", "int", 12, 4),
+                                    f("ratio", "float", 16, 4),
+                                    f("count", "uint", 20, 4),
+                                ],
+                            ),
+                        ),
+                        ("Header".to_string(), tunable(2, vec![f("n", "uint", 0, 2)])),
+                        ("Entry".to_string(), tunable(4, vec![f("v", "int", 0, 4)])),
+                    ]),
+                    enums: HashMap::new(),
+                    capabilities: Vec::new(),
+                },
+            )]),
+        };
+        // The block's values, each field's bytes in the given order.
+        let block = |big_endian: bool| {
+            let mut out = Vec::new();
+            for le in [
+                &(-2i64).to_le_bytes()[..],
+                &[1],
+                &(-5i8).to_le_bytes(),
+                &0x1234u16.to_le_bytes(),
+                &(-100_000i32).to_le_bytes(),
+                &1.5f32.to_le_bytes(),
+                &0x0102_0304u32.to_le_bytes(),
+            ] {
+                let mut bytes = le.to_vec();
+                if big_endian {
+                    bytes.reverse();
+                }
+                out.extend(bytes);
+            }
+            out
+        };
+        let values = Some(serde_json::json!({
+            "wide": "-2", "flag": 1, "tiny": -5, "short": 0x1234,
+            "word": -100_000, "ratio": 1.5, "count": 0x0102_0304,
+        }));
+
+        let mut wrong = Vec::new();
+        for (stamp, big_endian) in [(None, false), (Some("le"), false), (Some("be"), true)] {
+            let decoded = dicts(stamp).decode_payload("Wide", "Params", &block(big_endian));
+            if decoded != values {
+                wrong.push(format!("{stamp:?}: {decoded:?}"));
+            }
+        }
+
+        let mut table = 2u16.to_be_bytes().to_vec();
+        table.extend((-1i32).to_be_bytes());
+        table.extend(7i32.to_be_bytes());
+        let decoded =
+            dicts(Some("be")).decode_variable_length_for("TUNABLE_PARAM", &table, Some("Wide"));
+        let header_and_entries = Some((
+            "Wide".to_string(),
+            "Header".to_string(),
+            "Entry".to_string(),
+            serde_json::json!({
+                "header": {"n": 2},
+                "entries": [{"v": -1}, {"v": 7}],
+            }),
+        ));
+        if decoded != header_and_entries {
+            wrong.push(format!("be header and entries: {decoded:?}"));
+        }
+        assert!(
+            wrong.is_empty(),
+            "decoded otherwise than stamped: {wrong:#?}"
+        );
+    }
+
+    /// @test An 8-byte integer reads as a string holding its exact
+    /// decimal value, so a browser's JSON.parse, which rounds a number
+    /// past 2^53, keeps it: int64 and uint64 at 2^53 + 1, the signed
+    /// limits and the unsigned maximum, in either byte order, stamped or
+    /// not, as the read's own text shows them. A header whose entry count
+    /// is a uint64 still pairs with its entries.
+    #[test]
+    fn eight_byte_integers_read_as_their_exact_decimal_text() {
+        // A component of tunable blocks, each (name, size, fields).
+        let component =
+            |name: &str, byte_order: Option<&str>, blocks: Vec<(&str, usize, Vec<FieldDef>)>| {
+                let structs = blocks.into_iter().map(|(block, size, fields)| {
+                    let sdef = StructDef {
+                        category: "TUNABLE_PARAM".to_string(),
+                        size,
+                        opcode: None,
+                        fields,
+                        layout_hash: None,
+                        canonical_spec: None,
+                        packed: None,
+                    };
+                    (block.to_string(), sdef)
+                });
+                let dict = ComponentDict {
+                    component: name.to_string(),
+                    byte_order: byte_order.map(str::to_string),
+                    structs: structs.collect(),
+                    enums: HashMap::new(),
+                    capabilities: Vec::new(),
+                };
+                (name.to_string(), dict)
+            };
+        // A fixed block, and a header + entries table in a component of
+        // its own, so no other block can pair with its entries.
+        let dicts = |byte_order: Option<&str>| StructDictionary {
+            components: HashMap::from([
+                component(
+                    "Wide",
+                    byte_order,
+                    vec![(
+                        "Params",
+                        16,
+                        vec![f("i", "int", 0, 8), f("u", "uint", 8, 8)],
+                    )],
+                ),
+                component(
+                    "Table",
+                    byte_order,
+                    vec![
+                        ("Header", 8, vec![f("n", "uint", 0, 8)]),
+                        ("Entry", 12, vec![f("v", "int", 0, 8), f("w", "uint", 8, 4)]),
+                    ],
+                ),
+            ]),
+        };
+        // Each value's bytes in the given order.
+        let ordered = |le: [u8; 8], big_endian: bool| {
+            let mut bytes = le.to_vec();
+            if big_endian {
+                bytes.reverse();
+            }
+            bytes
+        };
+        let pairs: [(i64, u64); 4] = [
+            (9_007_199_254_740_993, 9_007_199_254_740_993),
+            (-9_007_199_254_740_993, u64::MAX),
+            (i64::MAX, 9_223_372_036_854_775_807),
+            (i64::MIN, 0),
+        ];
+
+        let mut wrong = Vec::new();
+        for (stamp, big_endian) in [(None, false), (Some("le"), false), (Some("be"), true)] {
+            for (i, u) in pairs {
+                let mut block = ordered(i.to_le_bytes(), big_endian);
+                block.extend(ordered(u.to_le_bytes(), big_endian));
+                let decoded = dicts(stamp).decode_payload("Wide", "Params", &block);
+                let want = serde_json::json!({ "i": i.to_string(), "u": u.to_string() });
+                if decoded.as_ref() != Some(&want) {
+                    wrong.push(format!("{stamp:?} {i} {u}: {decoded:?}"));
+                }
+                let text = serde_json::to_string(&decoded).unwrap();
+                if !text.contains(&format!(r#""i":"{i}""#))
+                    || !text.contains(&format!(r#""u":"{u}""#))
+                {
+                    wrong.push(format!("{stamp:?} read text {text}"));
+                }
+            }
+
+            let mut table = ordered(2u64.to_le_bytes(), big_endian);
+            for (v, w) in [(i64::MIN, 7u32), (9_007_199_254_740_993, 8)] {
+                table.extend(ordered(v.to_le_bytes(), big_endian));
+                let mut w = w.to_le_bytes().to_vec();
+                if big_endian {
+                    w.reverse();
+                }
+                table.extend(w);
+            }
+            let decoded =
+                dicts(stamp).decode_variable_length_for("TUNABLE_PARAM", &table, Some("Table"));
+            let want = serde_json::json!({
+                "header": { "n": "2" },
+                "entries": [
+                    { "v": "-9223372036854775808", "w": 7 },
+                    { "v": "9007199254740993", "w": 8 },
+                ],
+            });
+            if decoded.as_ref().map(|d| &d.3) != Some(&want) {
+                wrong.push(format!("{stamp:?} header and entries: {decoded:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "read otherwise: {wrong:#?}");
+    }
+
+    /// @test A record table refuses each malformed definition by name,
+    /// so a broken table fails at load instead of decoding values under
+    /// the wrong channel: an id width other than 2 or 4, an id field
+    /// past the header, no records, a record id declared twice, a
+    /// record with no channel name or zero size, and a record APID that
+    /// is not a number. The well-formed table loads.
+    #[test]
+    fn record_table_refuses_each_malformed_definition() {
+        let table = |id_size: usize, id_offset: usize, apid: &str, records: &str| {
+            serde_json::from_str::<RecordTable>(&format!(
+                r#"{{"record_apid": "{apid}", "id_offset": {id_offset}, "id_size": {id_size},
+                     "header_size": 6, "records": [{records}]}}"#
+            ))
+            .unwrap()
+        };
+        let record = |channel: &str, size: usize| {
+            format!(r#"{{"id": 1, "channel": "{channel}", "type": "uint", "size": {size}}}"#)
+        };
+        let one = record("a.b", 4);
+        assert!(table(4, 2, "0x001", &one).validate().is_ok());
+        for (bad, why) in [
+            (table(3, 2, "0x001", &one), "id_size 3 is not 2 or 4"),
+            (
+                table(4, 3, "0x001", &one),
+                "id field (3+4) does not fit in the 6-byte header",
+            ),
+            (table(4, 2, "0x001", ""), "no records declared"),
+            (
+                table(4, 2, "0x001", &format!("{one}, {one}")),
+                "record id 1 declared twice",
+            ),
+            (
+                table(4, 2, "0x001", &record(" ", 4)),
+                "record id 1 has no channel name",
+            ),
+            (
+                table(4, 2, "0x001", &record("a.b", 0)),
+                "channel 'a.b' has zero size",
+            ),
+            (
+                table(4, 2, "tlm", &one),
+                "record_apid 'tlm' is not a number",
+            ),
+        ] {
+            let e = bad.validate().unwrap_err();
+            assert!(e.contains(why), "{e}");
+        }
     }
 
     /// @test A byte_order stamp is evidence, so only the two
@@ -1442,16 +2080,5 @@ mod nested_tests {
             let e = table(bad).validate().unwrap_err();
             assert!(e.contains(why), "{e}");
         }
-    }
-
-    /// @test leaf_name inverts the path expanded_fields gives a nested
-    /// leaf: an indexed instance, a single instance and two levels all
-    /// reduce to the leaf's own name, and a top-level field keeps its.
-    #[test]
-    fn leaf_name_is_the_last_segment_of_an_expanded_path() {
-        assert_eq!(leaf_name("subscriptions[3].fullUid"), "fullUid");
-        assert_eq!(leaf_name("waitCondition.threshold"), "threshold");
-        assert_eq!(leaf_name("steps[1].waitCondition.threshold"), "threshold");
-        assert_eq!(leaf_name("frequency"), "frequency");
     }
 }

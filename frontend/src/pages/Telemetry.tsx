@@ -8,6 +8,7 @@ import {
   type TelemetryLayout,
   type Sample,
   type ChannelData,
+  STALE_SAMPLE_AGE_MS,
   TIME_WINDOWS,
   fieldName,
   groupChannels,
@@ -33,13 +34,19 @@ export default function TelemetryPage({
   const [layouts, setLayouts] = useState<TelemetryLayout[]>([]);
   const [selectedLayout, setSelectedLayout] = useState("");
   const [connected, setConnected] = useState(false);
-  // `connected` above means samples are arriving on the live stream; the
-  // link itself can be up with nothing to push, and that is not "off".
-  // Neither is a listening link, bound and waiting for its target.
+  // `connected` above means samples are arriving on the live stream:
+  // the newest is no older than STALE_SAMPLE_AGE_MS, the age at which
+  // the Dashboard calls a target's last sample stale. The link itself
+  // can be up with nothing to push, and that is not "off". Neither is a
+  // listening link, bound and waiting for its target. Live (`streaming`)
+  // needs both: the stream outlives a dropped link, since the backend
+  // keeps the socket open across it, so a link the target list reports
+  // down leaves Live at that read.
   const { data: targets } = useTargets();
   const link = targets?.find((t) => t.id === selectedTarget);
   const linkUp = link?.connected ?? false;
   const linkListening = !linkUp && (link?.listening ?? false);
+  const streaming = connected && linkUp;
   const [sampleCount, setSampleCount] = useState(0);
   const [pickerFilter, setPickerFilter] = useState("");
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set());
@@ -110,11 +117,15 @@ export default function TelemetryPage({
     }
   }, [selectedLayout, layouts]);
 
-  // ---- DATA LAYER: Hybrid WS buffer + DB poll ----
+  // ---- DATA LAYER: live stream + history poll ----
   //
-  // Small windows (<= 2min): WS buffer provides smooth real-time data
-  // Large windows (> 2min): DB poll every 2s for full historical coverage
-  // No merge between the two -- chart reads from one source based on window size.
+  // Plotted channels come from the history poll (every 500 ms for a
+  // window up to a minute, every 2 s beyond): a channel with stored
+  // samples in the widest window any plot shows gets those samples in
+  // place of its points. Each stream flush appends the live samples
+  // newer than a plotted channel's last point, so the right edge moves
+  // between polls. Channels not plotted (the sidebar's values) read the
+  // live buffer.
 
   const batchRef = useRef<Sample[]>([]);
   const liveDataRef = useRef<ChannelData>({});
@@ -141,6 +152,9 @@ export default function TelemetryPage({
     let reconnectTimer: number | undefined;
     let reconnectDelay = 1000;
     let stopped = false;
+    // Whether samples are arriving, and when the last one did.
+    let receiving = false;
+    let lastSampleAt = 0;
 
     function connect() {
       if (stopped) return;
@@ -150,17 +164,14 @@ export default function TelemetryPage({
         }/api/targets/${selectedTarget}/telemetry/live`,
       );
       wsInstance = ws;
-      let receivedData = false;
 
       ws.onopen = () => {
         reconnectDelay = 1000;
-        setTimeout(() => {
-          if (!receivedData && !stopped) setConnected(false);
-        }, 3000);
       };
       ws.onmessage = (event) => {
-        if (!receivedData) {
-          receivedData = true;
+        lastSampleAt = Date.now();
+        if (!receiving) {
+          receiving = true;
           setConnected(true);
         }
         if (pausedRef.current) return;
@@ -172,6 +183,7 @@ export default function TelemetryPage({
       };
       ws.onclose = (event) => {
         if (stopped) return;
+        receiving = false;
         setConnected(false);
         if (event.code === SESSION_END_CLOSE) {
           // The server closed this stream because its session ended:
@@ -187,8 +199,14 @@ export default function TelemetryPage({
       };
     }
 
-    // Flush WS batch into liveDataRef and update state (for small windows)
+    // Each flush moves the WS batch into liveDataRef and the chart
+    // state; a stream with no sample for STALE_SAMPLE_AGE_MS stops
+    // reading as receiving.
     const flushTimer = window.setInterval(() => {
+      if (receiving && Date.now() - lastSampleAt > STALE_SAMPLE_AGE_MS) {
+        receiving = false;
+        setConnected(false);
+      }
       const batch = batchRef.current;
       if (batch.length === 0) return;
       batchRef.current = [];
@@ -673,7 +691,7 @@ export default function TelemetryPage({
           <div
             className="flex items-center gap-1.5 text-xs"
             style={{
-              color: connected
+              color: streaming
                 ? paused
                   ? "var(--color-warn)"
                   : "var(--color-ok)"
@@ -687,7 +705,7 @@ export default function TelemetryPage({
             <div
               className="w-1.5 h-1.5 rounded-full"
               style={{
-                backgroundColor: connected
+                backgroundColor: streaming
                   ? paused
                     ? "var(--color-warn)"
                     : "var(--color-ok)"
@@ -698,7 +716,7 @@ export default function TelemetryPage({
                       : "var(--color-crit)",
               }}
             />
-            {!connected
+            {!streaming
               ? linkUp
                 ? "No data"
                 : linkListening
@@ -921,7 +939,7 @@ export default function TelemetryPage({
               className="text-xs py-4 text-center"
               style={{ color: "var(--color-text-muted)" }}
             >
-              {connected
+              {streaming
                 ? "Waiting for channels..."
                 : linkUp
                   ? "Connected -- no telemetry arriving"

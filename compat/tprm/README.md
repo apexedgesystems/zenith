@@ -3,8 +3,10 @@
 Byte-level golden vectors for the TPRM formats zenith writes and
 reads. Zenith's encoder answers to these files, not to any other
 implementation's source code: the backend test suite asserts
-byte-identity against them on every run, so CI fails on any
-divergence between zenith's writer and the contract.
+byte-identity against the payload vectors on every run, so CI fails on
+any divergence between zenith's writer and the contract. The packed
+archive (`archives/basic.tprm`) travels with the set, but zenith writes
+no archives and no test reads it.
 
 This is a COPY, refreshed deliberately -- never a reference to
 another repo. The vector set is the cross-repo contract; the repos
@@ -69,7 +71,7 @@ red conformance suite after a target-config regeneration):
 2. Update the Source line above to the commit copied, and name it in
    the refresh commit body.
 3. Run `make test-backend` -- the conformance suite in
-   `backend/src/core/tprm.rs` re-asserts every vector.
+   `backend/src/core/tprm.rs` re-asserts every payload vector.
 
 Proving the gate works: flip any committed vector byte and the suite
 must fail.

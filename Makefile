@@ -1,18 +1,21 @@
 # ==============================================================================
 # Zenith - Build System
 #
-# Build/run/test/lint targets run inside Docker (no local Rust/Node required;
-# lint is clippy and ESLint in the dev container). Format targets run
-# pre-commit on the host (one-time setup: `make hooks`).
+# Build/run/test/coverage/lint targets run inside Docker (no local Rust/Node
+# required; lint is clippy and ESLint, fmt-check is cargo fmt, both in the
+# dev container). format and format-check run pre-commit on the host
+# (one-time setup: `make hooks`).
 #
 # Usage:
 #   make build          Build production Docker image
 #   make run            Run with docker compose
 #   make dev            Development mode (rebuild + run)
 #   make test           Run all tests
+#   make coverage       Run all tests instrumented; reports under coverage/
 #   make format         Auto-fix formatting via pre-commit
-#   make format-check   Check formatting (CI mode)
-#   make lint           Run clippy strict
+#   make format-check   Check formatting: every pre-commit hook, check only
+#   make fmt-check      Check Rust formatting with cargo fmt (as CI does)
+#   make lint           Run clippy strict and ESLint
 #   make smoke-boot     Boot the built image and check what it serves
 #   make secret-scan    Scan the tree (and SECRET_SCAN_RANGE) for secrets
 #   make hooks          Install git pre-commit hook
@@ -20,7 +23,10 @@
 #   make help           Show all targets
 # ==============================================================================
 
-.PHONY: build build-clean run run-clean dev stop test test-backend test-frontend smoke-boot secret-scan bench clean format format-check lint hooks help
+.PHONY: build build-clean run run-clean dev stop test test-backend test-frontend \
+	coverage coverage-backend coverage-frontend coverage-check coverage-summary \
+	coverage-clean smoke-boot secret-scan bench clean format format-check fmt-check \
+	lint hooks help
 
 IMAGE_NAME := zenith
 COMPOSE := docker compose
@@ -71,15 +77,93 @@ dev: build
 ## Run backend + frontend tests
 test: test-backend test-frontend
 
-## Run backend unit tests
+## Run backend unit tests, the library's and the server binary's
 test-backend:
 	$(COMPOSE) run --rm -T dev bash -c \
-		'cd backend && CARGO_TARGET_DIR=target-test cargo test --lib'
+		'cd backend && CARGO_TARGET_DIR=target-test cargo test --lib --bins --locked'
 
 ## Run frontend unit tests (Vitest)
 test-frontend:
 	$(COMPOSE) run --rm -T dev bash -c \
 		'cd frontend && npm ci && npm run test'
+
+# Coverage: each half's suite runs once, instrumented; a failing test fails
+# its target and leaves no report for that half. Reports land under
+# coverage/<half>/: summary.txt (the per-file table), lcov.info and html/.
+# Each run counts only its own execution: the backend first removes the
+# profiles and workspace builds of earlier runs (cargo llvm-cov clean
+# --workspace; the dependency builds stay), since --no-report keeps them
+# and its report would merge them, and the frontend removes its old report
+# before installing, so a failed install leaves none behind.
+# The backend measures the library's and the server binary's tests with the
+# dev image's cargo-llvm-cov, which counts each file's inline #[cfg(test)]
+# code with the file: a file's row and the TOTAL both include its inline
+# tests (docs/TESTING.md gives a production-only reading). The frontend
+# measures every source file under src/, loaded by a test or not
+# (vitest's v8 provider, configured in vite.config.ts). The container writes
+# the reports as root, and llvm-cov makes its HTML directories readable by
+# owner and group only, so coverage-backend opens its report to every user:
+# the host and CI's upload step read it.
+#
+# coverage-check fails a half whose line coverage is under its floor. The
+# floors stay 0, report only, until the suites have settled; then each sits a
+# few points under a measured value and is only ever raised. `?=` takes a
+# per-run override: make coverage-check COVERAGE_BACKEND_MIN_LINE=<percent>
+COVERAGE_BACKEND_MIN_LINE  ?= 0
+COVERAGE_FRONTEND_MIN_LINE ?= 0
+
+## Run all tests instrumented; reports under coverage/backend and coverage/frontend
+coverage: coverage-backend coverage-frontend
+
+## Measure backend coverage: the library's and the server binary's tests
+coverage-backend:
+	$(COMPOSE) run --rm -T dev bash -c 'set -eo pipefail; cd backend; \
+		export CARGO_TARGET_DIR=target-cov; \
+		rm -rf ../coverage/backend; \
+		cargo llvm-cov clean --workspace; \
+		cargo llvm-cov --lib --bins --locked --no-report; \
+		mkdir -p ../coverage/backend; \
+		cargo llvm-cov report --lcov --output-path ../coverage/backend/lcov.info; \
+		cargo llvm-cov report --html --output-dir ../coverage/backend; \
+		cargo llvm-cov report | tee ../coverage/backend/summary.txt; \
+		chmod -R a+rX ../coverage/backend; \
+		$(if $(COVERAGE_GATE),cargo llvm-cov report --fail-under-lines $(COVERAGE_BACKEND_MIN_LINE) >/dev/null \
+			|| { echo "coverage-backend: line coverage is under the floor of $(COVERAGE_BACKEND_MIN_LINE)%" >&2; exit 1; })'
+
+## Measure frontend coverage: every source file under frontend/src
+coverage-frontend:
+	$(COMPOSE) run --rm -T dev bash -c \
+		'rm -rf coverage/frontend && cd frontend && npm ci && npm run test -- --coverage \
+			$(if $(COVERAGE_GATE),--coverage.thresholds.lines=$(COVERAGE_FRONTEND_MIN_LINE))'
+
+## Run coverage and fail a half under its line floor (COVERAGE_BACKEND_MIN_LINE,
+## COVERAGE_FRONTEND_MIN_LINE; 0, the default, only reports)
+coverage-check: COVERAGE_GATE := 1
+coverage-check: coverage
+
+## Print each half's coverage table as Markdown, for a CI job summary (host
+## side: reads coverage/, writes nothing)
+coverage-summary:
+	@echo '## Coverage'; \
+	for half in backend frontend; do \
+		echo; \
+		case $$half in \
+			backend) echo '### Backend: library and server binary tests (cargo llvm-cov)'; echo; \
+				echo 'File rows and the TOTAL both include the inline tests of each file; docs/TESTING.md gives a production-only reading.' ;; \
+			frontend) echo '### Frontend: every file under src/ (vitest, v8)' ;; \
+		esac; \
+		echo; \
+		if [ -s coverage/$$half/summary.txt ]; then \
+			echo '```text'; cat coverage/$$half/summary.txt; echo '```'; \
+		else \
+			echo "No report: coverage/$$half/summary.txt is missing (make coverage-$$half did not finish)."; \
+		fi; \
+	done
+
+## Remove the coverage reports and the instrumented build (in the dev
+## container, which owns them)
+coverage-clean:
+	$(COMPOSE) run --rm -T dev rm -rf coverage backend/target-cov
 
 ## Verify the declared version agrees everywhere (and with a tag:
 ## make version-check TAG=v0.2.0). The release workflow runs this
@@ -95,11 +179,14 @@ version-check:
 ## /api/health and turn healthy by the image's health check, with the
 ## server as an unprivileged PID 1 (no root identity, no capabilities,
 ## no-new-privileges). The first also checks the declared version, that
-## nothing was handed over, the bundled demo targets under their ids,
-## their curated plots within each target's recorded ceiling of
-## undecodable channels, a non-empty command catalog where one is
-## declared, and the console; the second, the extra group and one
-## hand-over of the data directory. CI runs it on every image it builds.
+## nothing was handed over, the bundled demo targets under their ids and
+## in their states after auto-connect (two listening, one down), their
+## curated plots within each target's recorded ceiling of undecodable
+## channels, a non-empty command catalog where one is declared, and the
+## console, and is then stopped with the stop signal: it must exit 0, log
+## its shutdown-complete line and a disconnect for each listening target.
+## The second checks the extra group and one hand-over of the data
+## directory. CI runs it on every image it builds.
 ## SMOKE_IMAGE defaults to this checkout's compose build (docker compose
 ## config --images zenith); SMOKE_PORT and SMOKE_TIMEOUT override the
 ## script's defaults.
@@ -188,20 +275,27 @@ format:
 format-check:
 	pre-commit run --all-files --show-diff-on-failure
 
+## Check Rust formatting with cargo fmt in the dev container (the check CI
+## runs; format-check runs it on the host among the other hooks)
+fmt-check:
+	$(COMPOSE) run --rm -T dev bash -c 'cd backend && cargo fmt -- --check'
+
 ## Install the git pre-commit hook so commits run formatters automatically
 hooks:
 	pre-commit install
 	@echo "pre-commit hooks installed. Commits will now run formatters."
 
-## Lint code (Rust clippy with -D warnings, runs in Docker)
+## Lint code (Rust clippy with -D warnings, then ESLint; runs in Docker)
 ##
 ## Not part of pre-commit by default because clippy can take 30s+ on a
-## cold cache. Run this manually before pushing or in CI.
+## cold cache. Run this manually before pushing or in CI. ESLint uses the
+## installed frontend dependencies, installing them first when there are
+## none (a fresh checkout).
 lint:
 	$(COMPOSE) run --rm -T dev bash -c \
-		'cd backend && cargo clippy --all-targets -- -D warnings'
+		'cd backend && cargo clippy --all-targets --locked -- -D warnings'
 	$(COMPOSE) run --rm -T dev bash -c \
-		'cd frontend && npx eslint . --max-warnings 200'
+		'cd frontend && { [ -d node_modules ] || npm ci; } && npx eslint . --max-warnings 200'
 
 # ------------------------------------------------------------------------------
 # Cleanup
@@ -226,6 +320,6 @@ help:
 	@grep -E '^## ' Makefile | sed 's/^## /  /'
 	@echo ""
 	@echo "Builds, tests and lint run inside Docker; no local Rust or Node required."
-	@echo "format, format-check and hooks run pre-commit on the host; smoke-boot"
-	@echo "needs docker, curl and jq there, secret-scan docker, git and GNU tar"
-	@echo "(docs/TESTING.md)."
+	@echo "format, format-check and hooks run pre-commit on the host, and"
+	@echo "coverage-summary reads coverage/ there; smoke-boot needs docker, curl"
+	@echo "and jq there, secret-scan docker, git and GNU tar (docs/TESTING.md)."

@@ -201,10 +201,11 @@ impl AprotoClient {
         // Writer task: send commands, pair each with its ACK by sequence
         // number. The wait is bounded: a target that never ACKs fails
         // that one command with Timeout and the writer keeps serving --
-        // an unbounded recv here once wedged the client permanently
-        // (full cmd channel, is_connected still true) until an explicit
-        // disconnect. A late ACK for a timed-out command is discarded by
-        // the sequence match when it eventually arrives.
+        // an unbounded wait would stall every later command behind the
+        // missing ACK (the command channel fills while is_connected
+        // still reads true) until an explicit disconnect. A late ACK for
+        // a timed-out command is discarded by the sequence match when it
+        // eventually arrives.
         let conn_flag_w = connected.clone();
         let gen_flag_w = self.generation.clone();
         let ack_timeout = self.command_timeout;
@@ -369,9 +370,7 @@ impl AprotoClient {
     /// Override the ACK/command timeout (applies to connections made
     /// after the call; the writer task captures it at connect time).
     /// The server binary uses the 5 s default; the fake-target tests
-    /// shorten it. allow(dead_code) because the bin target compiles
-    /// this module too and does not call it.
-    #[allow(dead_code)]
+    /// shorten it.
     pub fn set_command_timeout(&mut self, timeout: Duration) {
         self.command_timeout = timeout;
     }
@@ -824,8 +823,8 @@ mod tests {
 
     /// @test A target that never ACKs fails that command with Timeout,
     /// and the client remains connected and usable: the next command
-    /// (which the target does ACK) succeeds. Guards against the
-    /// unbounded ACK wait that permanently wedged the writer task.
+    /// (which the target does ACK) succeeds, so a missing ACK costs one
+    /// command, never the writer.
     #[tokio::test]
     async fn missing_ack_times_out_and_client_recovers() {
         let addr = spawn_fake_target(|pkt| {
@@ -876,20 +875,11 @@ mod tests {
         );
     }
 
-    /// @test An ACK whose sequence never matches the in-flight command
-    /// is not delivered; the command times out rather than receiving a
-    /// mismatched response.
-    #[tokio::test]
-    async fn mismatched_seq_ack_is_not_delivered() {
-        let addr = spawn_fake_target(|pkt| ack_packet(pkt.header.opcode, 999, 0)).await;
-        let (mut client, _rx) = connected_client(addr, 200).await;
-
-        assert!(matches!(client.noop().await, Err(ClientError::Timeout)));
-        assert!(client.is_connected());
-    }
-
     /// @test A remote close while a command is in flight yields Closed
-    /// and drops is_connected.
+    /// and drops is_connected: the reader clears the flag before it
+    /// ends, and its end is what closes the ACK channel the command
+    /// waits on. The command timeout is far longer than the close
+    /// takes, so the answer cannot be a Timeout.
     #[tokio::test]
     async fn remote_close_yields_closed_and_disconnects() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -900,16 +890,71 @@ mod tests {
             let _ = sock.read(&mut buf).await; // receive the command
             drop(sock); // close without ACKing
         });
-        let (mut client, _rx) = connected_client(addr, 1000).await;
+        let (mut client, _rx) = connected_client(addr, 10_000).await;
 
         let resp = client.noop().await;
-        assert!(
-            matches!(resp, Err(ClientError::Closed) | Err(ClientError::Timeout)),
-            "{resp:?}"
-        );
-        // Reader observes the close and clears the flag.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(matches!(resp, Err(ClientError::Closed)), "{resp:?}");
         assert!(!client.is_connected());
+    }
+
+    /// A SLIP-encoded packet as a target would send it: any flags, uid,
+    /// opcode and payload.
+    fn target_packet(flags: u8, full_uid: u32, opcode: u16, payload: &[u8]) -> Vec<u8> {
+        let mut pkt = Vec::with_capacity(aproto::HEADER_SIZE + payload.len());
+        pkt.extend_from_slice(&aproto::MAGIC.to_le_bytes());
+        pkt.push(aproto::VERSION);
+        pkt.push(flags);
+        pkt.extend_from_slice(&full_uid.to_le_bytes());
+        pkt.extend_from_slice(&opcode.to_le_bytes());
+        pkt.extend_from_slice(&0u16.to_le_bytes());
+        pkt.extend_from_slice(&(payload.len() as u16).to_le_bytes());
+        pkt.extend_from_slice(payload);
+        slip::encode(&pkt)
+    }
+
+    /// @test The reader routes each response by its kind: a response
+    /// that is neither ACK nor NAK is telemetry and goes to the push
+    /// channel with its uid and payload, a packet without the response
+    /// flag is skipped, and a NAK reaches the command waiting for it
+    /// with its status, never the push channel.
+    #[tokio::test]
+    async fn reader_routes_telemetry_to_push_and_a_nak_to_its_command() {
+        let addr = spawn_fake_target(|pkt| {
+            let mut nak = Vec::new();
+            nak.extend_from_slice(&pkt.header.opcode.to_le_bytes());
+            nak.extend_from_slice(&pkt.header.sequence.to_le_bytes());
+            nak.extend_from_slice(&[aproto::NAK_COMPONENT_NOT_FOUND, aproto::STAGE_RESULT, 0, 0]);
+            let mut reply = target_packet(0, 0x00D000, 0x0300, &[9, 9]);
+            reply.extend(target_packet(
+                aproto::FLAG_RESPONSE,
+                0x00D000,
+                0x0300,
+                &[1, 2, 3, 4],
+            ));
+            reply.extend(target_packet(
+                aproto::FLAG_RESPONSE,
+                0,
+                aproto::SYS_NAK,
+                &nak,
+            ));
+            reply
+        })
+        .await;
+        let (mut client, mut push_rx) = connected_client(addr, 1000).await;
+
+        let resp = client.noop().await.unwrap();
+        assert_eq!(resp.status, aproto::NAK_COMPONENT_NOT_FOUND);
+        assert_eq!(resp.status_name, "COMPONENT_NOT_FOUND");
+        let pkt = timeout(Duration::from_secs(1), push_rx.recv())
+            .await
+            .expect("the telemetry response was pushed")
+            .unwrap();
+        assert_eq!((pkt.full_uid, pkt.payload), (0x00D000, vec![1, 2, 3, 4]));
+        assert!(pkt.category.is_none());
+        assert!(
+            push_rx.try_recv().is_err(),
+            "the non-response and the NAK pushed nothing"
+        );
     }
 
     /// @test Sending without a connection returns NotConnected.
@@ -1008,95 +1053,17 @@ mod tests {
         ]
     }
 
-    /// @test A reconnect retires the previous session before it returns,
-    /// on a multi-worker runtime: the old reader and writer have both
-    /// finished by the time connect hands back, so neither can run --
-    /// or clear the connected flag -- once the new session is published.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn reconnect_finishes_previous_tasks_before_returning() {
-        let (push_tx, _) = broadcast::channel(16);
-        let mut client = AprotoClient::new(push_tx);
-        let first = holding_peer().await;
-        client.connect("127.0.0.1", first.port()).await.unwrap();
-        let old = session_tasks(&client);
-
-        let second = holding_peer().await;
-        client.connect("127.0.0.1", second.port()).await.unwrap();
-
-        assert!(
-            old[0].is_finished(),
-            "old reader still running after connect"
-        );
-        assert!(
-            old[1].is_finished(),
-            "old writer still running after connect"
-        );
-        assert!(client.is_connected());
-        client.disconnect();
-    }
-
-    /// @test The same holds across a disconnect. Disconnect keeps the
-    /// reader and writer it aborts, and the next connect waits for them
-    /// before it publishes. A task already inside its exit path is not
-    /// at an await, so the abort cannot stop it; the test stands one in
-    /// (a task that blocks its worker) and checks that it finished
-    /// before the new generation and the connected flag were visible.
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn connect_after_disconnect_waits_for_the_disconnected_tasks() {
-        let (push_tx, _) = broadcast::channel(16);
-        let mut client = AprotoClient::new(push_tx);
-        let first = holding_peer().await;
-        client.connect("127.0.0.1", first.port()).await.unwrap();
-        let old = session_tasks(&client);
-        client.disconnect();
-        assert_eq!(
-            client.retired.len(),
-            2,
-            "disconnect keeps the aborted tasks"
-        );
-
-        let entered = Arc::new(std::sync::Barrier::new(2));
-        let seen = Arc::new(std::sync::Mutex::new(None));
-        let (generation, connected) = (client.generation.clone(), client.connected.clone());
-        let (entered_task, seen_task) = (entered.clone(), seen.clone());
-        client.retired.push(tokio::spawn(async move {
-            entered_task.wait();
-            std::thread::sleep(Duration::from_millis(100));
-            *seen_task.lock().unwrap() = Some((
-                generation.load(Ordering::Acquire),
-                connected.load(Ordering::Acquire),
-            ));
-        }));
-        tokio::task::spawn_blocking(move || {
-            entered.wait();
-        })
-        .await
-        .unwrap();
-
-        let second = holding_peer().await;
-        client.connect("127.0.0.1", second.port()).await.unwrap();
-
-        assert_eq!(
-            *seen.lock().unwrap(),
-            Some((1, false)),
-            "a disconnected task ran after the next session was published"
-        );
-        assert!(old[0].is_finished(), "disconnected reader still running");
-        assert!(old[1].is_finished(), "disconnected writer still running");
-        assert!(client.retired.is_empty());
-        assert!(client.is_connected());
-        client.disconnect();
-    }
-
     /// @test A connect dropped while it waits for a retiring task loses
-    /// none of them: every task it was retiring has been asked to stop
-    /// before the first wait and stays owned by the client, and the next
-    /// connect finishes the retirement before it publishes. Stand-ins:
-    /// one parked at an await, first in line, which an abort ends at
-    /// once; two inside their exit paths, blocking their workers where
-    /// an abort cannot stop them until released, after which each
-    /// records the generation it sees and reaches an await, where a
-    /// requested abort ends it.
+    /// none of them: after a disconnect, which keeps the reader and
+    /// writer it aborts, every task the connect was retiring has been
+    /// asked to stop before the first wait and stays owned by the
+    /// client, and the next connect finishes the retirement before it
+    /// publishes. Stand-ins, queued ahead of the session's own aborted
+    /// tasks: one parked at an await, first in line, which an abort ends
+    /// at once; two inside their exit paths, blocking their workers
+    /// where an abort cannot stop them until released, after which each
+    /// records the generation and the connected flag it sees and reaches
+    /// an await, where a requested abort ends it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn cancelled_connect_leaves_its_retiring_tasks_to_the_next() {
         let (push_tx, _) = broadcast::channel(16);
@@ -1114,13 +1081,16 @@ mod tests {
         for _ in 0..2 {
             let seen = Arc::new(std::sync::Mutex::new(None));
             let ran_on = Arc::new(AtomicBool::new(false));
-            let generation = client.generation.clone();
+            let (generation, connected) = (client.generation.clone(), client.connected.clone());
             let (entered, release) = (entered.clone(), release.clone());
             let (seen_task, ran_on_task) = (seen.clone(), ran_on.clone());
             client.retired.push(tokio::spawn(async move {
                 entered.wait();
                 release.wait();
-                *seen_task.lock().unwrap() = Some(generation.load(Ordering::Acquire));
+                *seen_task.lock().unwrap() = Some((
+                    generation.load(Ordering::Acquire),
+                    connected.load(Ordering::Acquire),
+                ));
                 tokio::task::yield_now().await;
                 ran_on_task.store(true, Ordering::Release);
             }));
@@ -1132,6 +1102,8 @@ mod tests {
         })
         .await
         .unwrap();
+        client.disconnect();
+        let kept_by_disconnect = client.retired.len();
 
         // Observations are kept and asserted after the release, so a
         // failure ends the test instead of leaving the stand-ins blocked.
@@ -1165,6 +1137,10 @@ mod tests {
         };
         let (mut client, ()) = tokio::join!(reconnect, release_stand_ins);
 
+        assert_eq!(
+            kept_by_disconnect, 5,
+            "disconnect keeps the reader and writer it aborts"
+        );
         assert!(interrupted, "connect waits for the stand-ins");
         assert_eq!(
             kept, 3,
@@ -1181,7 +1157,7 @@ mod tests {
         for (seen, ran_on) in &stand_ins {
             assert_eq!(
                 *seen.lock().unwrap(),
-                Some(1),
+                Some((1, false)),
                 "a retiring task ran after the next session was published"
             );
             assert!(

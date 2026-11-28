@@ -131,10 +131,18 @@ fn encode_claims(claims: serde_json::Value, secret: &str) -> Result<String, Stri
 ///
 /// `from_query` marks credentials that arrived on a query string:
 /// only ws tickets are accepted there, so a long-lived bearer token
-/// can never end up in request logs.
+/// can never end up in request logs, and only there, so a ticket is
+/// never a bearer token. Which route a ticket may open is the
+/// middleware's to decide: the telemetry socket alone.
+///
+/// A credential is refused from the second its `exp` passes. The
+/// server mints and checks its own tokens on one clock, so the
+/// library's default grace for clock skew (60 s) would only stretch
+/// every lifetime, a 30 s ticket to 90 s.
 pub fn validate_token(token: &str, secret: &str, from_query: bool) -> Result<String, String> {
     let mut validation = jsonwebtoken::Validation::default();
     validation.set_required_spec_claims(&["exp", "sub"]);
+    validation.leeway = 0;
     let decoded = jsonwebtoken::decode::<Claims>(
         token,
         &jsonwebtoken::DecodingKey::from_secret(secret.as_bytes()),
@@ -144,6 +152,11 @@ pub fn validate_token(token: &str, secret: &str, from_query: bool) -> Result<Str
 
     if from_query && !decoded.claims.ws {
         return Err("query credentials must be ws tickets (POST /api/auth/ws-ticket)".into());
+    }
+    if !from_query && decoded.claims.ws {
+        return Err(
+            "a socket ticket goes on the telemetry socket's query string, not in a header".into(),
+        );
     }
     Ok(decoded.claims.sub)
 }
@@ -225,6 +238,20 @@ mod tests {
         assert!(validate_token(&token, SECRET, false).is_err());
     }
 
+    /// @test A credential is refused from the second its exp passes, with
+    /// no grace: a socket ticket minted WS_TICKET_TTL_SECS + 1 seconds
+    /// ago, and a bearer token minted TOKEN_TTL_SECS + 1 seconds ago,
+    /// are both a second past their exp, so a "30 s" ticket lives 30 s.
+    #[test]
+    fn a_credential_past_its_exp_is_refused_at_once() {
+        let ticket = mint_ws_ticket("ops", SECRET, now() - WS_TICKET_TTL_SECS - 1).unwrap();
+        assert!(validate_token(&ticket, SECRET, true).is_err(), "ticket");
+        let token = mint_token("ops", SECRET, now() - TOKEN_TTL_SECS - 1).unwrap();
+        assert!(validate_token(&token, SECRET, false).is_err(), "token");
+        let fresh = mint_ws_ticket("ops", SECRET, now()).unwrap();
+        assert_eq!(validate_token(&fresh, SECRET, true).unwrap(), "ops");
+    }
+
     /// @test Query-string credentials must be ws tickets: a full bearer
     /// token is rejected from the query path but accepted from the
     /// header path, and a ws ticket passes the query path.
@@ -236,27 +263,71 @@ mod tests {
 
         let ticket = mint_ws_ticket("ops", SECRET, now()).unwrap();
         assert_eq!(validate_token(&ticket, SECRET, true).unwrap(), "ops");
+        assert!(validate_token(&ticket, SECRET, false).is_err());
     }
 
-    /// @test Tokens without required claims are rejected (a token
-    /// signed correctly but missing sub).
+    /// @test A token signed with the right secret is still refused when
+    /// it lacks a required claim -- no sub, or no exp (a token that
+    /// would never expire) -- or when it was signed with any algorithm
+    /// but HS256, including an unsigned "none" token; the same claims
+    /// signed HS256 pass.
     #[test]
-    fn missing_sub_rejected() {
-        let token = jsonwebtoken::encode(
-            &jsonwebtoken::Header::default(),
-            &serde_json::json!({ "exp": now() + 1000 }),
-            &jsonwebtoken::EncodingKey::from_secret(SECRET.as_bytes()),
-        )
-        .unwrap();
-        assert!(validate_token(&token, SECRET, false).is_err());
+    fn tokens_missing_a_claim_or_signed_otherwise_are_refused() {
+        use base64::Engine;
+        use jsonwebtoken::{Algorithm, EncodingKey, Header};
+        let sign = |alg: Algorithm, claims: serde_json::Value| {
+            jsonwebtoken::encode(
+                &Header::new(alg),
+                &claims,
+                &EncodingKey::from_secret(SECRET.as_bytes()),
+            )
+            .unwrap()
+        };
+        let full = serde_json::json!({ "sub": "ops", "exp": now() + 1000 });
+        assert_eq!(
+            validate_token(&sign(Algorithm::HS256, full.clone()), SECRET, false).unwrap(),
+            "ops"
+        );
+
+        let b64 = |v: serde_json::Value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string())
+        };
+        let unsigned = format!(
+            "{}.{}.",
+            b64(serde_json::json!({ "alg": "none", "typ": "JWT" })),
+            b64(full.clone())
+        );
+        for (token, why) in [
+            (
+                sign(Algorithm::HS256, serde_json::json!({ "exp": now() + 1000 })),
+                "no sub",
+            ),
+            (
+                sign(Algorithm::HS256, serde_json::json!({ "sub": "ops" })),
+                "no exp",
+            ),
+            (sign(Algorithm::HS384, full.clone()), "HS384"),
+            (sign(Algorithm::HS512, full.clone()), "HS512"),
+            (unsigned, "alg none"),
+        ] {
+            assert!(
+                validate_token(&token, SECRET, false).is_err(),
+                "{why}: accepted"
+            );
+        }
     }
 
     /// @test Boot validation: disabled auth is always fine; enabled
-    /// auth rejects the default secret, a short secret, an empty hash,
-    /// and a malformed hash -- and passes a proper configuration.
+    /// auth refuses the default secret, a short secret that is not the
+    /// default, an empty hash and a malformed hash, each by its own
+    /// error -- and passes a proper configuration.
     #[test]
     fn boot_validation_covers_each_misconfiguration() {
         use crate::config::AuthSection;
+        const SECRET_ERR: &str = "[auth] secret is the default or shorter than 16 chars";
+        const EMPTY_HASH_ERR: &str =
+            "[auth] password_hash is empty (generate with zenith --hash-password)";
+        const BAD_HASH_ERR: &str = "[auth] password_hash is not a valid PHC string";
         let good_hash = hash_password("pw").unwrap();
 
         let mut auth = AuthSection {
@@ -272,14 +343,18 @@ mod tests {
         );
 
         auth.enabled = true;
-        assert_eq!(boot_errors(&auth).len(), 2, "default secret + empty hash");
+        assert_eq!(boot_errors(&auth), [SECRET_ERR, EMPTY_HASH_ERR]);
 
         auth.secret = "long-enough-secret-value".into();
         auth.password_hash = "garbage".into();
-        assert_eq!(boot_errors(&auth).len(), 1, "malformed hash");
+        assert_eq!(boot_errors(&auth), [BAD_HASH_ERR]);
 
         auth.password_hash = good_hash;
         assert!(boot_errors(&auth).is_empty(), "proper config passes");
+
+        auth.secret = "fifteen-chars-x".into();
+        assert_eq!(auth.secret.len(), 15);
+        assert_eq!(boot_errors(&auth), [SECRET_ERR], "a short secret");
     }
 
     /// @test Session limits: an absolute limit of zero and an idle limit
@@ -316,29 +391,6 @@ mod tests {
         auth.session_max_hours = 0;
         auth.enabled = false;
         assert!(boot_errors(&auth).is_empty(), "inert while auth is off");
-    }
-
-    /// @test The session keys default to a 30 minute idle limit, a 10
-    /// hour absolute limit and a Secure cookie, and read from the file.
-    #[test]
-    fn session_keys_parse_with_defaults() {
-        use crate::config::AuthSection;
-        let d: AuthSection = toml::from_str("enabled = true").unwrap();
-        assert_eq!(
-            (d.session_idle_min, d.session_max_hours, d.cookie_secure),
-            (30, 10, true)
-        );
-        let set: AuthSection =
-            toml::from_str("session_idle_min = 0\nsession_max_hours = 12\ncookie_secure = false\n")
-                .unwrap();
-        assert_eq!(
-            (
-                set.session_idle_min,
-                set.session_max_hours,
-                set.cookie_secure
-            ),
-            (0, 12, false)
-        );
     }
 
     /// @test Credential precedence: a bearer header wins over a query

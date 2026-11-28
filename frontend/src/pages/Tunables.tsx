@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRegistry, useTunableFields } from "../api/queries";
 import { apiFetch } from "../api/apiFetch";
+import { parseWholeNumber, wholeNumberHint } from "../utils/wholeNumber";
 
 /* ----------------------------- Types ----------------------------- */
 
@@ -40,6 +41,64 @@ function isVarLen(p: ParamsData): p is VarLenParamsData {
   return p.variable_length === true;
 }
 
+/** A registry uid as the params routes take it: hex digits, no 0x. */
+function routeUid(uid: string): string {
+  return uid.replace("0x", "").replace("0X", "");
+}
+
+/** Whether `fi` is an int or uint 8 bytes wide. The parameter read gives
+ *  such a field as a decimal string and the update takes one back: a
+ *  double, which a JSON number becomes here, holds integers exactly only
+ *  up to 2^53. The form edits it as text: a number input takes no 0x
+ *  hex, and its stepper counts in doubles. */
+function isWideInteger(fi: FieldInfo | undefined): fi is FieldInfo {
+  return fi?.size === 8 && (fi.type === "int" || fi.type === "uint");
+}
+
+/** A value typed into a field the form knows not to be an 8-byte
+ *  integer: the number it reads as, else the text. */
+function typedNumber(text: string): number | string {
+  const n = parseFloat(text);
+  return isNaN(n) ? text : n;
+}
+
+/** The exact value of decimal number text, as the sign, the digits
+ *  without leading or trailing zeros, and the power of ten, so that
+ *  equal values give equal strings ("-0.250" and "-25e-2" both give
+ *  "-25e-2"); null for any other text. */
+function decimalValue(text: string): string | null {
+  const m = /^(-?)(\d*)(?:\.(\d*))?(?:e([+-]?\d+))?$/i.exec(text.trim());
+  if (!m) return null;
+  const [, sign, whole, fraction = "", exponent = "0"] = m;
+  const digits = `${whole}${fraction}`;
+  if (digits === "") return null;
+  const significant = digits.replace(/^0+/, "");
+  if (significant === "") return "0";
+  const kept = significant.replace(/0+$/, "");
+  const power =
+    BigInt(exponent) -
+    BigInt(fraction.length) +
+    BigInt(significant.length - kept.length);
+  return `${sign}${kept}e${power}`;
+}
+
+/** A value typed into a field whose type the form does not know: a
+ *  nested leaf, a variable-length block's field, or any field before
+ *  the struct read answers. It goes as a number only when the JSON text
+ *  of that number has exactly the value typed; otherwise as the text
+ *  typed, trimmed. A double keeps about 15 significant digits, and a
+ *  value that is not whole can still read as one (0.99999999999999999
+ *  as 1, 1e-400 as 0), which an integer field would take. The server
+ *  judges the text: it reads an 8-byte integer's string exactly and
+ *  refuses a string, naming the field, where a field takes none. */
+function untypedValue(text: string): number | string {
+  const n = parseFloat(text);
+  const typed = decimalValue(text);
+  return typed !== null && decimalValue(JSON.stringify(n)) === typed
+    ? n
+    : text.trim();
+}
+
 /* ----------------------------- Page ----------------------------- */
 
 export default function TunablesPage({
@@ -52,6 +111,11 @@ export default function TunablesPage({
   >([]);
   const [selectedUid, setSelectedUid] = useState("");
   const [params, setParams] = useState<ParamsData | null>(null);
+  // What the operator has typed into the flat form, by field name; a
+  // field not typed into is applied as read.
+  const [edits, setEdits] = useState<Record<string, string>>({});
+  // The component the shown values were read from (route form).
+  const [paramsUid, setParamsUid] = useState("");
   const [fieldInfo, setFieldInfo] = useState<FieldInfo[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -71,23 +135,45 @@ export default function TunablesPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [registryQuery.data]);
 
-  // Struct-dict field info for the selected component, cached
-  // per (target, component) -- dictionaries are immutable per process.
+  // Struct-dict field info for the struct the shown block was read
+  // with, cached per (target, component, struct) -- dictionaries are
+  // immutable per process.
   const tunableFieldsQuery = useTunableFields(
     selectedTarget,
     params?.component ?? null,
+    params?.struct_name ?? null,
   );
   useEffect(() => {
     setFieldInfo((tunableFieldsQuery.data ?? []) as FieldInfo[]);
   }, [tunableFieldsQuery.data]);
 
+  // Reads are numbered and only the latest may write the form: a slow
+  // answer for a component the operator has since left, or for a read
+  // since repeated, is dropped instead of replacing what is shown.
+  const latestRead = useRef(0);
+  // The reload after an apply; a new selection cancels it.
+  const reloadTimer = useRef<number | undefined>(undefined);
+  // Each selection shown is numbered, and choosing another component or
+  // target, or leaving the page, ends it. An apply answered after its
+  // selection ended changes nothing: no message, and no reload of the
+  // component left over the one now shown.
+  const selection = useRef(0);
+
+  // Show a read's values, with nothing typed over them.
+  const showRead = (data: ParamsData | null) => {
+    setParams(data);
+    setEdits({});
+  };
+
   const loadParams = async () => {
     if (!selectedUid) return;
+    const read = ++latestRead.current;
+    const superseded = () => read !== latestRead.current;
     setLoading(true);
     setError(null);
     setMessage(null);
     try {
-      const uid = selectedUid.replace("0x", "").replace("0X", "");
+      const uid = routeUid(selectedUid);
       if (!uid) {
         setLoading(false);
         return;
@@ -95,15 +181,18 @@ export default function TunablesPage({
       const r = await apiFetch(`/api/targets/${selectedTarget}/params/${uid}`);
       if (r.ok) {
         const data = await r.json();
+        if (superseded()) return;
         if (data.fields) {
-          setParams(data);
+          showRead(data);
+          setParamsUid(uid);
         } else {
-          setParams(null);
+          showRead(null);
           setMessage("No tunable parameters registered for this component.");
         }
       } else {
         const text = await r.text();
-        setParams(null);
+        if (superseded()) return;
+        showRead(null);
         if (text.includes("COMPONENT_NOT_FOUND")) {
           setMessage(
             "This component has no tunable parameters in the data registry.",
@@ -113,6 +202,7 @@ export default function TunablesPage({
         }
       }
     } catch (e: unknown) {
+      if (superseded()) return;
       setError(e instanceof Error ? e.message : String(e));
     }
     setLoading(false);
@@ -120,6 +210,10 @@ export default function TunablesPage({
 
   useEffect(() => {
     loadParams();
+    return () => {
+      selection.current += 1;
+      window.clearTimeout(reloadTimer.current);
+    };
     // loadParams is intentionally not in deps -- it's defined every render
     // (no useCallback) and including it would loop. The function only reads
     // selectedTarget + selectedUid which are both in deps.
@@ -127,32 +221,74 @@ export default function TunablesPage({
   }, [selectedTarget, selectedUid]);
 
   const updateField = (name: string, value: string) => {
-    if (!params || isVarLen(params)) return;
-    const numVal = parseFloat(value);
-    setParams({
-      ...params,
-      fields: { ...params.fields, [name]: isNaN(numVal) ? value : numVal },
-    });
+    setEdits((typed) => ({ ...typed, [name]: value }));
+  };
+
+  /** The flat form's fields as Apply sends them, or the refusal of the
+   *  first typed value that cannot be sent. A field not typed into goes
+   *  as read. A typed 8-byte integer goes as the decimal string of a
+   *  whole number in its range, never through a double; any other typed
+   *  value as typedNumber, or untypedValue when the field's type is not
+   *  known. */
+  const appliedFields = (
+    read: Record<string, number | string>,
+  ): { fields: Record<string, number | string> } | { refusal: string } => {
+    const fields = { ...read };
+    for (const [name, text] of Object.entries(edits)) {
+      const fi = fieldInfo.find((f) => f.name === name);
+      if (isWideInteger(fi)) {
+        const bits = 8 * fi.size;
+        const signed = fi.type === "int";
+        const n = parseWholeNumber(text, bits, signed);
+        if (n === null) {
+          const takes = wholeNumberHint(bits, signed);
+          return {
+            refusal: `Not applied: field '${name}' takes ${takes}; '${text}' is not one.`,
+          };
+        }
+        fields[name] = n.toString();
+      } else {
+        fields[name] = fi ? typedNumber(text) : untypedValue(text);
+      }
+    }
+    return { fields };
   };
 
   const applyParams = async () => {
     if (!params) return;
+    // The values go back to the component they were read from, and only
+    // while it is the one selected.
+    if (paramsUid !== routeUid(selectedUid)) {
+      setError(
+        "Not applied: these values were read from another component. Reload, then apply.",
+      );
+      return;
+    }
+    // Include raw_hex so backend can use it as base (no hidden INSPECT)
+    let body: object;
+    if (isVarLen(params)) {
+      body = {
+        fields: params.fields.header,
+        entries: params.fields.entries,
+        variable_length: true,
+        raw_hex: params.raw_hex,
+      };
+    } else {
+      const applied = appliedFields(params.fields);
+      if ("refusal" in applied) {
+        setError(applied.refusal);
+        return;
+      }
+      body = { fields: applied.fields, raw_hex: params.raw_hex };
+    }
+    const current = selection.current;
+    const left = () => current !== selection.current;
     setLoading(true);
     setError(null);
     setMessage(null);
     try {
-      const uid = selectedUid.replace("0x", "").replace("0X", "");
-      // Include raw_hex so backend can use it as base (no hidden INSPECT)
-      const body = isVarLen(params)
-        ? {
-            fields: params.fields.header,
-            entries: params.fields.entries,
-            variable_length: true,
-            raw_hex: params.raw_hex,
-          }
-        : { fields: params.fields, raw_hex: params.raw_hex };
       const r = await apiFetch(
-        `/api/targets/${selectedTarget}/params/${uid}/update`,
+        `/api/targets/${selectedTarget}/params/${paramsUid}/update`,
         {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -161,6 +297,7 @@ export default function TunablesPage({
       );
       if (r.ok) {
         const result = await r.json();
+        if (left()) return;
         const staged = result.staged as
           | {
               step: string;
@@ -181,7 +318,7 @@ export default function TunablesPage({
                   })`
               : `Parameters updated and reloaded (${result.uploaded_bytes} bytes uploaded)`,
           );
-          setTimeout(loadParams, 500);
+          reloadTimer.current = window.setTimeout(loadParams, 500);
         } else if (staged && staged.step !== "applied") {
           // The pipeline refused before apply: active bytes untouched.
           const verdict =
@@ -197,9 +334,12 @@ export default function TunablesPage({
           setError(`Upload failed: ${result.status_name}${verdict}`);
         }
       } else {
-        setError(await r.text());
+        const text = await r.text();
+        if (left()) return;
+        setError(text);
       }
     } catch (e: unknown) {
+      if (left()) return;
       setError(e instanceof Error ? e.message : String(e));
     }
     setLoading(false);
@@ -210,13 +350,20 @@ export default function TunablesPage({
     return fi ? `${fi.type}${fi.size > 0 ? fi.size * 8 : ""}` : "";
   };
 
+  const isWide = (name: string) =>
+    isWideInteger(fieldInfo.find((f) => f.name === name));
+
   return (
     <div className="max-w-screen-2xl">
       <div className="flex items-center gap-3 mb-5">
         <h1 className="text-xl font-bold">Tunables</h1>
         <select
           value={selectedUid}
-          onChange={(e) => setSelectedUid(e.target.value)}
+          onChange={(e) => {
+            // Nothing of the last component shows while this one loads.
+            showRead(null);
+            setSelectedUid(e.target.value);
+          }}
           className="text-sm"
           style={{ padding: "4px 8px" }}
         >
@@ -349,9 +496,9 @@ export default function TunablesPage({
                       </td>
                       <td style={{ padding: "0.4rem 0.8rem" }}>
                         <input
-                          type="number"
-                          step="any"
-                          value={value}
+                          type={isWide(name) ? "text" : "number"}
+                          step={isWide(name) ? undefined : "any"}
+                          value={edits[name] ?? value}
                           onChange={(e) => updateField(name, e.target.value)}
                           className="mono text-sm w-full"
                         />
@@ -472,14 +619,13 @@ export default function TunablesPage({
                         step="any"
                         value={value}
                         onChange={(e) => {
-                          const numVal = parseFloat(e.target.value);
                           setParams({
                             ...params,
                             fields: {
                               ...params.fields,
                               header: {
                                 ...params.fields.header,
-                                [name]: isNaN(numVal) ? e.target.value : numVal,
+                                [name]: untypedValue(e.target.value),
                               },
                             },
                           });
@@ -569,10 +715,7 @@ export default function TunablesPage({
                             step="any"
                             value={col === "fullUid" ? Number(val) : val}
                             onChange={(e) => {
-                              const numVal = parseFloat(e.target.value);
-                              const newVal = isNaN(numVal)
-                                ? e.target.value
-                                : numVal;
+                              const newVal = untypedValue(e.target.value);
                               setParams({
                                 ...params,
                                 fields: {

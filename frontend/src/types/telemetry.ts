@@ -50,6 +50,12 @@ export const COLORS = [
   "#ff9bce",
 ];
 
+/** A target whose newest sample is older than this is stale: the
+ *  Dashboard flags its last-sample age, and the Telemetry page stops
+ *  reading Live. Long enough that a target publishing every few
+ *  seconds reads as live between its samples. */
+export const STALE_SAMPLE_AGE_MS = 10_000;
+
 export const TIME_WINDOWS = [
   { label: "10s", ms: 10000 },
   { label: "30s", ms: 30000 },
