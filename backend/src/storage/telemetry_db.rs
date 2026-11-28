@@ -71,6 +71,25 @@ pub struct TelemetryDb {
 /// Insert-path cache key: (target_id, channel name).
 type ChannelKey = (Arc<str>, Arc<str>);
 
+/// One channel's history, step one: the limit-th newest row of the
+/// window (OFFSET limit - 1), timestamp and rowid, walked newest first
+/// over `idx_telemetry_chan_ts` alone. The index keeps rows that share a
+/// timestamp in rowid order, which this walk follows as the tiebreak.
+const CHANNEL_LIMIT_ROW: &str = "SELECT timestamp_ms, id FROM telemetry \
+     WHERE channel_id = ?1 \
+       AND timestamp_ms >= ?2 AND timestamp_ms <= ?3 \
+     ORDER BY timestamp_ms DESC, id ASC LIMIT 1 OFFSET ?4";
+
+/// Step two: the window's rows from that row on (a later timestamp, or
+/// the same one and a rowid no greater), oldest first, in the order a
+/// backward walk of the index meets them.
+const CHANNEL_ROWS_FROM: &str =
+    "SELECT timestamp_ms, value, v_min, v_max, agg_count FROM telemetry \
+     WHERE channel_id = ?1 \
+       AND timestamp_ms >= ?2 AND timestamp_ms <= ?3 \
+       AND (timestamp_ms > ?2 OR id <= ?4) \
+     ORDER BY timestamp_ms ASC, id DESC";
+
 /// Maximum number of concurrent reader connections in the pool.
 /// Connections beyond this are closed when returned to the pool.
 const READ_POOL_MAX: usize = 8;
@@ -470,14 +489,15 @@ impl TelemetryDb {
                 // window's newest `limit` rows in two steps over the
                 // (channel_id, timestamp_ms DESC) index, in one read
                 // transaction so both see the same rows. An index-only
-                // walk newest first finds the limit-th row; the rows from
-                // it on are read oldest first, which visits the table in
-                // the order the rows were written. Read newest first, the
-                // same rows cost about 80% more at 50,000 of them: the
-                // table is then visited in descending rowid order. Rows
-                // sharing a timestamp follow the index's rowid order (the
-                // lower rowid first, newest first), so a limit that falls
-                // among them keeps their lower rowids.
+                // walk newest first finds the limit-th row
+                // (CHANNEL_LIMIT_ROW); the rows from it on are read oldest
+                // first (CHANNEL_ROWS_FROM), which visits the table in the
+                // order the rows were written. Read newest first, the same
+                // rows cost about 80% more at 50,000 of them: the table is
+                // then visited in descending rowid order. Neither statement
+                // sorts. Rows sharing a timestamp follow the index's rowid
+                // order (the lower rowid first, newest first), so a limit
+                // that falls among them keeps their lower rowids.
                 let chan_id: Option<i64> = conn
                     .query_row(
                         "SELECT id FROM channels WHERE target_id = ?1 AND name = ?2",
@@ -494,12 +514,7 @@ impl TelemetryDb {
                 let ch_arc: Arc<str> = Arc::from(ch);
                 let tx = conn.unchecked_transaction()?;
                 let limit_th: Option<(i64, i64)> = tx
-                    .prepare_cached(
-                        "SELECT timestamp_ms, id FROM telemetry \
-                         WHERE channel_id = ?1 \
-                           AND timestamp_ms >= ?2 AND timestamp_ms <= ?3 \
-                         ORDER BY timestamp_ms DESC, id ASC LIMIT 1 OFFSET ?4",
-                    )?
+                    .prepare_cached(CHANNEL_LIMIT_ROW)?
                     .query_row(
                         params![
                             chan_id,
@@ -512,13 +527,7 @@ impl TelemetryDb {
                     .optional()?;
                 // No limit-th row: the window holds fewer, all of them.
                 let (from_ts, from_id) = limit_th.unwrap_or((start_ms as i64, i64::MAX));
-                let mut stmt = tx.prepare_cached(
-                    "SELECT timestamp_ms, value, v_min, v_max, agg_count FROM telemetry \
-                     WHERE channel_id = ?1 \
-                       AND timestamp_ms >= ?2 AND timestamp_ms <= ?3 \
-                       AND (timestamp_ms > ?2 OR id <= ?4) \
-                     ORDER BY timestamp_ms ASC, id DESC",
-                )?;
+                let mut stmt = tx.prepare_cached(CHANNEL_ROWS_FROM)?;
                 let rows =
                     stmt.query_map(params![chan_id, from_ts, end_ms as i64, from_id], |row| {
                         Ok(TelemetrySample {
@@ -529,9 +538,16 @@ impl TelemetryDb {
                             envelope: envelope_from_row(row.get(2)?, row.get(3)?, row.get(4)?),
                         })
                     })?;
-                let mut samples = Vec::new();
+                let mut samples: Vec<TelemetrySample> = Vec::new();
                 for row in rows {
                     samples.push(row?);
+                }
+                // The walk oldest first meets rows that share a timestamp
+                // in descending rowid order; turning each such run around
+                // returns them as they were written, the order the
+                // every-channel read gives. A linear pass, not a sort.
+                for run in samples.chunk_by_mut(|a, b| a.timestamp_ms == b.timestamp_ms) {
+                    run.reverse();
                 }
                 Ok(samples)
             } else {
@@ -3077,7 +3093,7 @@ mod tests {
     /// returns exactly `limit` samples for one channel: every sample
     /// newer than that timestamp, and of the tied ones those the index
     /// orders first, the lower rowids (here the first two written), in
-    /// time order.
+    /// time order with the tied ones as written.
     #[test]
     fn query_range_cuts_a_timestamp_tie_at_the_limit() {
         let (_dir, db) = open_temp_db();
@@ -3098,19 +3114,99 @@ mod tests {
             .collect();
         db.insert_batch(&samples).unwrap();
 
-        let out = db.query_range("t1", Some("X"), 0, 10_000, 4).unwrap();
-        assert!(
-            out.windows(2)
-                .all(|w| w[0].timestamp_ms <= w[1].timestamp_ms),
-            "time order"
-        );
-        let mut kept: Vec<(u64, f64)> = out.iter().map(|s| (s.timestamp_ms, s.value)).collect();
-        kept.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let kept: Vec<(u64, f64)> = db
+            .query_range("t1", Some("X"), 0, 10_000, 4)
+            .unwrap()
+            .iter()
+            .map(|s| (s.timestamp_ms, s.value))
+            .collect();
         assert_eq!(
             kept,
             [(2_000, 2.0), (2_000, 3.0), (3_000, 6.0), (4_000, 7.0)],
-            "exactly the limit: both newer samples and two of the tied ones"
+            "exactly the limit: two of the tied ones, as written, then both newer"
         );
+    }
+
+    /// @test Samples of one channel that share a timestamp come back in
+    /// the order they were written.
+    #[test]
+    fn query_range_returns_tied_samples_in_insertion_order() {
+        let (_dir, db) = open_temp_db();
+        let t: Arc<str> = Arc::from("t1");
+        let x: Arc<str> = Arc::from("X");
+        db.insert_batch(&[
+            sample(&t, &x, 5, 1.0),
+            sample(&t, &x, 5, 2.0),
+            sample(&t, &x, 6, 3.0),
+        ])
+        .unwrap();
+        let got: Vec<(u64, f64)> = db
+            .query_range("t1", Some("X"), 0, 10, 10)
+            .unwrap()
+            .iter()
+            .map(|s| (s.timestamp_ms, s.value))
+            .collect();
+        assert_eq!(got, [(5, 1.0), (5, 2.0), (6, 3.0)]);
+    }
+
+    /// @test One channel's samples, ties among them, come back in the
+    /// same order read by channel as read with every channel of the
+    /// target.
+    #[test]
+    fn query_range_orders_one_channel_alike_by_channel_and_by_target() {
+        let (_dir, db) = open_temp_db();
+        let t: Arc<str> = Arc::from("t1");
+        let x: Arc<str> = Arc::from("X");
+        let samples: Vec<TelemetrySample> = [
+            (1, 1.0),
+            (2, 2.0),
+            (2, 3.0),
+            (2, 4.0),
+            (3, 5.0),
+            (4, 6.0),
+            (4, 7.0),
+        ]
+        .iter()
+        .map(|&(ts, v)| sample(&t, &x, ts, v))
+        .collect();
+        db.insert_batch(&samples).unwrap();
+        let read = |channel: Option<&str>| -> Vec<(u64, f64)> {
+            db.query_range("t1", channel, 0, 10, 100)
+                .unwrap()
+                .iter()
+                .map(|s| (s.timestamp_ms, s.value))
+                .collect()
+        };
+        assert_eq!(read(Some("X")), read(None));
+    }
+
+    /// @test Both statements of one channel's history read
+    /// idx_telemetry_chan_ts and sort nothing: no temporary b-tree in
+    /// either plan, the first step from the index alone.
+    #[test]
+    fn channel_history_statements_read_the_index_without_sorting() {
+        let (_dir, db) = open_temp_db();
+        let conn = db.writer.lock().unwrap();
+        for (sql, covering) in [(CHANNEL_LIMIT_ROW, true), (CHANNEL_ROWS_FROM, false)] {
+            let plan: Vec<String> = conn
+                .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+                .unwrap()
+                .query_map(params![1, 0, i64::MAX, 0], |row| row.get::<_, String>(3))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+            let index = if covering {
+                "USING COVERING INDEX idx_telemetry_chan_ts"
+            } else {
+                "USING INDEX idx_telemetry_chan_ts"
+            };
+            assert!(plan.iter().any(|d| d.contains(index)), "{sql}: {plan:?}");
+            assert!(
+                plan.iter().all(|d| !d.contains("TEMP B-TREE")),
+                "{sql}: {plan:?}"
+            );
+            eprintln!("plan: {plan:?}");
+        }
     }
 
     /// @test Preference round trip: set, read back, overwrite,
