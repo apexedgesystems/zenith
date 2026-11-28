@@ -165,9 +165,15 @@ architecture review; work before that is the v0.0.1 tag.
   in the last place off, now keeps its bytes too. A bool holding a value
   other than 0 or 1 is refused instead, as Breaking describes.
   ([#70](https://github.com/apexedgesystems/zenith/pull/70))
-- Tunables keeps 64-bit integer fields exact: an unedited Apply writes
-  back the value read, and a value typed past 2^53 is written as typed
-  instead of rounded, including in nested and variable-length blocks.
+- Tunables never writes an integer other than the one entered: an
+  unedited Apply writes back the 64-bit value read, and a typed value,
+  in nested and variable-length blocks too, is written as typed or
+  refused, naming the field, instead of arriving rounded.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- A telemetry history or CSV request whose `end_ms` lies past 2^63 - 1
+  (`end_ms=18446744073709551615`, say) returns the window's samples
+  instead of none, and one whose `start_ms` lies there returns none
+  instead of all of them.
   ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - Tunables shows field types, and checks 64-bit edits, for a component
   with more than one tunable struct, such as the executive, from the
