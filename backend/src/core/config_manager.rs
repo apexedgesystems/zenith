@@ -108,6 +108,57 @@ impl FieldConstraints {
         }
         Ok(())
     }
+
+    /// Check one float32 value against the rails in float32 terms: the
+    /// value as it is written, against each rail as a float32 holds it
+    /// (the float32 nearest the rail as the dictionary writes it). A
+    /// number, the hex of the bytes it is written as and the number a
+    /// read gives those bytes are one float32, so they get one verdict,
+    /// and a value equal to a rail as written lies inside it: 0.1 under
+    /// max 0.1, though the float32 holding 0.1 exceeds 0.1 as a double.
+    /// A value is on its step when it is the float32 that some on-step
+    /// value (min, or zero, plus a whole number of steps) is written as.
+    pub fn check_single(&self, v: f32) -> Result<(), String> {
+        let rail = |r: &Option<serde_json::Number>| r.as_ref().and_then(serde_json::Number::as_f64);
+        if let Some(min) = rail(&self.min) {
+            if v < min as f32 {
+                return Err(format!("{} below min {}", v, min));
+            }
+        }
+        if let Some(max) = rail(&self.max) {
+            if v > max as f32 {
+                return Err(format!("{} above max {}", v, max));
+            }
+        }
+        if let Some(step) = rail(&self.step) {
+            let base = rail(&self.min).unwrap_or(0.0);
+            if !on_single_step(v, step, base) {
+                return Err(format!("{} not on step {} from {}", v, step, base));
+            }
+        }
+        if let Some(allowed) = &self.allowed {
+            let allowed: Vec<f64> = allowed.iter().filter_map(|a| a.as_f64()).collect();
+            if !allowed.iter().any(|&a| a as f32 == v) {
+                return Err(format!("{} not in allowed set {:?}", v, allowed));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The float32 step rule: `v` is the float32 that some on-step value,
+/// `base` plus a whole number of steps, is written as. The nearest
+/// whole number of steps, or one either side of it, finds that value
+/// whatever the float32 spacing is there. A step that is not positive
+/// checks nothing.
+fn on_single_step(v: f32, step: f64, base: f64) -> bool {
+    if step <= 0.0 {
+        return true;
+    }
+    let k = ((f64::from(v) - base) / step).round();
+    [k - 1.0, k, k + 1.0]
+        .iter()
+        .any(|k| (base + k * step) as f32 == v)
 }
 
 /// The float step rule: `v` lies a whole number of steps from `base`,

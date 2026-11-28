@@ -2245,17 +2245,19 @@ async fn delete_pref(
 
 /// Validate edited values against the dictionary's constraint rails
 /// before anything is encoded or uploaded, whatever form a value comes
-/// in. Arrays apply their rails per element. A JSON value is judged as
-/// the number it is: an 8-byte integer exactly, in any form
-/// `encode_field` takes, any other number as an f64. A field sent as the
-/// hex of its bytes (a float, an array) is judged by the number the
-/// parameter read gives those bytes, through the read's own decode in
-/// the dictionary's byte order (`big_endian`), so the hex and JSON forms
-/// of the same bytes get the same verdict. A float that is not finite
-/// lies outside any rails. A value no number is read from (a string's
-/// text, a form its field does not take) is left to `encode_field`,
-/// which refuses what its field cannot hold. Returns "field: reason"
-/// strings for every violation.
+/// in. Arrays apply their rails per element. A value is judged as the
+/// number its bytes will hold, whether it comes as a JSON number, as
+/// the hex of its bytes (a float, or an array, whole or element by
+/// element), or as an 8-byte integer's string: hex is decoded through
+/// the parameter read's own decode in the dictionary's byte order
+/// (`big_endian`), so every form of the same bytes gets the same
+/// verdict. An 8-byte integer is compared exactly, a float32 in
+/// float32 terms (`FieldConstraints::check_single`), any other number
+/// as an f64. A float that is not finite lies outside any rails. A
+/// value no number is read from (a string's text, a form its field does
+/// not take, a float32 past its range, which `encode_field` refuses) is
+/// left to `encode_field`. Returns "field: reason" strings for every
+/// violation.
 fn constraint_violations(
     fields: &[crate::core::config_manager::FieldDef],
     edits: &serde_json::Map<String, serde_json::Value>,
@@ -2270,7 +2272,9 @@ fn constraint_violations(
         for judged in rail_values(field, value, big_endian) {
             let verdict = match judged {
                 RailValue::Integer(n) => rails.check_integer(n),
+                RailValue::Single(x) if x.is_finite() => rails.check_single(x),
                 RailValue::Number(x) if x.is_finite() => rails.check(x),
+                RailValue::Single(x) => Err(format!("{x} is not finite, so outside the rails")),
                 RailValue::Number(x) => Err(format!("{x} is not finite, so outside the rails")),
             };
             if let Err(reason) = verdict {
@@ -2281,22 +2285,23 @@ fn constraint_violations(
     violations
 }
 
-/// A number a field's rails judge: an 8-byte integer exactly, any other
-/// as the f64 its JSON form carries.
+/// A number a field's rails judge: an 8-byte integer exactly, a float32
+/// as the float32 it is written as, any other as an f64.
 enum RailValue {
     Integer(i128),
+    Single(f32),
     Number(f64),
 }
 
 /// The numbers `value` gives `field` for its rails: one for a scalar,
-/// one per element for an array (as JSON elements, or decoded from the
-/// field's hex form), none where no number is read from it.
+/// one per element for an array, none where no number is read from it.
+/// An array's elements come as JSON elements, each in any form an
+/// element takes, or together as the hex of the whole field.
 fn rail_values(
     field: &crate::core::config_manager::FieldDef,
     value: &serde_json::Value,
     big_endian: bool,
 ) -> Vec<RailValue> {
-    use crate::core::config_manager::{scalar, Scalar};
     let array = field.field_type == "array";
     // The field's own (count, size, type), or its elements'.
     let shape = if array {
@@ -2307,32 +2312,74 @@ fn rail_values(
     let Some((count, size, ty)) = shape else {
         return Vec::new();
     };
-    let wide = matches!((ty, size), ("int" | "uint", 8));
-    let from_json = |v: &serde_json::Value| {
-        if wide {
-            wide_integer(v).ok().map(RailValue::Integer)
-        } else {
-            v.as_f64().map(RailValue::Number)
-        }
-    };
-    // A float or an array takes the hex form of its bytes (an 8-byte
-    // integer's string is a number, read by from_json).
-    let takes_hex = array || matches!((ty, size), ("float", 4) | ("float" | "double", 8));
-    match (value, hex_form(value, field.size)) {
-        (serde_json::Value::Array(a), _) if array => a.iter().filter_map(from_json).collect(),
-        (serde_json::Value::String(_), Some(bytes)) if takes_hex => (0..count)
-            .filter_map(|i| {
-                match scalar(&bytes, &element_def(field, i * size, size, ty), big_endian)? {
-                    Scalar::Integer(n) if wide => Some(RailValue::Integer(n)),
-                    // Every narrower integer is exact as an f64.
-                    Scalar::Integer(n) => Some(RailValue::Number(n as f64)),
-                    Scalar::Float(x) => Some(RailValue::Number(x)),
-                }
-            })
-            .collect(),
-        (v, _) if !array => from_json(v).into_iter().collect(),
+    let element = |v: &serde_json::Value| rail_value(field, v, ty, size, big_endian);
+    match value {
+        serde_json::Value::Array(a) if array => a.iter().filter_map(element).collect(),
+        serde_json::Value::String(_) if array => match hex_form(value, field.size) {
+            Some(bytes) => (0..count)
+                .filter_map(|i| decoded_rail_value(field, &bytes, i * size, size, ty, big_endian))
+                .collect(),
+            None => Vec::new(),
+        },
+        v if !array => element(v).into_iter().collect(),
         _ => Vec::new(),
     }
+}
+
+/// The number one value gives an element of (`ty`, `size`), in any form
+/// the encoder takes for it: an 8-byte integer's JSON integer or string
+/// (`wide_integer`), a float's number or the hex of its bytes, any other
+/// number as it is.
+fn rail_value(
+    field: &crate::core::config_manager::FieldDef,
+    v: &serde_json::Value,
+    ty: &str,
+    size: usize,
+    big_endian: bool,
+) -> Option<RailValue> {
+    match (ty, size) {
+        ("int" | "uint", 8) => wide_integer(v).ok().map(RailValue::Integer),
+        ("float", 4) | ("float" | "double", 8) => match v {
+            serde_json::Value::String(_) => {
+                decoded_rail_value(field, &hex_form(v, size)?, 0, size, ty, big_endian)
+            }
+            v => {
+                let x = v.as_f64()?;
+                // A float32 as the float32 it is written as; one past
+                // float32's range is refused by encode_field.
+                match size {
+                    4 => Some(x as f32)
+                        .filter(|s| s.is_finite())
+                        .map(RailValue::Single),
+                    _ => Some(RailValue::Number(x)),
+                }
+            }
+        },
+        _ => v.as_f64().map(RailValue::Number),
+    }
+}
+
+/// The number an element's bytes hold, at `offset` in `bytes`, as the
+/// parameter read decodes them: an 8-byte integer exactly, a float32 as
+/// itself, any other as an f64 (every narrower integer is exact there).
+fn decoded_rail_value(
+    field: &crate::core::config_manager::FieldDef,
+    bytes: &[u8],
+    offset: usize,
+    size: usize,
+    ty: &str,
+    big_endian: bool,
+) -> Option<RailValue> {
+    use crate::core::config_manager::{scalar, Scalar};
+    Some(
+        match scalar(bytes, &element_def(field, offset, size, ty), big_endian)? {
+            Scalar::Integer(n) if size == 8 => RailValue::Integer(n),
+            Scalar::Integer(n) => RailValue::Number(n as f64),
+            // A float32 widens to f64 exactly, and narrows back the same.
+            Scalar::Float(x) if size == 4 => RailValue::Single(x as f32),
+            Scalar::Float(x) => RailValue::Number(x),
+        },
+    )
 }
 
 /// Encode one edited field into the payload buffer, in its dictionary's
@@ -7726,5 +7773,289 @@ mod tests {
             link.lock().await.disconnect();
         }
         assert!(refused.is_empty(), "{refused:#?}");
+    }
+
+    /// @test The rails judge each element of an array by the value its
+    /// bytes hold, whatever form it comes in, through the real router:
+    /// a float32 element sent as the hex of 11.0 or of +inf under max 10,
+    /// and a double element sent as the hex of 11.0 or of NaN there, are
+    /// refused with 422 naming the field, and nothing reaches the
+    /// vehicle, as 11 as a number and the whole field's hex are. Element
+    /// hex inside the rails uploads.
+    #[tokio::test]
+    async fn the_rails_judge_each_array_element_in_any_form() {
+        let dict: ComponentDict = serde_json::from_value(json!({
+            "component": "Elements",
+            "structs": { "ElementsParams": { "category": "TUNABLE_PARAM", "size": 16, "fields": [
+                { "name": "fl", "type": "array", "offset": 0, "size": 8,
+                  "element_type": "float", "dims": [2], "constraints": { "max": 10 } },
+                { "name": "dl", "type": "array", "offset": 8, "size": 8,
+                  "element_type": "double", "dims": [1], "constraints": { "max": 10 } },
+            ]}},
+        }))
+        .unwrap();
+        let dicts = StructDictionary {
+            components: HashMap::from([("Elements".to_string(), dict)]),
+        };
+        let mut block = 1.0f32.to_le_bytes().to_vec();
+        block.extend(2.0f32.to_le_bytes());
+        block.extend(3.0f64.to_le_bytes());
+        let raw_hex = hex::encode(&block);
+        let (vehicle, sent) = fake_vehicle(block).await;
+        let server = Server::with_dicts(APEX_TARGET, dicts);
+        let link = server.link("target-0").await;
+        link.lock()
+            .await
+            .connect(&vehicle.ip().to_string(), vehicle.port())
+            .await
+            .unwrap();
+        let uri = "/api/targets/target-0/params/00D000/update";
+        let update = |fields: &str| format!(r#"{{"fields":{{{fields}}},"raw_hex":"{raw_hex}"}}"#);
+        let mut wrong = Vec::new();
+
+        for (fields, refusal) in [
+            (r#""fl":["00003041",0]"#, "fl: 11 above max 10"),
+            (
+                r#""fl":[0,"0000807f"]"#,
+                "fl: inf is not finite, so outside the rails",
+            ),
+            (r#""dl":["0000000000002640"]"#, "dl: 11 above max 10"),
+            (
+                r#""dl":["000000000000f87f"]"#,
+                "dl: NaN is not finite, so outside the rails",
+            ),
+            (r#""fl":[11,0]"#, "fl: 11 above max 10"),
+            (r#""fl":"0000304100000000""#, "fl: 11 above max 10"),
+        ] {
+            sent.lock().unwrap().clear();
+            let (status, body) = server.post_text(uri, &update(fields)).await;
+            let reached = !sent.lock().unwrap().is_empty();
+            let want = format!("Constraint violation(s): {refusal}");
+            if (status, body.as_str(), reached)
+                != (StatusCode::UNPROCESSABLE_ENTITY, want.as_str(), false)
+            {
+                wrong.push(format!(
+                    "{fields}: {status} {body} (reached the vehicle: {reached})"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+
+        sent.lock().unwrap().clear();
+        let inside = r#""fl":["00002041",1],"dl":["0000000000002440"]"#;
+        let (status, body) = server.post_text(uri, &update(inside)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let mut want = 10.0f32.to_le_bytes().to_vec();
+        want.extend(1.0f32.to_le_bytes());
+        want.extend(10.0f64.to_le_bytes());
+        assert_eq!(uploaded_payload(&sent), want);
+        link.lock().await.disconnect();
+    }
+
+    /// @test A float32 gets one verdict from its rails in every form,
+    /// in either byte order, as a field or as an array element: the
+    /// number as an operator writes it, the hex of the bytes it is
+    /// written as (whole, or as the element's own hex), and the number
+    /// the read gives for those bytes. A value equal to a rail as the
+    /// dictionary writes it is inside: 0.1 under max 0.1, 0.2, 0.3 and
+    /// 0.001 likewise, 0.7 over min 0.7, 0.1 and 0.5 in the allowed set
+    /// [0.1, 0.5], 1000.1 and 100000.1 on a step of 0.1, and the largest
+    /// float32 under max 3.4028234663852886e38. The float32 one step past
+    /// each rail, and a value off its step or out of its set, is outside.
+    #[test]
+    fn a_float32_gets_one_verdict_in_every_form() {
+        // The float32 one step above, and below, a positive value.
+        let above = |x: f32| f32::from_bits(x.to_bits() + 1);
+        let below = |x: f32| f32::from_bits(x.to_bits() - 1);
+        // Rails, an element inside them to pair a value with in an
+        // array, then each value as written (a float32, and the number
+        // text an operator types for it) and whether it is inside.
+        type Row = (serde_json::Value, f32, Vec<(f32, String, bool)>);
+        let past = |x: f32| (x, format!("{x}"), false);
+        let rows: Vec<Row> = vec![
+            (
+                json!({ "max": 0.1 }),
+                0.0,
+                vec![(0.1, "0.1".into(), true), past(above(0.1))],
+            ),
+            (
+                json!({ "max": 0.2 }),
+                0.0,
+                vec![(0.2, "0.2".into(), true), past(above(0.2))],
+            ),
+            (
+                json!({ "max": 0.3 }),
+                0.0,
+                vec![(0.3, "0.3".into(), true), past(above(0.3))],
+            ),
+            (
+                json!({ "max": 0.001 }),
+                0.0,
+                vec![(0.001, "0.001".into(), true), past(above(0.001))],
+            ),
+            (
+                json!({ "min": 0.7 }),
+                0.7,
+                vec![(0.7, "0.7".into(), true), past(below(0.7))],
+            ),
+            (
+                json!({ "allowed": [0.1, 0.5] }),
+                0.5,
+                vec![
+                    (0.1, "0.1".into(), true),
+                    (0.5, "0.5".into(), true),
+                    (0.3, "0.3".into(), false),
+                    past(above(0.1)),
+                ],
+            ),
+            (
+                json!({ "step": 0.1 }),
+                0.0,
+                vec![
+                    (1000.1, "1000.1".into(), true),
+                    (100000.1, "100000.1".into(), true),
+                    (1000.15, "1000.15".into(), false),
+                    (0.15, "0.15".into(), false),
+                ],
+            ),
+            (
+                json!({ "max": 3.4028234663852886e38 }),
+                0.0,
+                vec![(
+                    f32::MAX,
+                    "340282350000000000000000000000000000000".into(),
+                    true,
+                )],
+            ),
+        ];
+
+        let mut wrong = Vec::new();
+        for big_endian in [false, true] {
+            let ordered = |x: f32| {
+                let mut bytes = x.to_le_bytes().to_vec();
+                if big_endian {
+                    bytes.reverse();
+                }
+                bytes
+            };
+            for (rails, filler, values) in &rows {
+                let scalar: FieldDef = serde_json::from_value(json!({
+                    "name": "f", "type": "float", "offset": 0, "size": 4, "constraints": rails,
+                }))
+                .unwrap();
+                let pair: FieldDef = serde_json::from_value(json!({
+                    "name": "f", "type": "array", "offset": 0, "size": 8,
+                    "element_type": "float", "dims": [2], "constraints": rails,
+                }))
+                .unwrap();
+                for (x, typed, inside) in values {
+                    let typed: serde_json::Value = serde_json::from_str(typed).unwrap();
+                    assert_eq!(
+                        typed.as_f64().map(|t| t as f32),
+                        Some(*x),
+                        "{typed} is not {x}"
+                    );
+                    let hex = json!(hex::encode(ordered(*x)));
+                    let read = json!(f64::from(*x));
+                    let mut pair_hex = ordered(*x);
+                    pair_hex.extend(ordered(*filler));
+                    let other = json!(f64::from(*filler));
+                    let forms = [
+                        (&scalar, typed.clone()),
+                        (&scalar, hex.clone()),
+                        (&scalar, read.clone()),
+                        (&pair, json!([typed, other])),
+                        (&pair, json!([hex, other])),
+                        (&pair, json!([read, other])),
+                        (&pair, json!(hex::encode(pair_hex))),
+                    ];
+                    let verdicts: Vec<Vec<String>> = forms
+                        .iter()
+                        .map(|(def, form)| {
+                            let edits =
+                                serde_json::Map::from_iter([("f".to_string(), form.clone())]);
+                            constraint_violations(std::slice::from_ref(*def), &edits, big_endian)
+                        })
+                        .collect();
+                    if verdicts.iter().any(|v| *v != verdicts[0])
+                        || verdicts[0].is_empty() != *inside
+                    {
+                        wrong.push(format!("be {big_endian} {rails} {x}: {verdicts:?}"));
+                    }
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "verdicts differ or miss: {wrong:#?}");
+    }
+
+    /// @test A float32 applied at its rail applies again unedited, in
+    /// either byte order, through the real router: 0.1 under max 0.1 is
+    /// accepted and written as the float32 nearest 0.1, the read then
+    /// gives that float32 as 0.10000000149011612, and sending the read
+    /// back unedited is accepted and writes the same bytes.
+    #[tokio::test]
+    async fn a_float32_applied_at_its_rail_applies_again_unedited() {
+        for (byte_order, big_endian) in [(None, false), (Some("be"), true)] {
+            let dicts = || {
+                let dict: ComponentDict = serde_json::from_value(json!({
+                    "component": "Fine",
+                    "byte_order": byte_order,
+                    "structs": { "FineParams": { "category": "TUNABLE_PARAM", "size": 4, "fields": [
+                        { "name": "f", "type": "float", "offset": 0, "size": 4,
+                          "constraints": { "max": 0.1 } },
+                    ]}},
+                }))
+                .unwrap();
+                StructDictionary {
+                    components: HashMap::from([("Fine".to_string(), dict)]),
+                }
+            };
+            let mut tenth = 0.1f32.to_le_bytes().to_vec();
+            if big_endian {
+                tenth.reverse();
+            }
+            let uri = "/api/targets/target-0/params/00D000";
+
+            let (vehicle, sent) = fake_vehicle(vec![0; 4]).await;
+            let server = Server::with_dicts(APEX_TARGET, dicts());
+            let link = server.link("target-0").await;
+            link.lock()
+                .await
+                .connect(&vehicle.ip().to_string(), vehicle.port())
+                .await
+                .unwrap();
+            let (status, body) = server
+                .post_text(
+                    &format!("{uri}/update"),
+                    r#"{"fields":{"f":0.1},"raw_hex":"00000000"}"#,
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK, "{byte_order:?} apply: {body}");
+            let written = uploaded_payload(&sent);
+            assert_eq!(written, tenth, "{byte_order:?}");
+            link.lock().await.disconnect();
+
+            // The vehicle now holds what was written; read it back and
+            // send the read back unedited.
+            let (vehicle, sent) = fake_vehicle(written.clone()).await;
+            link.lock()
+                .await
+                .connect(&vehicle.ip().to_string(), vehicle.port())
+                .await
+                .unwrap();
+            let (status, read) = server.get(uri).await;
+            assert_eq!(status, StatusCode::OK, "{read}");
+            assert!(read.contains(r#""f":0.10000000149011612"#), "{read}");
+            sent.lock().unwrap().clear();
+            let unedited = format!(
+                r#"{{"fields":{},"raw_hex":"{}"}}"#,
+                member_text(&read, "fields"),
+                hex::encode(&written)
+            );
+            let (status, body) = server.post_text(&format!("{uri}/update"), &unedited).await;
+            assert_eq!(status, StatusCode::OK, "{byte_order:?} re-apply: {body}");
+            assert_eq!(uploaded_payload(&sent), written, "{byte_order:?}");
+            link.lock().await.disconnect();
+        }
     }
 }

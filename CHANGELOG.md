@@ -154,11 +154,17 @@ architecture review; work before that is the v0.0.1 tag.
   ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - Tunables applies a block holding arrays, strings or other fields it
   shows as hex instead of refusing the update: each such field takes
-  back the hex form it was read as, and a float's or an array's rails
-  judge the values that hex holds as they judge the same values written
-  as numbers. A float that is not finite, or is negative zero (which a
-  browser writes as 0), also reads as hex; one that is not finite lies
-  outside any rails.
+  back the hex form it was read as. The rails judge a float, and each
+  element of an array, by the value its bytes hold, whether it comes as
+  a number, as its own hex or within the whole field's hex, so every
+  form of the same bytes gets one verdict. A float that is not finite,
+  or is negative zero (which a browser writes as 0), also reads as hex;
+  one that is not finite lies outside any rails.
+  ([#70](https://github.com/apexedgesystems/zenith/pull/70))
+- A float32 tunable entered at one of its rails passes them again on an
+  unedited Apply: the rails compare a float32 with each rail as a
+  float32, so 0.1 under max 0.1, 0.7 over min 0.7 and 1000.1 on a step
+  of 0.1 still pass once written and read back.
   ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - An unedited Tunables Apply writes every field back byte for byte,
   whatever its type: a double, which the server could read back a unit
