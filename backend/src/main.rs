@@ -1695,10 +1695,15 @@ async fn update_params(
             .as_ref()
             .ok_or((StatusCode::BAD_REQUEST, "Missing entries".to_string()))?;
 
-        let mut rail_violations = constraint_violations(&hdr_struct.fields, &body.fields);
+        let mut rail_violations =
+            constraint_violations(&hdr_struct.fields, &body.fields, hdr_big_endian);
         if let Some(entries) = body.entries.as_ref() {
             for e in entries {
-                rail_violations.extend(constraint_violations(&ent_struct.fields, e));
+                rail_violations.extend(constraint_violations(
+                    &ent_struct.fields,
+                    e,
+                    ent_big_endian,
+                ));
             }
         }
         if !rail_violations.is_empty() {
@@ -1802,7 +1807,7 @@ async fn update_params(
             ));
         }
 
-        let rail_violations = constraint_violations(&struct_fields, &body.fields);
+        let rail_violations = constraint_violations(&struct_fields, &body.fields, big_endian);
         if !rail_violations.is_empty() {
             return Err((
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -2239,15 +2244,22 @@ async fn delete_pref(
 }
 
 /// Validate edited values against the dictionary's constraint rails
-/// before anything is encoded or uploaded. Arrays apply their rails
-/// per element. An 8-byte integer, in any form `encode_field` takes, is
-/// compared exactly; any other number as an f64. A value neither reads
-/// a number from is left to `encode_field`, which refuses what its
-/// field cannot hold. Returns "field: reason" strings for every
-/// violation.
+/// before anything is encoded or uploaded, whatever form a value comes
+/// in. Arrays apply their rails per element. A JSON value is judged as
+/// the number it is: an 8-byte integer exactly, in any form
+/// `encode_field` takes, any other number as an f64. A field sent as the
+/// hex of its bytes (a float, an array) is judged by the number the
+/// parameter read gives those bytes, through the read's own decode in
+/// the dictionary's byte order (`big_endian`), so the hex and JSON forms
+/// of the same bytes get the same verdict. A float that is not finite
+/// lies outside any rails. A value no number is read from (a string's
+/// text, a form its field does not take) is left to `encode_field`,
+/// which refuses what its field cannot hold. Returns "field: reason"
+/// strings for every violation.
 fn constraint_violations(
     fields: &[crate::core::config_manager::FieldDef],
     edits: &serde_json::Map<String, serde_json::Value>,
+    big_endian: bool,
 ) -> Vec<String> {
     let mut violations = Vec::new();
     for field in fields {
@@ -2255,26 +2267,11 @@ fn constraint_violations(
         else {
             continue;
         };
-        // The values the rails apply to, and the (type, size) of each.
-        let (values, shape): (Vec<&serde_json::Value>, Option<(&str, usize)>) = match value {
-            serde_json::Value::Array(a) => (
-                a.iter().collect(),
-                array_elements(field).map(|(_, size, ty)| (ty, size)),
-            ),
-            v => (vec![v], Some((field.field_type.as_str(), field.size))),
-        };
-        let wide = matches!(shape, Some(("int" | "uint", 8)));
-        for v in values {
-            let verdict = if wide {
-                match wide_integer(v) {
-                    Ok(n) => rails.check_integer(n),
-                    Err(_) => continue,
-                }
-            } else {
-                match v.as_f64() {
-                    Some(n) => rails.check(n),
-                    None => continue,
-                }
+        for judged in rail_values(field, value, big_endian) {
+            let verdict = match judged {
+                RailValue::Integer(n) => rails.check_integer(n),
+                RailValue::Number(x) if x.is_finite() => rails.check(x),
+                RailValue::Number(x) => Err(format!("{x} is not finite, so outside the rails")),
             };
             if let Err(reason) = verdict {
                 violations.push(format!("{}: {}", field.name, reason));
@@ -2282,6 +2279,60 @@ fn constraint_violations(
         }
     }
     violations
+}
+
+/// A number a field's rails judge: an 8-byte integer exactly, any other
+/// as the f64 its JSON form carries.
+enum RailValue {
+    Integer(i128),
+    Number(f64),
+}
+
+/// The numbers `value` gives `field` for its rails: one for a scalar,
+/// one per element for an array (as JSON elements, or decoded from the
+/// field's hex form), none where no number is read from it.
+fn rail_values(
+    field: &crate::core::config_manager::FieldDef,
+    value: &serde_json::Value,
+    big_endian: bool,
+) -> Vec<RailValue> {
+    use crate::core::config_manager::{scalar, Scalar};
+    let array = field.field_type == "array";
+    // The field's own (count, size, type), or its elements'.
+    let shape = if array {
+        array_elements(field)
+    } else {
+        Some((1, field.size, field.field_type.as_str()))
+    };
+    let Some((count, size, ty)) = shape else {
+        return Vec::new();
+    };
+    let wide = matches!((ty, size), ("int" | "uint", 8));
+    let from_json = |v: &serde_json::Value| {
+        if wide {
+            wide_integer(v).ok().map(RailValue::Integer)
+        } else {
+            v.as_f64().map(RailValue::Number)
+        }
+    };
+    // A float or an array takes the hex form of its bytes (an 8-byte
+    // integer's string is a number, read by from_json).
+    let takes_hex = array || matches!((ty, size), ("float", 4) | ("float" | "double", 8));
+    match (value, hex_form(value, field.size)) {
+        (serde_json::Value::Array(a), _) if array => a.iter().filter_map(from_json).collect(),
+        (serde_json::Value::String(_), Some(bytes)) if takes_hex => (0..count)
+            .filter_map(|i| {
+                match scalar(&bytes, &element_def(field, i * size, size, ty), big_endian)? {
+                    Scalar::Integer(n) if wide => Some(RailValue::Integer(n)),
+                    // Every narrower integer is exact as an f64.
+                    Scalar::Integer(n) => Some(RailValue::Number(n as f64)),
+                    Scalar::Float(x) => Some(RailValue::Number(x)),
+                }
+            })
+            .collect(),
+        (v, _) if !array => from_json(v).into_iter().collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Encode one edited field into the payload buffer, in its dictionary's
@@ -2423,18 +2474,7 @@ fn encode_field(
                 ));
             }
             for (i, v) in arr.iter().enumerate() {
-                let elem = crate::core::config_manager::FieldDef {
-                    name: field.name.clone(),
-                    field_type: elem_type.to_string(),
-                    offset: off + i * elem_size,
-                    size: elem_size,
-                    value: serde_json::Value::Null,
-                    element_type: None,
-                    dims: None,
-                    constraints: None,
-                    struct_ref: None,
-                    enum_ref: None,
-                };
+                let elem = element_def(field, off + i * elem_size, elem_size, elem_type);
                 encode_field(buf, &elem, v, big_endian).map_err(|e| format!("element {i}: {e}"))?;
             }
         }
@@ -2474,6 +2514,29 @@ fn array_elements(field: &crate::core::config_manager::FieldDef) -> Option<(usiz
             field.element_type.as_deref().unwrap_or("uint"),
         )
     })
+}
+
+/// One element of an array field as a field of its own, of the
+/// element's type and size at `offset`: what the encoder writes and the
+/// rails decode.
+fn element_def(
+    field: &crate::core::config_manager::FieldDef,
+    offset: usize,
+    size: usize,
+    ty: &str,
+) -> crate::core::config_manager::FieldDef {
+    crate::core::config_manager::FieldDef {
+        name: field.name.clone(),
+        field_type: ty.to_string(),
+        offset,
+        size,
+        value: serde_json::Value::Null,
+        element_type: None,
+        dims: None,
+        constraints: None,
+        struct_ref: None,
+        enum_ref: None,
+    }
 }
 
 /// The integer an 8-byte integer field is given, read exactly: a JSON
@@ -5732,8 +5795,9 @@ mod tests {
               "constraints": { "max": 10 } },
         ]))
         .unwrap();
-        let violations =
-            |edits: serde_json::Value| constraint_violations(&fields, edits.as_object().unwrap());
+        let violations = |edits: serde_json::Value| {
+            constraint_violations(&fields, edits.as_object().unwrap(), false)
+        };
         for over in [
             json!("9007199254740993"),
             json!("0x20000000000001"),
@@ -7374,5 +7438,293 @@ mod tests {
             link.lock().await.disconnect();
         }
         assert!(changed.is_empty(), "changed: {changed:#?}");
+    }
+
+    /* ---- The rails judge a field sent in its hex form ---- */
+
+    /// @test The rails judge a field sent as the hex of its bytes by the
+    /// value those bytes hold, through the real router: 11.0's hex on a
+    /// double with max 10, the hex of +inf there, and a uint64 array's
+    /// hex holding 2^64 - 1 under max 100 are each refused with 422
+    /// naming the field, and nothing reaches the vehicle, as their JSON
+    /// forms (11, [101, 1]) are. Hex forms inside the rails upload.
+    #[tokio::test]
+    async fn the_rails_judge_a_field_sent_as_its_hex() {
+        let dict: ComponentDict = serde_json::from_value(json!({
+            "component": "Rails",
+            "structs": { "RailsParams": { "category": "TUNABLE_PARAM", "size": 24, "fields": [
+                { "name": "d", "type": "double", "offset": 0, "size": 8,
+                  "constraints": { "max": 10 } },
+                { "name": "list", "type": "array", "offset": 8, "size": 16,
+                  "element_type": "uint", "dims": [2], "constraints": { "max": 100 } },
+            ]}},
+        }))
+        .unwrap();
+        let dicts = StructDictionary {
+            components: HashMap::from([("Rails".to_string(), dict)]),
+        };
+        let mut block = 1.0f64.to_le_bytes().to_vec();
+        block.extend(1u64.to_le_bytes());
+        block.extend(2u64.to_le_bytes());
+        let raw_hex = hex::encode(&block);
+        let (vehicle, sent) = fake_vehicle(block).await;
+        let server = Server::with_dicts(APEX_TARGET, dicts);
+        let link = server.link("target-0").await;
+        link.lock()
+            .await
+            .connect(&vehicle.ip().to_string(), vehicle.port())
+            .await
+            .unwrap();
+        let uri = "/api/targets/target-0/params/00D000/update";
+        let update = |fields: &str| format!(r#"{{"fields":{{{fields}}},"raw_hex":"{raw_hex}"}}"#);
+        let mut wrong = Vec::new();
+
+        for (fields, refusal) in [
+            (r#""d":"0000000000002640""#, "d: 11 above max 10"),
+            (
+                r#""d":"000000000000f07f""#,
+                "d: inf is not finite, so outside the rails",
+            ),
+            (
+                r#""list":"ffffffffffffffff0100000000000000""#,
+                "list: 18446744073709551615 above max 100",
+            ),
+            (r#""d":11"#, "d: 11 above max 10"),
+            (r#""list":[101,1]"#, "list: 101 above max 100"),
+        ] {
+            sent.lock().unwrap().clear();
+            let (status, body) = server.post_text(uri, &update(fields)).await;
+            let reached = !sent.lock().unwrap().is_empty();
+            let want = format!("Constraint violation(s): {refusal}");
+            if (status, body.as_str(), reached)
+                != (StatusCode::UNPROCESSABLE_ENTITY, want.as_str(), false)
+            {
+                wrong.push(format!(
+                    "{fields}: {status} {body} (reached the vehicle: {reached})"
+                ));
+            }
+        }
+        assert!(wrong.is_empty(), "{wrong:#?}");
+
+        sent.lock().unwrap().clear();
+        let inside = r#""d":"0000000000002440","list":"64000000000000000100000000000000""#;
+        let (status, body) = server.post_text(uri, &update(inside)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let mut want = 10.0f64.to_le_bytes().to_vec();
+        want.extend(100u64.to_le_bytes());
+        want.extend(1u64.to_le_bytes());
+        assert_eq!(uploaded_payload(&sent), want);
+        link.lock().await.disconnect();
+    }
+
+    /// @test The hex and JSON forms of the same bytes get one verdict
+    /// from the rails, in either byte order: a double past its max, at
+    /// it and at negative zero; float32s at the nearest value to a
+    /// decimal rail and one step past, and exactly at a rail and one step
+    /// past; uint64 and int16 arrays one past a rail and at it; a float32
+    /// array at both rails and one step past. A non-finite element in
+    /// hex is outside the rails.
+    #[test]
+    fn hex_and_json_forms_of_the_same_bytes_get_one_verdict() {
+        // A field's definition, the values its bytes hold, and whether
+        // they lie outside its rails.
+        enum Held {
+            Double(f64),
+            Single(f32),
+            Wide(Vec<u64>),
+            Short(Vec<i16>),
+            Singles(Vec<f32>),
+        }
+        // The next float32 above a positive value, and below a nonzero one.
+        let above = |x: f32| f32::from_bits(x.to_bits() + 1);
+        let below = |x: f32| {
+            if x > 0.0 {
+                f32::from_bits(x.to_bits() - 1)
+            } else {
+                f32::from_bits(x.to_bits() + 1)
+            }
+        };
+        let field = |ty: &str,
+                     size: usize,
+                     element: Option<(&str, usize)>,
+                     rails: serde_json::Value| {
+            let mut def =
+                json!({ "name": "f", "type": ty, "offset": 0, "size": size, "constraints": rails });
+            if let Some((element_type, count)) = element {
+                def["element_type"] = json!(element_type);
+                def["dims"] = json!([count]);
+            }
+            serde_json::from_value::<FieldDef>(def).unwrap()
+        };
+        let double = field("double", 8, None, json!({ "min": 0, "max": 10 }));
+        let tenth = field("float", 4, None, json!({ "min": 0.1 }));
+        let capped = field("float", 4, None, json!({ "max": 2.5 }));
+        let wide = field("array", 16, Some(("uint", 2)), json!({ "max": 100 }));
+        let short = field("array", 4, Some(("int", 2)), json!({ "min": -5 }));
+        let gains = field(
+            "array",
+            16,
+            Some(("float", 4)),
+            json!({ "min": -1.0, "max": 1.0 }),
+        );
+        let rows: Vec<(&FieldDef, Held, bool)> = vec![
+            (&double, Held::Double(11.0), true),
+            (&double, Held::Double(10.0), false),
+            (&double, Held::Double(-0.0), false),
+            (&tenth, Held::Single(0.1), false),
+            (&tenth, Held::Single(below(0.1)), true),
+            (&capped, Held::Single(2.5), false),
+            (&capped, Held::Single(above(2.5)), true),
+            (&wide, Held::Wide(vec![u64::MAX, 1]), true),
+            (&wide, Held::Wide(vec![101, 1]), true),
+            (&wide, Held::Wide(vec![100, 0]), false),
+            (&short, Held::Short(vec![-6, 0]), true),
+            (&short, Held::Short(vec![-5, 3]), false),
+            (&gains, Held::Singles(vec![1.0, -1.0, 0.5, 0.0]), false),
+            (&gains, Held::Singles(vec![above(1.0), 0.0, 0.0, 0.0]), true),
+            (
+                &gains,
+                Held::Singles(vec![0.0, below(-1.0), 0.0, 0.0]),
+                true,
+            ),
+        ];
+
+        let mut wrong = Vec::new();
+        for big_endian in [false, true] {
+            let ordered = |le: &[u8]| {
+                let mut bytes = le.to_vec();
+                if big_endian {
+                    bytes.reverse();
+                }
+                bytes
+            };
+            for (def, held, outside) in &rows {
+                let (bytes, json_form): (Vec<u8>, serde_json::Value) = match held {
+                    Held::Double(x) => (ordered(&x.to_le_bytes()), json!(x)),
+                    Held::Single(x) => (ordered(&x.to_le_bytes()), json!(f64::from(*x))),
+                    Held::Wide(v) => (
+                        v.iter().flat_map(|x| ordered(&x.to_le_bytes())).collect(),
+                        json!(v),
+                    ),
+                    Held::Short(v) => (
+                        v.iter().flat_map(|x| ordered(&x.to_le_bytes())).collect(),
+                        json!(v),
+                    ),
+                    Held::Singles(v) => (
+                        v.iter().flat_map(|x| ordered(&x.to_le_bytes())).collect(),
+                        json!(v.iter().map(|x| f64::from(*x)).collect::<Vec<_>>()),
+                    ),
+                };
+                let verdict = |form: serde_json::Value| {
+                    let edits = serde_json::Map::from_iter([("f".to_string(), form)]);
+                    constraint_violations(std::slice::from_ref(*def), &edits, big_endian)
+                };
+                let (by_hex, by_json) = (verdict(json!(hex::encode(&bytes))), verdict(json_form));
+                if by_hex != by_json || by_hex.is_empty() == *outside {
+                    wrong.push(format!(
+                        "be {big_endian} {} {}: hex {by_hex:?}, json {by_json:?}",
+                        def.field_type,
+                        hex::encode(&bytes)
+                    ));
+                }
+            }
+            let nan: Vec<u8> = [f32::NAN, 0.0, 0.0, 0.0]
+                .iter()
+                .flat_map(|x| ordered(&x.to_le_bytes()))
+                .collect();
+            let edits = serde_json::Map::from_iter([("f".to_string(), json!(hex::encode(&nan)))]);
+            let verdict = constraint_violations(std::slice::from_ref(&gains), &edits, big_endian);
+            if verdict != ["f: NaN is not finite, so outside the rails"] {
+                wrong.push(format!("be {big_endian} NaN element: {verdict:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "verdicts differ or miss: {wrong:#?}");
+    }
+
+    /// @test Every railed tunable block the shipped dictionaries define
+    /// applies unedited: filled with each field's dictionary value, read
+    /// through the router and sent back as the read's JSON text, its hex
+    /// forms included, each passes its rails and uploads its own bytes.
+    #[tokio::test]
+    async fn every_railed_shipped_block_applies_unedited() {
+        let targets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../targets");
+        let mut seen = std::collections::HashSet::new();
+        let mut blocks = Vec::new();
+        let mut dirs: Vec<_> = std::fs::read_dir(&targets)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .collect();
+        dirs.sort();
+        for dir in dirs {
+            let Ok(files) = std::fs::read_dir(dir.join("structs")) else {
+                continue;
+            };
+            let mut files: Vec<_> = files.flatten().map(|e| e.path()).collect();
+            files.sort();
+            for path in files {
+                let Ok(dict) = serde_json::from_str::<ComponentDict>(
+                    &std::fs::read_to_string(&path).unwrap_or_default(),
+                ) else {
+                    continue;
+                };
+                for (name, sdef) in &dict.structs {
+                    let railed = sdef.fields.iter().any(|f| f.constraints.is_some());
+                    let key = (
+                        dict.component.clone(),
+                        name.clone(),
+                        serde_json::to_string(&sdef.fields).unwrap(),
+                    );
+                    if sdef.category == "TUNABLE_PARAM" && railed && seen.insert(key) {
+                        blocks.push((dict.clone(), name.clone()));
+                    }
+                }
+            }
+        }
+        assert!(!blocks.is_empty(), "no railed shipped block found");
+
+        let uri = "/api/targets/target-0/params/00D000";
+        let mut refused = Vec::new();
+        for (mut dict, name) in blocks {
+            // This block and the fragments it nests, nothing a read could
+            // pair it with.
+            dict.structs
+                .retain(|n, s| *n == name || s.category != "TUNABLE_PARAM");
+            let sdef = &dict.structs[&name];
+            let mut block = vec![0u8; sdef.size];
+            for field in crate::core::config_manager::expanded_fields(&dict, &sdef.fields, 0) {
+                if !field.value.is_null() {
+                    let _ = encode_field(&mut block, &field, &field.value, dict.big_endian());
+                }
+            }
+            let component = dict.component.clone();
+            let dicts = StructDictionary {
+                components: HashMap::from([(component.clone(), dict)]),
+            };
+            let (vehicle, sent) = fake_vehicle(block.clone()).await;
+            let server = Server::with_dicts(APEX_TARGET, dicts);
+            let link = server.link("target-0").await;
+            link.lock()
+                .await
+                .connect(&vehicle.ip().to_string(), vehicle.port())
+                .await
+                .unwrap();
+            let (status, read) = server.get(uri).await;
+            assert_eq!(status, StatusCode::OK, "{component} {name}: {read}");
+            sent.lock().unwrap().clear();
+            let unedited = format!(
+                r#"{{"fields":{},"raw_hex":"{}"}}"#,
+                member_text(&read, "fields"),
+                hex::encode(&block)
+            );
+            let (status, body) = server.post_text(&format!("{uri}/update"), &unedited).await;
+            if status != StatusCode::OK {
+                refused.push(format!("{component} {name}: {status} {body}"));
+            } else if uploaded_payload(&sent) != block {
+                refused.push(format!("{component} {name}: uploaded other bytes"));
+            }
+            link.lock().await.disconnect();
+        }
+        assert!(refused.is_empty(), "{refused:#?}");
     }
 }

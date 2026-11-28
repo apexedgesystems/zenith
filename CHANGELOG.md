@@ -38,12 +38,13 @@ architecture review; work before that is the v0.0.1 tag.
   ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - API clients: a tunable read, `GET /api/targets/{id}/params/{uid}`,
   gives each 8-byte integer field (int64 and uint64) as a string holding
-  its exact decimal value, `"18446744073709551615"`, instead of a
-  number, which a browser's JSON rounds past 2^53. An update takes such
-  a field as that string, a `0x` hex string or a JSON integer, each read
-  exactly; a fraction, an exponent, a value outside the type or a
-  hex-bytes string is refused with 400 naming the field, and a string of
-  digits is always decimal.
+  its exact decimal value, `"18446744073709551615"`. An int64 used to
+  read as the hex of its bytes, and a uint64 as a number, which a
+  browser's JSON rounds past 2^53. An update takes such a field as that
+  string, a `0x` hex string or a JSON integer, each read exactly; a
+  fraction, an exponent, a value outside the type or a hex-bytes string
+  is refused with 400 naming the field, and a string of digits is always
+  decimal.
   ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - The image runs zenith as an unprivileged user (uid 10001) instead of
   root; its entrypoint hands an existing data volume to that user on
@@ -153,8 +154,11 @@ architecture review; work before that is the v0.0.1 tag.
   ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - Tunables applies a block holding arrays, strings or other fields it
   shows as hex instead of refusing the update: each such field takes
-  back the hex form it was read as. A float that is not finite, or is
-  negative zero (which a browser writes as 0), also reads as hex.
+  back the hex form it was read as, and a float's or an array's rails
+  judge the values that hex holds as they judge the same values written
+  as numbers. A float that is not finite, or is negative zero (which a
+  browser writes as 0), also reads as hex; one that is not finite lies
+  outside any rails.
   ([#70](https://github.com/apexedgesystems/zenith/pull/70))
 - An unedited Tunables Apply writes every field back byte for byte,
   whatever its type: a double, which the server could read back a unit

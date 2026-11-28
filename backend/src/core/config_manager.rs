@@ -614,9 +614,10 @@ impl StructDictionary {
 /* ----------------------------- Field Decoding ----------------------------- */
 
 /// A scalar field's value as its bytes hold it: an integer exactly, a
-/// float as the f64 it widens to.
+/// float as the f64 it widens to, which is the number a parameter read
+/// gives it.
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Scalar {
+pub enum Scalar {
     Integer(i128),
     Float(f64),
 }
@@ -624,7 +625,9 @@ enum Scalar {
 /// The scalar `field` holds in `data`, read by its (type, size) in the
 /// dictionary's byte order; None for a (type, size) that holds none (an
 /// array, a string, a nested blob, an odd width). A bool is its byte.
-fn scalar(data: &[u8], field: &FieldDef, big_endian: bool) -> Option<Scalar> {
+/// The parameter read decodes every scalar through this, and the update's
+/// rails judge a field sent as the hex of its bytes through it too.
+pub fn scalar(data: &[u8], field: &FieldDef, big_endian: bool) -> Option<Scalar> {
     let off = field.offset;
     // The field's N bytes, least significant first.
     let le = |n: usize| {
