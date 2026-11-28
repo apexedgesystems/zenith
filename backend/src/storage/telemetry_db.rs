@@ -71,6 +71,14 @@ pub struct TelemetryDb {
 /// Insert-path cache key: (target_id, channel name).
 type ChannelKey = (Arc<str>, Arc<str>);
 
+/// A millisecond bound as the signed integer SQLite compares it with.
+/// Stored timestamps are at most i64::MAX, so a bound past it is held
+/// there: an end past it bounds nothing, and a start past it lies past
+/// every sample. A wrapping cast would make either bound negative.
+fn sql_ms(ms: u64) -> i64 {
+    i64::try_from(ms).unwrap_or(i64::MAX)
+}
+
 /// One channel's history, step one: the limit-th newest row of the
 /// window (OFFSET limit - 1), timestamp and rowid, walked newest first
 /// over `idx_telemetry_chan_ts` alone. The index keeps rows that share a
@@ -518,18 +526,18 @@ impl TelemetryDb {
                     .query_row(
                         params![
                             chan_id,
-                            start_ms as i64,
-                            end_ms as i64,
+                            sql_ms(start_ms),
+                            sql_ms(end_ms),
                             i64::try_from(limit - 1).unwrap_or(i64::MAX)
                         ],
                         |row| Ok((row.get(0)?, row.get(1)?)),
                     )
                     .optional()?;
                 // No limit-th row: the window holds fewer, all of them.
-                let (from_ts, from_id) = limit_th.unwrap_or((start_ms as i64, i64::MAX));
+                let (from_ts, from_id) = limit_th.unwrap_or((sql_ms(start_ms), i64::MAX));
                 let mut stmt = tx.prepare_cached(CHANNEL_ROWS_FROM)?;
                 let rows =
-                    stmt.query_map(params![chan_id, from_ts, end_ms as i64, from_id], |row| {
+                    stmt.query_map(params![chan_id, from_ts, sql_ms(end_ms), from_id], |row| {
                         Ok(TelemetrySample {
                             target_id: Arc::clone(&target_arc),
                             timestamp_ms: row.get::<_, i64>(0)? as u64,
@@ -569,7 +577,7 @@ impl TelemetryDb {
                 // One Arc per distinct channel name, shared across rows.
                 let mut name_arcs: HashMap<String, Arc<str>> = HashMap::new();
                 let rows = stmt.query_map(
-                    params![target_id, start_ms as i64, end_ms as i64, limit as i64],
+                    params![target_id, sql_ms(start_ms), sql_ms(end_ms), limit as i64],
                     |row| {
                         Ok((
                             row.get::<_, String>(0)?,
@@ -1041,7 +1049,7 @@ impl TelemetryDb {
             let count: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM telemetry \
                  WHERE timestamp_ms >= ?1 AND timestamp_ms < ?2",
-                params![start_ms as i64, end_ms as i64],
+                params![sql_ms(start_ms), sql_ms(end_ms)],
                 |row| row.get(0),
             )?;
             Ok(count as u64)
@@ -3178,6 +3186,53 @@ mod tests {
                 .collect()
         };
         assert_eq!(read(Some("X")), read(None));
+    }
+
+    /// @test A window bound past i64::MAX reads as open, by channel and
+    /// by target: an end there bounds nothing, so every sample from the
+    /// start comes back, and a start there lies past every sample, so
+    /// none does.
+    #[test]
+    fn query_range_reads_a_bound_past_i64_max_as_open() {
+        let (_dir, db) = open_temp_db();
+        let t: Arc<str> = Arc::from("t1");
+        let x: Arc<str> = Arc::from("X");
+        db.insert_batch(&[sample(&t, &x, 1_000, 1.0), sample(&t, &x, 2_000, 2.0)])
+            .unwrap();
+        for channel in [Some("X"), None] {
+            for end in [1 << 63, u64::MAX] {
+                assert_eq!(
+                    db.query_range("t1", channel, 0, end, 10).unwrap().len(),
+                    2,
+                    "{channel:?}: end {end}"
+                );
+            }
+            for start in [1 << 63, u64::MAX] {
+                assert!(
+                    db.query_range("t1", channel, start, 10_000, 10)
+                        .unwrap()
+                        .is_empty(),
+                    "{channel:?}: start {start}"
+                );
+            }
+        }
+    }
+
+    /// @test count_range reads a bound past i64::MAX the same way: an end
+    /// there counts every sample from the start, a start there none.
+    #[test]
+    fn count_range_reads_a_bound_past_i64_max_as_open() {
+        let (_dir, db) = open_temp_db();
+        let t: Arc<str> = Arc::from("t1");
+        let x: Arc<str> = Arc::from("X");
+        db.insert_batch(&[sample(&t, &x, 1_000, 1.0), sample(&t, &x, 2_000, 2.0)])
+            .unwrap();
+        for end in [1 << 63, u64::MAX] {
+            assert_eq!(db.count_range(0, end).unwrap(), 2, "end {end}");
+        }
+        for start in [1 << 63, u64::MAX] {
+            assert_eq!(db.count_range(start, 10_000).unwrap(), 0, "start {start}");
+        }
     }
 
     /// @test Both statements of one channel's history read
